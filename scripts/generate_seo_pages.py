@@ -119,11 +119,17 @@ def call_llm(api_key: str, system: str, user: str, max_tokens: int = 4096) -> st
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        t0 = time.time()
+        with urllib.request.urlopen(req, timeout=90) as resp:
             data = json.loads(resp.read())
+            dt = time.time() - t0
+            print(f"    LLM call: {dt:.1f}s", flush=True)
             return data["choices"][0]["message"]["content"].strip()
+    except urllib.error.URLError as e:
+        print(f"    LLM TIMEOUT/NET ERROR after {time.time() - t0:.0f}s: {e}", file=sys.stderr, flush=True)
+        return ""
     except Exception as e:
-        print(f"  LLM ERROR: {e}", file=sys.stderr)
+        print(f"    LLM ERROR: {e}", file=sys.stderr, flush=True)
         return ""
 
 
@@ -444,6 +450,8 @@ description: "{art['topic']}"
 def main():
     import argparse
 
+    t0 = time.time()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=DOCS_DIR)
@@ -456,7 +464,7 @@ def main():
     services = load_services(args.backend_dir)
     api_key = "" if args.no_llm else get_api_key()
     if not api_key and not args.no_llm:
-        print("WARNING: ACEDATACLOUD_OPENAI_KEY not set, tutorials use fallback")
+        print("WARNING: ACEDATACLOUD_OPENAI_KEY not set, tutorials use fallback", flush=True)
 
     tutorial_svcs = [
         s
@@ -464,30 +472,63 @@ def main():
         if s.get("type") == "Api" and s.get("apis") and not s.get("private")
     ]
 
+    # Calculate totals for progress
+    total_tutorials = len(tutorial_svcs) * 3  # 3 languages each
+    total_comps = len(COMPARISONS)
+    total_ucs = len(USE_CASES)
+    total_blogs = len(BLOG_ARTICLES)
+    total_all = total_tutorials + total_comps + total_ucs + total_blogs
+    done = 0
+
     stats = {"tutorials": 0, "comparisons": 0, "use_cases": 0, "blog": 0}
 
-    print("Generating tutorials...")
-    for svc in tutorial_svcs:
+    print(f"SEO generation: {total_all} total items ({total_tutorials} tutorials, {total_comps} comparisons, {total_ucs} use-cases, {total_blogs} blog)", flush=True)
+
+    print(f"\n--- Tutorials ({total_tutorials}) ---", flush=True)
+    for i, svc in enumerate(tutorial_svcs):
+        alias = svc.get("alias", "?")
         for lang in ["python", "javascript", "curl"]:
+            done += 1
             if gen_tutorial(api_key, svc, lang, out):
                 stats["tutorials"] += 1
+        elapsed = time.time() - t0
+        print(f"  [{done}/{total_all}] {alias} done ({elapsed:.1f}s)", flush=True)
 
-    print("Generating comparisons...")
+    print(f"\n--- Comparisons ({total_comps}) ---", flush=True)
     for comp in COMPARISONS:
-        if gen_comparison(api_key, comp, services, out):
+        done += 1
+        t1 = time.time()
+        ok = gen_comparison(api_key, comp, services, out)
+        dt = time.time() - t1
+        status = "OK" if ok else "SKIP"
+        print(f"  [{done}/{total_all}] {comp['slug']} → {status} ({dt:.1f}s)", flush=True)
+        if ok:
             stats["comparisons"] += 1
 
-    print("Generating use cases...")
+    print(f"\n--- Use cases ({total_ucs}) ---", flush=True)
     for uc in USE_CASES:
-        if gen_use_case(api_key, uc, services, out):
+        done += 1
+        t1 = time.time()
+        ok = gen_use_case(api_key, uc, services, out)
+        dt = time.time() - t1
+        status = "OK" if ok else "SKIP"
+        print(f"  [{done}/{total_all}] {uc['slug']} → {status} ({dt:.1f}s)", flush=True)
+        if ok:
             stats["use_cases"] += 1
 
-    print("Generating blog...")
+    print(f"\n--- Blog ({total_blogs}) ---", flush=True)
     for art in BLOG_ARTICLES:
-        if gen_blog(api_key, art, out):
+        done += 1
+        t1 = time.time()
+        ok = gen_blog(api_key, art, out)
+        dt = time.time() - t1
+        status = "OK" if ok else "SKIP"
+        print(f"  [{done}/{total_all}] {art['slug']} → {status} ({dt:.1f}s)", flush=True)
+        if ok:
             stats["blog"] += 1
 
-    print(f"\nSEO generation complete: tutorials={stats['tutorials']} comparisons={stats['comparisons']} use-cases={stats['use_cases']} blog={stats['blog']}")
+    elapsed = time.time() - t0
+    print(f"\nSEO generation complete in {elapsed:.1f}s: tutorials={stats['tutorials']} comparisons={stats['comparisons']} use-cases={stats['use_cases']} blog={stats['blog']}", flush=True)
 
 
 if __name__ == "__main__":

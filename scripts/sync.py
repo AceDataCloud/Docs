@@ -18,8 +18,17 @@ import re
 import shutil
 import subprocess
 import sys
+import time as _time
 from pathlib import Path
 from typing import Optional
+
+_T0 = _time.time()
+
+
+def log(msg: str = ""):
+    """Log with elapsed time — flushed immediately for CI visibility."""
+    elapsed = _time.time() - _T0
+    print(f"[{elapsed:6.1f}s] {msg}", flush=True)
 
 # ---------------------------------------------------------------------------
 # Config: display order + icons for categories, docs to skip.
@@ -733,11 +742,16 @@ def main():
     backend_dir = Path(args.backend_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
 
-    print(f"Backend: {backend_dir}")
-    print(f"Output:  {output_dir}")
+    log(f"Backend: {backend_dir}")
+    log(f"Output:  {output_dir}")
+    log()
 
     # Load service mapping
+    log("=" * 60)
+    log("Step 1/8: Generate OpenAPI specs")
+    log("=" * 60)
     services = load_service_mapping(backend_dir)
+    log(f"Loaded {len(services)} services from mapping")
     service_by_alias: dict[str, dict] = {}
 
     for svc in services:
@@ -775,9 +789,9 @@ def main():
             with open(out_path, "w") as f:
                 json.dump(spec, f, indent=2, ensure_ascii=False)
             generated_specs.add(alias)
-            print(f"  OpenAPI: {alias} ({len(spec['paths'])} endpoints)")
+            log(f"  OpenAPI: {alias} ({len(spec['paths'])} endpoints)")
 
-    print(f"Generated {len(generated_specs)} OpenAPI specs")
+    log(f"Step 1 done: {len(generated_specs)} OpenAPI specs")
 
     # ---------------------------------------------------------------------------
     # 2. Convert development guides to MDX
@@ -788,6 +802,10 @@ def main():
         shutil.rmtree(guides_dir)
     guides_dir.mkdir(parents=True, exist_ok=True)
 
+    log()
+    log("=" * 60)
+    log("Step 2/8: Convert development guides to MDX")
+    log("=" * 60)
     dev_docs_by_service: dict[str, list[str]] = {}  # alias → [doc_key, ...]
     docs_dir = backend_dir / "docs"
 
@@ -808,13 +826,17 @@ def main():
 
         dev_docs_by_service.setdefault(service_alias, []).append(doc_key)
 
-    print(
-        f"Generated {sum(len(v) for v in dev_docs_by_service.values())} guide pages across {len(dev_docs_by_service)} services"
+    log(
+        f"Step 2 done: {sum(len(v) for v in dev_docs_by_service.values())} guide pages across {len(dev_docs_by_service)} services"
     )
 
     # ---------------------------------------------------------------------------
     # 3. MCP docs
     # ---------------------------------------------------------------------------
+    log()
+    log("=" * 60)
+    log("Step 3/8: MCP docs")
+    log("=" * 60)
     mcp_dir = output_dir / "mcp"
     if mcp_dir.exists():
         shutil.rmtree(mcp_dir)
@@ -852,11 +874,15 @@ Ace Data Cloud 提供 MCP（Model Context Protocol）服务器，让 Claude、Cu
 </CardGroup>
 """
     (mcp_dir / "overview.mdx").write_text(mcp_overview, encoding="utf-8")
-    print(f"Generated {mcp_count} MCP pages")
+    log(f"Step 3 done: {mcp_count} MCP pages")
 
     # ---------------------------------------------------------------------------
     # 4. Extra docs (privacy, terms, support, x402, etc.)
     # ---------------------------------------------------------------------------
+    log()
+    log("=" * 60)
+    log("Step 4/8: Extra docs")
+    log("=" * 60)
     resources_dir = output_dir / "resources"
     resources_dir.mkdir(parents=True, exist_ok=True)
 
@@ -879,9 +905,11 @@ Ace Data Cloud 提供 MCP（Model Context Protocol）服务器，让 Claude、Cu
         mdx = convert_dev_doc_to_mdx(content, "x402_integration_guide", "x402")
         (guides_dir / "x402.mdx").write_text(mdx, encoding="utf-8")
 
-    # ---------------------------------------------------------------------------
-    # 5. Generate static pages
-    # ---------------------------------------------------------------------------
+    log("Step 4 done")
+    log()
+    log("=" * 60)
+    log("Step 5/8: Generate static pages")
+    log("=" * 60)
 
     # Introduction page
     intro = """---
@@ -1107,25 +1135,33 @@ Authorization: Bearer YOUR_API_TOKEN
 """
     (api_ref_dir / "introduction.mdx").write_text(api_intro, encoding="utf-8")
 
+    log("Step 5 done")
+
     # ---------------------------------------------------------------------------
     # 6. Generate SEO pages (tutorials, comparisons, use-cases, blog)
     # ---------------------------------------------------------------------------
+    log()
+    log("=" * 60)
+    log("Step 6/8: Generate SEO pages (tutorials, comparisons, use-cases, blog)")
+    log("=" * 60)
     seo_script = Path(__file__).parent / "generate_seo_pages.py"
     if seo_script.exists():
-        print("Running SEO page generation...")
+        log("Running SEO page generation...")
         result = subprocess.run(
-            [sys.executable, str(seo_script), "--backend-dir", str(backend_dir), "--output-dir", str(output_dir)],
-            capture_output=True,
-            text=True,
+            [sys.executable, "-u", str(seo_script), "--backend-dir", str(backend_dir), "--output-dir", str(output_dir)],
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
-        if result.stdout:
-            print(result.stdout)
         if result.returncode != 0:
-            print(f"  SEO generation warning: {result.stderr}", file=sys.stderr)
+            log(f"  SEO generation exited with code {result.returncode}")
+    log("Step 6 done")
 
     # ---------------------------------------------------------------------------
     # 7. Generate docs.json
     # ---------------------------------------------------------------------------
+    log()
+    log("=" * 60)
+    log("Step 7/8: Generate docs.json")
+    log("=" * 60)
     navigation = build_navigation(
         categories, service_names, dev_docs_by_service, output_dir
     )
@@ -1198,11 +1234,15 @@ Authorization: Bearer YOUR_API_TOKEN
 
     with open(output_dir / "docs.json", "w") as f:
         json.dump(docs_json, f, indent=2, ensure_ascii=False)
-    print("Generated docs.json")
+    log("Step 7 done: Generated docs.json")
 
     # ---------------------------------------------------------------------------
     # 8. Cleanup: remove old starter template files
     # ---------------------------------------------------------------------------
+    log()
+    log("=" * 60)
+    log("Step 8/8: Cleanup")
+    log("=" * 60)
     starter_files = [
         "development.mdx",
         "essentials/settings.mdx",
@@ -1226,7 +1266,7 @@ Authorization: Bearer YOUR_API_TOKEN
         p = output_dir / f
         if p.exists():
             p.unlink()
-            print(f"  Removed starter file: {f}")
+            log(f"  Removed starter file: {f}")
 
     # Remove empty dirs
     for d in ["essentials", "ai-tools", "snippets", "api-reference/endpoint"]:
@@ -1234,10 +1274,14 @@ Authorization: Bearer YOUR_API_TOKEN
         if dp.exists() and not any(dp.iterdir()):
             dp.rmdir()
 
-    print("\nSync complete!")
-    print(f"  OpenAPI specs: {len(generated_specs)}")
-    print(f"  Guide pages:   {sum(len(v) for v in dev_docs_by_service.values())}")
-    print(f"  MCP pages:     {mcp_count}")
+    log()
+    log("=" * 60)
+    log("Sync complete!")
+    log(f"  OpenAPI specs: {len(generated_specs)}")
+    log(f"  Guide pages:   {sum(len(v) for v in dev_docs_by_service.values())}")
+    log(f"  MCP pages:     {mcp_count}")
+    log(f"  Total time:    {_time.time() - _T0:.1f}s")
+    log("=" * 60)
 
 
 if __name__ == "__main__":

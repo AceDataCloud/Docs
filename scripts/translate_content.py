@@ -104,11 +104,14 @@ def call_llm(api_key: str, system: str, user: str, max_tokens: int = 4096) -> st
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
             return data["choices"][0]["message"]["content"].strip()
+    except urllib.error.URLError as e:
+        print(f"    LLM TIMEOUT/NET ERROR: {e}", file=sys.stderr, flush=True)
+        return ""
     except Exception as e:
-        print(f"  LLM ERROR: {e}", file=sys.stderr)
+        print(f"    LLM ERROR: {e}", file=sys.stderr, flush=True)
         return ""
 
 
@@ -232,6 +235,8 @@ def collect_source_files(docs_dir: Path) -> list[Path]:
 def main():
     import argparse
 
+    t0 = time.time()
+
     parser = argparse.ArgumentParser(description="Translate docs from zh-CN to all target languages")
     parser.add_argument("--output-dir", type=Path, default=DOCS_DIR)
     parser.add_argument("--languages", nargs="*", default=None, help="Target languages (default: all)")
@@ -240,30 +245,38 @@ def main():
 
     api_key = get_api_key()
     if not api_key:
-        print("ERROR: ACEDATACLOUD_OPENAI_KEY not set", file=sys.stderr)
+        print("ERROR: ACEDATACLOUD_OPENAI_KEY not set", file=sys.stderr, flush=True)
         sys.exit(1)
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     langs = args.languages or ALL_TARGET_LANGUAGES
-    print(f"Source: zh-CN (root)")
-    print(f"Targets: {', '.join(langs)}")
+    print(f"Source: zh-CN (root)", flush=True)
+    print(f"Targets: {', '.join(langs)}", flush=True)
 
     src_files = collect_source_files(args.output_dir)
-    print(f"Source files: {len(src_files)}")
+    print(f"Source files: {len(src_files)}", flush=True)
 
     if args.dry_run:
         for f in src_files:
-            print(f"  {f.relative_to(args.output_dir)}")
-        print(f"\nWould translate {len(src_files)} files × {len(langs)} languages = {len(src_files) * len(langs)} translations")
+            print(f"  {f.relative_to(args.output_dir)}", flush=True)
+        print(f"\nWould translate {len(src_files)} files × {len(langs)} languages = {len(src_files) * len(langs)} translations", flush=True)
         return
 
     stats = {"translated": 0, "cached": 0, "failed": 0}
     total = len(src_files) * len(langs)
     done = 0
+    llm_calls = 0
 
-    for lang in langs:
-        print(f"\n--- Translating to {lang} ({LANGUAGE_NAMES_ZH.get(lang, lang)}) ---")
+    print(f"\nTotal: {total} translations ({len(src_files)} files × {len(langs)} languages)", flush=True)
+
+    for lang_idx, lang in enumerate(langs):
+        lang_t0 = time.time()
+        lang_translated = 0
+        lang_cached = 0
+        print(f"\n{'='*40}", flush=True)
+        print(f"Language {lang_idx+1}/{len(langs)}: {lang} ({LANGUAGE_NAMES_ZH.get(lang, lang)})", flush=True)
+        print(f"{'='*40}", flush=True)
         for src in src_files:
             done += 1
             rel = src.relative_to(args.output_dir)
@@ -272,24 +285,38 @@ def main():
             content = src.read_text(encoding="utf-8")
             ch = _content_hash(content)
             if get_cached(lang, str(rel), ch):
-                # Still write file from cache
                 dst = args.output_dir / lang / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 cached = get_cached(lang, str(rel), ch)
                 if cached:
                     dst.write_text(cached, encoding="utf-8")
                 stats["cached"] += 1
+                lang_cached += 1
                 continue
 
-            print(f"  [{done}/{total}] {rel} → {lang}")
+            llm_calls += 1
+            t1 = time.time()
+            print(f"  [{done}/{total}] {rel} → {lang}", end="", flush=True)
             if translate_file(api_key, src, lang, args.output_dir):
                 stats["translated"] += 1
+                lang_translated += 1
+                dt = time.time() - t1
+                print(f" ✓ ({dt:.1f}s)", flush=True)
             else:
                 stats["failed"] += 1
-                print(f"  FAILED: {rel} → {lang}")
+                dt = time.time() - t1
+                print(f" ✗ FAILED ({dt:.1f}s)", flush=True)
             time.sleep(0.3)
 
-    print(f"\nTranslation complete: translated={stats['translated']} cached={stats['cached']} failed={stats['failed']}")
+        lang_dt = time.time() - lang_t0
+        print(f"  {lang} done: {lang_translated} translated, {lang_cached} cached ({lang_dt:.1f}s)", flush=True)
+
+    elapsed = time.time() - t0
+    print(f"\n{'='*40}", flush=True)
+    print(f"Translation complete in {elapsed:.1f}s", flush=True)
+    print(f"  translated={stats['translated']} cached={stats['cached']} failed={stats['failed']}", flush=True)
+    print(f"  LLM calls={llm_calls}", flush=True)
+    print(f"{'='*40}", flush=True)
 
 
 if __name__ == "__main__":
