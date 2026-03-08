@@ -1,4 +1,4 @@
-name: Sync Docs from PlatformBackend
+name: Sync & Generate Docs
 
 on:
   repository_dispatch:
@@ -10,6 +10,19 @@ on:
         required: false
         default: 'false'
         type: boolean
+      skip_enhance:
+        description: 'Skip LLM content enhancement'
+        required: false
+        default: 'false'
+        type: boolean
+      skip_translate:
+        description: 'Skip LLM translation'
+        required: false
+        default: 'true'
+        type: boolean
+  schedule:
+    # Run daily at 06:00 UTC to pick up any PlatformBackend changes
+    - cron: '0 6 * * *'
 
 permissions:
   contents: write
@@ -36,6 +49,10 @@ jobs:
         with:
           python-version: '3.12'
 
+      # ------------------------------------------------------------------
+      # Step 1: Core sync (OpenAPI specs, guides, MCP, docs.json)
+      # This also calls generate_seo_pages.py internally
+      # ------------------------------------------------------------------
       - name: Run sync script
         run: |
           cd Docs
@@ -43,6 +60,43 @@ jobs:
             --backend-dir ../PlatformBackend \
             --output-dir .
 
+      # ------------------------------------------------------------------
+      # Step 2: LLM content enhancement (blog, comparisons, use-cases)
+      # ------------------------------------------------------------------
+      - name: Enhance content with LLM
+        if: |
+          (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_enhance != 'true')
+        env:
+          ACEDATACLOUD_OPENAI_KEY: ${{ secrets.ACEDATACLOUD_OPENAI_KEY }}
+        run: |
+          cd Docs
+          if [ -f scripts/enhance_content.py ]; then
+            python scripts/enhance_content.py --content-dir . --type blog
+            python scripts/enhance_content.py --content-dir . --type comparisons
+            python scripts/enhance_content.py --content-dir . --type use-cases
+          fi
+
+      # ------------------------------------------------------------------
+      # Step 3: Translation (English → other languages)
+      # Only runs if explicitly enabled (expensive LLM calls)
+      # ------------------------------------------------------------------
+      - name: Translate content
+        if: |
+          github.event_name == 'workflow_dispatch' && github.event.inputs.skip_translate == 'false'
+        env:
+          ACEDATACLOUD_OPENAI_KEY: ${{ secrets.ACEDATACLOUD_OPENAI_KEY }}
+        run: |
+          cd Docs
+          if [ -f scripts/translate_content.py ]; then
+            python scripts/translate_content.py \
+              --content-dir . \
+              --target-langs zh-CN ja ko \
+              --dir tutorials comparisons use-cases blog
+          fi
+
+      # ------------------------------------------------------------------
+      # Step 4: Commit and push all changes
+      # ------------------------------------------------------------------
       - name: Check for changes
         id: changes
         working-directory: Docs
