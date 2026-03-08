@@ -836,7 +836,7 @@ def build_navigation(
 
     tabs.append({"tab": "指南", "groups": guide_groups})
 
-    # Tab 2: API 参考
+    # Tab 2: API 参考 (paired with integration guides per service)
     api_groups = [
         {
             "group": "概览",
@@ -847,10 +847,37 @@ def build_navigation(
         cat_pages = []
         for svc_alias in cat_info["services"]:
             openapi_path = f"openapi/{svc_alias}.json"
-            if (output_dir / openapi_path).exists():
+            if not (output_dir / openapi_path).exists():
+                continue
+            svc_name = service_names.get(svc_alias, svc_alias)
+            guide_docs = dev_docs_by_service.get(svc_alias, [])
+            guide_pages = [f"guides/{svc_alias}/{d}" for d in guide_docs]
+
+            if guide_pages:
+                # Service has both API endpoints and integration guides — pair them
                 cat_pages.append(
                     {
-                        "group": service_names.get(svc_alias, svc_alias),
+                        "group": svc_name,
+                        "pages": [
+                            {
+                                "group": "API 端点",
+                                "openapi": {
+                                    "source": f"/{openapi_path}",
+                                    "directory": f"api-reference/{svc_alias}",
+                                },
+                            },
+                            {
+                                "group": "集成指南",
+                                "pages": guide_pages,
+                            },
+                        ],
+                    }
+                )
+            else:
+                # No guide pages — just the OpenAPI reference
+                cat_pages.append(
+                    {
+                        "group": svc_name,
                         "openapi": {
                             "source": f"/{openapi_path}",
                             "directory": f"api-reference/{svc_alias}",
@@ -1528,24 +1555,24 @@ Authorization: Bearer YOUR_API_TOKEN
             },
         },
         "languages": [
-            {"language": "zh-CN", "isDefault": True},
-            {"language": "en"},
-            {"language": "ja"},
-            {"language": "ko"},
-            {"language": "es"},
-            {"language": "fr"},
-            {"language": "de"},
-            {"language": "pt"},
-            {"language": "ru"},
-            {"language": "ar"},
-            {"language": "it"},
-            {"language": "fi"},
-            {"language": "sv"},
-            {"language": "el"},
-            {"language": "uk"},
-            {"language": "pl"},
-            {"language": "sr"},
-            {"language": "zh-TW"},
+            {"language": "zh-CN", "name": "简体中文", "isDefault": True},
+            {"language": "en", "name": "English"},
+            {"language": "ja", "name": "日本語"},
+            {"language": "ko", "name": "한국어"},
+            {"language": "es", "name": "Español"},
+            {"language": "fr", "name": "Français"},
+            {"language": "de", "name": "Deutsch"},
+            {"language": "pt", "name": "Português"},
+            {"language": "ru", "name": "Русский"},
+            {"language": "ar", "name": "العربية"},
+            {"language": "it", "name": "Italiano"},
+            {"language": "fi", "name": "Suomi"},
+            {"language": "sv", "name": "Svenska"},
+            {"language": "el", "name": "Ελληνικά"},
+            {"language": "uk", "name": "Українська"},
+            {"language": "pl", "name": "Polski"},
+            {"language": "sr", "name": "Српски"},
+            {"language": "zh-TW", "name": "繁體中文"},
         ],
         "navigation": navigation,
         "footer": {
