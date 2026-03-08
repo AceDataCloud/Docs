@@ -1,0 +1,349 @@
+---
+title: "AceDataCloud x402 Uputstvo za plaćanje"
+description: "x402 集成指南 - Ace Data Cloud"
+---
+
+x402 je onlajn plaćanje protokol zasnovan na HTTP 402 Payment Required standardu, koji omogućava pozivaocima da izvrše onlajn obračun u trenutku kada pokreću API zahtev, što ga čini idealnim za scenarije naplate po pozivu između automatizovanih programa, AI agenata i mikroservisa. Kroz ovo uputstvo, možete programatski izvršiti plaćanje AceDataCloud narudžbina u svom sistemu, ostvarujući iskustvo „plaćanja na zahtev“.
+
+Zvanična dokumentacija:
+
+- x402 Pregled dokumentacije: <https://docs.cdp.coinbase.com/x402/docs/overview>
+- x402 Open Source primer: <https://github.com/coinbase/x402>
+
+Ovaj dokument je namenjen developerima koji žele da integrišu x402 plaćanje AceDataCloud platforme u svoje poslovanje, predstavljajući kompletan proces od pripreme okruženja do završetka poziva za plaćanje, uz primere koda za Axios, Fetch, Python requests i httpx. Ključne tačke:
+
+- Plaćanje se vrši na **Base glavnoj mreži**, a sredstva koriste **USDC**;
+- Potrebno je koristiti **EVM privatni ključ** novčanika za generisanje `X-PAYMENT` potpisnog zaglavlja;
+- Svi API-ji se nalaze pod domenom `https://platform.acedata.cloud`, a `Authorization` zaglavlje mora sadržati **Platform Token**.
+
+---
+
+## I. Pripremni radovi
+
+### 1. Pregledajte narudžbinu i zabeležite informacije o uplati
+
+Prijavite se na konzolu [https://platform.acedata.cloud](https://platform.acedata.cloud), u listi narudžbina ili na stranici detalja narudžbine možete videti narudžbinu koja zahteva uplatu. Detalji narudžbine će prikazati:
+
+- ID narudžbine (na primer `7744945e-5e77-4dcc-a9c4-528692d17b34`);
+- Adresa za uplatu `pay_to` (takođe će biti vraćena u 402 odgovoru, preporučuje se da se oslonite na informacije sa stranice).
+
+Zabeležite ID narudžbine i potvrdite `pay_to` adresu, jer će biti potrebna prilikom potpisivanja.
+
+### 2. Pripremite novčanik za uplatu i sredstva
+
+- Pripremite EVM novčanik koji podržava Base glavnu mrežu i izvezite privatni ključ koji ćete koristiti;
+- Napunite Base glavnu mrežu sa dovoljno **USDC** (iznos plaćanja je u najmanjoj jedinici od 6 decimalnih mesta);
+- x402 Facilitator će pokriti troškove mreže, novčanik za uplatu treba da zadrži samo dovoljno USDC;
+- Privatni ključ se koristi samo za lokalno potpisivanje, čuvajte ga na sigurnom mestu i izbegavajte izlaganje u pretraživaču ili nepouzdanim okruženjima.
+
+### 3. Kreirajte Platform Token
+
+Platform Token se koristi za pozivanje platformskih API-ja, funkcioniše slično kao korisnički Token koji se koristi u pretraživaču nakon prijavljivanja, ali ne ističe. Molimo vas da pratite sledeće korake za kreiranje:
+
+1. Otvorite stranicu konzole [https://platform.acedata.cloud/console/platform-tokens](https://platform.acedata.cloud/console/platform-tokens);
+2. Kliknite na „Kreiraj Token“, popunite informacije o belešci prema uputstvima i generišite;
+3. Kopirajte generisani Token (na primer `platform-v1-xxxx`), čuvajte ga kao `platform_token`.
+
+![platform-token](https://cdn.acedata.cloud/6g86oz.png)
+
+U svim budućim pozivima API-ja zaglavlje mora sadržati:
+
+```
+Authorization: Bearer {platform_token}
+```
+
+### 4. Zatražite osnovne informacije
+
+- Osnovni domen API-ja: `https://platform.acedata.cloud`
+- Putanja zahteva za plaćanje: `/api/v1/orders/{order_id}/pay/`
+- Zahtevi i odgovori koriste JSON, kodirani su u UTF-8.
+
+---
+
+## II. Pregled procesa plaćanja
+
+1. **Pokrenite zahtev za plaćanje**: prvi `POST` zahtev bez `X-PAYMENT` zaglavlja, pokreće platformu da vrati 402 Payment Required;
+2. **Pročitajte zahteve za plaćanje**: analizirajte `accepts` niz u 402 odgovoru, potvrdite da je `network` `base`, `asset` USDC, a `payTo` u skladu sa stranicom narudžbine;
+3. **Generišite `X-PAYMENT`**: koristite privatni ključ novčanika za uplatu, zahteve iz tela odgovora, informacije o EIP-712 domenima koje vraća Facilitator itd. za generisanje potpisa (obično uz pomoć zvaničnog SDK-a);
+4. **Ponovo pokušajte sa potpisom**: dodajte `X-PAYMENT` zaglavlje u zahtev na istoj putanji, platforma će nakon uspešne verifikacije vratiti 200;
+5. **Analizirajte rezultate**: pročitajte zaglavlje odgovora `X-PAYMENT-RESPONSE`, možete dobiti onlajn transakcioni hash, stvarni iznos naplate i druge informacije za usklađivanje.
+
+---
+
+## III. Primeri interakcije
+
+### 1. Prvi zahtev (pokreće 402)
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+Tipičan 402 odgovor (redosled polja može se malo razlikovati):
+
+```json
+{
+  "error": "Plaćanje je potrebno za ovu narudžbinu.",
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "base",
+      "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54b268aa0e",
+      "maxAmountRequired": "1250000",
+      "payTo": "0x302afdd980aaefca3afa8df7222a6002774f6724",
+      "extra": {
+        "eip712": { "...": "..." }
+      }
+    }
+  ],
+  "paywall": { ... }
+}
+```
+
+Objašnjenje ključnih polja:
+
+- `network`: mora biti `base` (Base glavna mreža);
+- `asset`: adresa Base USDC ugovora (primer je zvanični ugovor na glavnoj mreži);
+- `maxAmountRequired`: potrebna USDC atomskih jedinica za ovo plaćanje (1 USDC = 1.000.000 atomskih jedinica);
+- `payTo`: adresa za uplatu platforme, treba da bude u skladu sa stranicom detalja narudžbine;
+- `extra`: informacije o EIP-712 domenima potrebne za potpisivanje.
+
+### 2. Generisanje `X-PAYMENT`
+
+Uobičajena praksa je korišćenje zvaničnog SDK-a (kao što su `x402-js`, `x402-fetch`, `x402.clients` itd.):
+
+1. Pretvorite privatni ključ novčanika za uplatu u objekat naloga;
+2. Zabeležite `accepts` podatke iz 402 odgovora, izaberite opciju plaćanja gde je `network == "base"`;
+3. Pozovite funkciju za potpisivanje koju pruža SDK da generišete Base64 kodirani `X-PAYMENT` string (nije potrebno direktno povezivanje klijenta sa facilitatorom; platforma će se pobrinuti za pozivanje facilitator-a radi verifikacije/obračuna);
+4. Preporučuje se da proverite da li je `maxAmountRequired` u prihvatljivom opsegu, ako je veće, obavestite korisnika da dopuni sredstva.
+
+Ako želite da implementirate ručno, molimo vas da se oslonite na zvaničnu dokumentaciju x402, prema informacijama o domenima iz `extra.eip712` konstruirajte EIP-712 strukturu i potpišite.
+
+### 3. Ponovo pokušajte sa potpisom
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+X-PAYMENT: {base64_signed_payload}
+
+{
+  "pay_way": "X402"
+}
+```
+
+Ako je plaćanje uspešno, status odgovora će biti 200, a telo odgovora će vratiti ažurirane informacije o narudžbini, uz dodatak:
+
+```
+X-PAYMENT-RESPONSE: eyJ0cmFuc2FjdGlvbiI6IjB4...==
+```
+
+`X-PAYMENT-RESPONSE` se može koristiti uz funkciju za dekodiranje SDK-a da se dobije onlajn transakcioni hash, plaćena mreža, adresa platioca i drugi podaci, koji se koriste za knjiženje ili prikazivanje u poslovanju.
+
+---
+
+## IV. Višejezički primeri koda
+
+Svi primeri pretpostavljaju da su injektovani putem promenljivih okruženja ili konfiguracionih datoteka:
+- `ACE_PLATFORM_TOKEN`：Platform Token；
+- `ACE_X402_ORDER_ID`：ID narudžbine；
+- `ACE_X402_PRIVATE_KEY`：Privatni ključ novčanika za plaćanje (sa `0x` prefiksom).
+
+### 1. Axios（TypeScript）
+
+```ts
+import axios from "axios";
+import { Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { buildPaymentHeader, decodePaymentResponse } from "x402-js";
+
+const baseURL = "https://platform.acedata.cloud";
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const privateKey = process.env.ACE_X402_PRIVATE_KEY as Hex;
+
+const account = privateKeyToAccount(privateKey);
+const api = axios.create({
+  baseURL,
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    "Content-Type": "application/json",
+  },
+});
+
+async function payOrder() {
+  const payPath = `/api/v1/orders/${orderId}/pay/`;
+
+  const initial = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { validateStatus: () => true }
+  );
+  if (initial.status !== 402) {
+    throw new Error(`neočekivani status ${initial.status}`);
+  }
+
+  const requirement = initial.data.accepts.find(
+    (item: any) => item.network === "base"
+  );
+  if (!requirement) {
+    throw new Error("nije vraćen osnovni zahtev");
+  }
+
+  const paymentHeader = await buildPaymentHeader({
+    account,
+    requirement,
+  });
+
+  const final = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { headers: { "X-PAYMENT": paymentHeader } }
+  );
+
+  if (final.status >= 400) {
+    throw new Error(`x402 plaćanje nije uspelo: ${final.status} ${final.statusText}`);
+  }
+  const receipt = decodePaymentResponse(final.headers["x-payment-response"]);
+  console.log("x402 potvrda", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 2. Fetch（JavaScript）
+
+```ts
+import { wrapFetchWithPayment, decodePaymentResponse } from "x402-fetch";
+import { privateKeyToAccount } from "viem/accounts";
+
+const account = privateKeyToAccount(process.env.ACE_X402_PRIVATE_KEY!);
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const fetchWithPayment = wrapFetchWithPayment(fetch, account);
+
+async function payOrder() {
+  const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+
+  const response = await fetchWithPayment(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${platformToken}`,
+    },
+    body: JSON.stringify({ pay_way: "X402" }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`x402 plaćanje nije uspelo: ${response.status} ${errorBody}`);
+  }
+
+  const receipt = decodePaymentResponse(
+    response.headers.get("x-payment-response")!
+  );
+  console.log("x402 potvrda", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 3. Python requests
+
+```python
+import os
+from eth_account import Account
+from x402.clients.requests import x402_requests
+from x402.clients.base import decode_x_payment_response
+
+order_id = os.environ["ACE_X402_ORDER_ID"]
+platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+session = x402_requests(
+    account,
+    payment_requirements_selector=lambda accepts, **_: next(
+        req for req in accepts if req.network == "base" and req.scheme == "exact"
+    ),
+)
+
+response = session.post(
+    f"https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/",
+    json={"pay_way": "X402"},
+    headers={"Authorization": f"Bearer {platform_token}"},
+)
+
+response.raise_for_status()
+receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+if receipt_header:
+    print("x402 potvrda:", decode_x_payment_response(receipt_header))
+```
+
+### 4. Python httpx（异步）
+
+```python
+import asyncio
+import os
+from eth_account import Account
+from x402.clients.httpx import x402HttpxClient
+from x402.clients.base import decode_x_payment_response
+
+async def pay_order() -> None:
+    order_id = os.environ["ACE_X402_ORDER_ID"]
+    platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+    account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+    async with x402HttpxClient(
+        account=account,
+        base_url="https://platform.acedata.cloud",
+        headers={"Authorization": f"Bearer {platform_token}"},
+        payment_requirements_selector=lambda accepts, **_: next(
+            req for req in accepts if req.network == "base"
+        ),
+    ) as client:
+        response = await client.post(
+            f"/api/v1/orders/{order_id}/pay/",
+            json={"pay_way": "X402"},
+        )
+        response.raise_for_status()
+        receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+        if receipt_header:
+            print("x402 potvrda:", decode_x_payment_response(receipt_header))
+
+asyncio.run(pay_order())
+```
+
+> Primeri samo prikazuju ključne pozive, u produkcionom okruženju dodajte obradu izuzetaka, strategije ponovnog pokušaja, logovanje i kontrolu bezbednosti.
+
+---
+
+## Pet, verifikacija nakon uspešnog plaćanja
+
+- **Verifikacija na konzoli**: Posetite stranicu sa detaljima narudžbine `https://platform.acedata.cloud/console/orders/{order_id}`, ako stranica prikazuje „plaćanje uspešno“ ili je status narudžbine promenjen u plaćeno/završeno, to znači da je onlajn obračun završen.
+- **API verifikacija**: Pozovite `GET https://platform.acedata.cloud/api/v1/orders/{order_id}/` i priložite `Authorization: Bearer {platform_token}`, proverite polje `state` u odgovoru ( `PAID` ili `FINISHED` označava uspešno plaćanje).
+- **Povratni header**: U odgovoru nakon uspešnog plaćanja pročitajte `X-PAYMENT-RESPONSE`, može se dekodirati kao konačni dokaz o onlajn transakciji; preporučuje se da se ta informacija sačuva u sistemskom logu radi usklađivanja.
+
+---
+
+## Šest, rešavanje čestih problema
+
+- **I dalje vraća 402**: Potvrdite da adresa za plaćanje ima dovoljno USDC na Base glavnoj mreži, proverite da li `maxAmountRequired` premašuje saldo novčanika ili prilagođeni limit.
+- **Neuspeh potpisivanja**: Uverite se da privatni ključ ima `0x` prefiks; prilikom potpisivanja strogo koristite `extra` (EIP-712 domen) i `payTo` iz odgovora, ne menjajte redosled polja.
+- **Neusklađenost mreže**: U `accepts` može postojati više zahteva, izaberite opciju `network === "base"`.
+- **Nedostaje `X-PAYMENT-RESPONSE`**: To znači da plaćanje nije stvarno izvršeno, možete ponovo pokrenuti na osnovu greške u telu odgovora; ako dođe do zagušenja na mreži, pokušajte ponovo kasnije.
+- **Nevažeći platform token**: Potvrdite da token nije obrisan i da počinje sa `platform-v1-`; ako API vraća 401, možete ga ponovo generisati na konzoli.
+
+---
+
+## Sedam, dodatna pomoć
+
+- Online dokumentacija i česta pitanja: Navigacija „Dokumentacija“ na vrhu platforme konzole.
+- Podnošenje zahteva i korisnička podrška: <https://platform.acedata.cloud/support>
+- Zajednica: Discord <https://discord.gg/f9GRuKCmRc>, X (Twitter) <https://x.com/acedatacloud>
+- Ostali kanali: Email `office@acedata.cloud`, `office@germey.tech`; adresa kompanije 651 N Broad St, Suite 201, Middletown, Delaware, USA; WeChat korisnička podrška, molimo pogledajte najnoviji QR kod na stranici podrške.
+- Povratne informacije i predlozi: Dobrodošli da nas obavestite o potrebama za poboljšanjem putem bilo kojeg od navedenih kanala.

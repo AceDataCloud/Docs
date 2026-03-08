@@ -1,0 +1,349 @@
+---
+title: "AceDataCloud x402 Payment Integration Guide"
+description: "x402 集成指南 - Ace Data Cloud"
+---
+
+x402 is an on-chain payment protocol based on the HTTP 402 Payment Required standard, allowing the caller to complete on-chain settlement while initiating an API request, making it very suitable for automated programs, AI Agents, and microservices in call-based billing scenarios. Through this guide, you can programmatically complete payments for AceDataCloud orders in your own system, achieving a "request and pay" experience.
+
+Official documentation references:
+
+- x402 Overview Document: <https://docs.cdp.coinbase.com/x402/docs/overview>
+- x402 Open Source Example: <https://github.com/coinbase/x402>
+
+This document is aimed at developers who need to integrate AceDataCloud platform x402 payment capabilities into their business, introducing the complete process from preparing the environment to completing payment calls, and providing example code for Axios, Fetch, Python requests, and httpx. Key points:
+
+- Payment is completed on the **Base mainnet**, using **USDC** as the asset;
+- The `X-PAYMENT` signature header must be generated using the **EVM private key** of the wallet holding the assets;
+- All APIs are located under the domain `https://platform.acedata.cloud`, and the `Authorization` header must carry the **Platform Token**.
+
+---
+
+## I. Preparation
+
+### 1. View Orders and Record Payment Information
+
+Log in to the console at [https://platform.acedata.cloud](https://platform.acedata.cloud), where you can see the orders that need to be paid in the order list or order details page. The order details will display:
+
+- Order ID (e.g., `7744945e-5e77-4dcc-a9c4-528692d17b34`);
+- Payment address `pay_to` (also returned in the 402 response, it is recommended to rely on the page information).
+
+Please record the order ID and confirm the `pay_to` address, as it is necessary to ensure that funds are sent to this address during signing.
+
+### 2. Prepare Payment Wallet and Funds
+
+- Prepare an EVM wallet that supports the Base mainnet and export the private key to be used;
+- Recharge sufficient **USDC** on the Base mainnet (the payment amount is in the smallest unit with 6 decimal places);
+- The x402 Facilitator will cover the network fees, and the payment wallet only needs to retain enough USDC;
+- The private key is only used for local signing, please keep it safe and avoid exposing it in browsers or untrusted environments.
+
+### 3. Create Platform Token
+
+The Platform Token is used to call the platform API, similar to the user Token used in the browser after logging in, but it does not expire. Please follow these steps to create it:
+
+1. Open the console page [https://platform.acedata.cloud/console/platform-tokens](https://platform.acedata.cloud/console/platform-tokens);
+2. Click "Create Token," fill in the remarks as prompted, and generate it;
+3. Copy the generated Token (e.g., `platform-v1-xxxx`) and keep it safe as `platform_token`.
+
+![platform-token](https://cdn.acedata.cloud/6g86oz.png)
+
+All subsequent API call headers need to include:
+
+```
+Authorization: Bearer {platform_token}
+```
+
+### 4. Request Basic Information
+
+- API base domain: `https://platform.acedata.cloud`
+- Payment request path: `/api/v1/orders/{order_id}/pay/`
+- Both requests and responses use JSON, encoded in UTF-8.
+
+---
+
+## II. Overview of the Payment Process
+
+1. **Initiate Payment Request**: The first `POST` request without the `X-PAYMENT` header triggers the platform to return a 402 Payment Required;
+2. **Read Payment Requirements**: Parse the `accepts` array in the 402 response, confirming that `network` is `base`, `asset` is USDC, and `payTo` matches the order page;
+3. **Generate `X-PAYMENT`**: Use the payment wallet private key, the requirements from the response body, and the EIP-712 domain returned by the Facilitator to generate a signature (usually completed with the official SDK);
+4. **Retry with Signature**: Add the `X-PAYMENT` header to the same path request, and after successful verification by the platform, it returns 200;
+5. **Parse Results**: Read the response header `X-PAYMENT-RESPONSE`, which provides the on-chain transaction hash, actual deducted amount, and other information for reconciliation.
+
+---
+
+## III. Integration Examples
+
+### 1. First Request (Trigger 402)
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+A typical 402 response (the order of fields may vary slightly):
+
+```json
+{
+  "error": "Payment required for this order.",
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "base",
+      "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54b268aa0e",
+      "maxAmountRequired": "1250000",
+      "payTo": "0x302afdd980aaefca3afa8df7222a6002774f6724",
+      "extra": {
+        "eip712": { "...": "..." }
+      }
+    }
+  ],
+  "paywall": { ... }
+}
+```
+
+Key field explanations:
+
+- `network`: Must be `base` (Base mainnet);
+- `asset`: Base USDC contract address (the example is the official mainnet contract);
+- `maxAmountRequired`: The USDC atomic unit required for this payment (1 USDC = 1,000,000 atomic units);
+- `payTo`: The platform's payment address, which should match the order details page;
+- `extra`: EIP-712 domain information required for signing, etc.
+
+### 2. Generate `X-PAYMENT`
+
+A common practice is to use the official SDK (such as `x402-js`, `x402-fetch`, `x402.clients`, etc.):
+
+1. Convert the payment wallet private key into an account object;
+2. Record the `accepts` data from the 402 response, selecting the payment option where `network == "base"`;
+3. Call the signing function provided by the SDK to generate a Base64 encoded `X-PAYMENT` string (no need for the client to directly connect to the facilitator; the platform backend will handle the verify/settle calls);
+4. It is recommended to check whether `maxAmountRequired` is within an acceptable range; if exceeded, remind the user to recharge.
+
+If manual implementation is needed, please refer to the x402 official documentation and construct the EIP-712 structure according to the domain information provided in `extra.eip712` before signing.
+
+### 3. Retry with Signature
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+X-PAYMENT: {base64_signed_payload}
+
+{
+  "pay_way": "X402"
+}
+```
+
+If the payment is successful, the response status will be 200, and the response body will return the updated order information, along with:
+
+```
+X-PAYMENT-RESPONSE: eyJ0cmFuc2FjdGlvbiI6IjB4...==
+```
+
+`X-PAYMENT-RESPONSE` can be decoded using the SDK's decoding function to obtain the on-chain transaction hash, payment network, payer address, and other data for business accounting or display.
+
+---
+
+## IV. Multi-language Example Code
+
+The following examples assume injection through environment variables or configuration files:
+- `ACE_PLATFORM_TOKEN`: Platform Token;
+- `ACE_X402_ORDER_ID`: Order ID;
+- `ACE_X402_PRIVATE_KEY`: Payment wallet private key (with `0x` prefix).
+
+### 1. Axios (TypeScript)
+
+```ts
+import axios from "axios";
+import { Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { buildPaymentHeader, decodePaymentResponse } from "x402-js";
+
+const baseURL = "https://platform.acedata.cloud";
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const privateKey = process.env.ACE_X402_PRIVATE_KEY as Hex;
+
+const account = privateKeyToAccount(privateKey);
+const api = axios.create({
+  baseURL,
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    "Content-Type": "application/json",
+  },
+});
+
+async function payOrder() {
+  const payPath = `/api/v1/orders/${orderId}/pay/`;
+
+  const initial = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { validateStatus: () => true }
+  );
+  if (initial.status !== 402) {
+    throw new Error(`unexpected status ${initial.status}`);
+  }
+
+  const requirement = initial.data.accepts.find(
+    (item: any) => item.network === "base"
+  );
+  if (!requirement) {
+    throw new Error("no base requirement returned");
+  }
+
+  const paymentHeader = await buildPaymentHeader({
+    account,
+    requirement,
+  });
+
+  const final = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { headers: { "X-PAYMENT": paymentHeader } }
+  );
+
+  if (final.status >= 400) {
+    throw new Error(`x402 payment failed: ${final.status} ${final.statusText}`);
+  }
+  const receipt = decodePaymentResponse(final.headers["x-payment-response"]);
+  console.log("x402 receipt", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 2. Fetch (JavaScript)
+
+```ts
+import { wrapFetchWithPayment, decodePaymentResponse } from "x402-fetch";
+import { privateKeyToAccount } from "viem/accounts";
+
+const account = privateKeyToAccount(process.env.ACE_X402_PRIVATE_KEY!);
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const fetchWithPayment = wrapFetchWithPayment(fetch, account);
+
+async function payOrder() {
+  const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+
+  const response = await fetchWithPayment(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${platformToken}`,
+    },
+    body: JSON.stringify({ pay_way: "X402" }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`x402 payment failed: ${response.status} ${errorBody}`);
+  }
+
+  const receipt = decodePaymentResponse(
+    response.headers.get("x-payment-response")!
+  );
+  console.log("x402 receipt", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 3. Python requests
+
+```python
+import os
+from eth_account import Account
+from x402.clients.requests import x402_requests
+from x402.clients.base import decode_x_payment_response
+
+order_id = os.environ["ACE_X402_ORDER_ID"]
+platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+session = x402_requests(
+    account,
+    payment_requirements_selector=lambda accepts, **_: next(
+        req for req in accepts if req.network == "base" and req.scheme == "exact"
+    ),
+)
+
+response = session.post(
+    f"https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/",
+    json={"pay_way": "X402"},
+    headers={"Authorization": f"Bearer {platform_token}"},
+)
+
+response.raise_for_status()
+receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+if receipt_header:
+    print("x402 receipt:", decode_x_payment_response(receipt_header))
+```
+
+### 4. Python httpx (Asynchronous)
+
+```python
+import asyncio
+import os
+from eth_account import Account
+from x402.clients.httpx import x402HttpxClient
+from x402.clients.base import decode_x_payment_response
+
+async def pay_order() -> None:
+    order_id = os.environ["ACE_X402_ORDER_ID"]
+    platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+    account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+    async with x402HttpxClient(
+        account=account,
+        base_url="https://platform.acedata.cloud",
+        headers={"Authorization": f"Bearer {platform_token}"},
+        payment_requirements_selector=lambda accepts, **_: next(
+            req for req in accepts if req.network == "base"
+        ),
+    ) as client:
+        response = await client.post(
+            f"/api/v1/orders/{order_id}/pay/",
+            json={"pay_way": "X402"},
+        )
+        response.raise_for_status()
+        receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+        if receipt_header:
+            print("x402 receipt:", decode_x_payment_response(receipt_header))
+
+asyncio.run(pay_order())
+```
+
+> The examples only demonstrate key calls; please add exception handling, retry strategies, logging, and security controls in a production environment.
+
+---
+
+## 5. Verification after Successful Payment
+
+- **Console Verification**: Visit the order details page `https://platform.acedata.cloud/console/orders/{order_id}`, if the page shows "Payment Successful" or the order status has changed to Paid/Completed, it indicates that the on-chain settlement is complete.
+- **API Verification**: Call `GET https://platform.acedata.cloud/api/v1/orders/{order_id}/` with `Authorization: Bearer {platform_token}`, check the `state` field in the response (`PAID` or `FINISHED` indicates payment success).
+- **Return Header**: Read `X-PAYMENT-RESPONSE` from the successful payment response, which can be parsed to obtain the on-chain transaction hash as the final proof; it is recommended to save this information in the system logs for reconciliation.
+
+---
+
+## 6. Common Issue Troubleshooting
+
+- **Still returns 402**: Confirm that the payment address has sufficient USDC on the Base mainnet, check if `maxAmountRequired` exceeds the wallet balance or custom limits.
+- **Signature failure**: Ensure the private key has the `0x` prefix; strictly use the `extra` (EIP-712 domain) and `payTo` from the response when signing, do not change the field order.
+- **Network mismatch**: There may be multiple requirements in `accepts`, please select the option where `network === "base"`.
+- **Missing `X-PAYMENT-RESPONSE`**: Indicates that the payment was not actually deducted, you can re-initiate based on the error in the response body; if there is congestion on the chain, please try again later.
+- **Invalid platform token**: Confirm that the token has not been deleted and starts with the prefix `platform-v1-`; if the interface returns 401, you can regenerate it in the console.
+
+---
+
+## 7. More Help
+
+- Online documentation and FAQs: "Documentation" in the top navigation of the platform console.
+- Submit tickets and customer support: <https://platform.acedata.cloud/support>
+- Community communication: Discord <https://discord.gg/f9GRuKCmRc>, X (Twitter) <https://x.com/acedatacloud>
+- Other channels: Email `office@acedata.cloud`, `office@germey.tech`; company address 651 N Broad St, Suite 201, Middletown, Delaware, USA; for WeChat customer service, please check the latest QR code on the support page.
+- Feedback and suggestions: We welcome you to let us know your improvement needs through any of the above channels.

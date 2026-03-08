@@ -1,0 +1,349 @@
+---
+title: "AceDataCloud x402 支付對接指南"
+description: "x402 集成指南 - Ace Data Cloud"
+---
+
+x402 是基於 HTTP 402 Payment Required 標準的鏈上支付協議，可讓調用方在發起 API 請求的同時完成鏈上結算，非常適合自動化程序、AI Agent、微服務之間的按調用計費場景。通過本指南，你可以在自己的系統中以編程方式完成 AceDataCloud 訂單的支付，實現「請求即付費」的體驗。
+
+官方資料參考：
+
+- x402 總覽文檔：<https://docs.cdp.coinbase.com/x402/docs/overview>
+- x402 開源示例：<https://github.com/coinbase/x402>
+
+本文檔面向需要在業務中接入 AceDataCloud 平台 x402 支付能力的開發者，介紹從準備環境到完成支付調用的完整流程，並提供 Axios、Fetch、Python requests 與 httpx 的示例代碼。核心要點：
+
+- 支付鏈路在 **Base 主網** 完成，資產使用 **USDC**；
+- 必須使用持幣錢包的 **EVM 私鑰** 生成 `X-PAYMENT` 簽名頭；
+- 所有 API 均位於 `https://platform.acedata.cloud` 域名下，`Authorization` 頭需攜帶 **Platform Token**。
+
+---
+
+## 一、準備工作
+
+### 1. 查看訂單並記錄收款信息
+
+登錄控制台 [https://platform.acedata.cloud](https://platform.acedata.cloud)，在訂單列表或訂單詳情頁可以看到需要支付的訂單。訂單詳情會展示：
+
+- 訂單 ID（例如 `7744945e-5e77-4dcc-a9c4-528692d17b34`）；
+- 收款地址 `pay_to`（也會在 402 響應中返回，建議以頁面信息為準）。
+
+請記錄訂單 ID 並確認 `pay_to` 地址，後續簽名時需要保證資金發送到該地址。
+
+### 2. 準備付款錢包與資金
+
+- 準備一個支持 Base 主網的 EVM 錢包，並導出待使用的私鑰；
+- 在 Base 主網充值足額 **USDC**（支付金額單位為 6 位小數的最小單位）；
+- x402 Facilitator 會代付網絡費用，付款錢包只需保留足夠的 USDC；
+- 私鑰僅用於本地簽名，請妥善保管，避免在瀏覽器或不可信環境暴露。
+
+### 3. 創建 Platform Token
+
+Platform Token 用於調用平台 API，與登錄後瀏覽器使用的用戶 Token 功能類似，但不會過期。請按照以下步驟創建：
+
+1. 打開控制台頁面 [https://platform.acedata.cloud/console/platform-tokens](https://platform.acedata.cloud/console/platform-tokens)；
+2. 點擊「創建 Token」，根據提示填寫備註信息後生成；
+3. 複製生成的 Token（例如 `platform-v1-xxxx`），妥善保存為 `platform_token`。
+
+![platform-token](https://cdn.acedata.cloud/6g86oz.png)
+
+後續所有 API 調用 header 中都需要包含：
+
+```
+Authorization: Bearer {platform_token}
+```
+
+### 4. 請求基礎信息
+
+- API 基礎域名：`https://platform.acedata.cloud`
+- 支付請求路徑：`/api/v1/orders/{order_id}/pay/`
+- 請求和響應均使用 JSON，編碼為 UTF-8。
+
+---
+
+## 二、支付流程總覽
+
+1. **發起支付請求**：無 `X-PAYMENT` 頭的首次 `POST` 請求，觸發平台返回 402 Payment Required；
+2. **讀取支付要求**：解析 402 響應中的 `accepts` 陣列，確認 `network` 為 `base`、`asset` 為 USDC、`payTo` 與訂單頁面一致；
+3. **生成 `X-PAYMENT`**：使用付款錢包私鑰、響應體中的要求、Facilitator 返回的 EIP-712 域等信息生成簽名（通常借助官方 SDK 完成）；
+4. **攜帶簽名重試**：將 `X-PAYMENT` 頭加入同一路徑請求，平台驗證成功後返回 200；
+5. **解析結果**：讀取響應頭 `X-PAYMENT-RESPONSE`，可獲取鏈上交易哈希、實際扣款金額等信息用於對賬。
+
+---
+
+## 三、接**###**互示例
+
+### 1. 首次請求（觸發 402）
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+典型的 402 響應（字段順序可能略有變化）：
+
+```json
+{
+  "error": "Payment required for this order.",
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "base",
+      "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54b268aa0e",
+      "maxAmountRequired": "1250000",
+      "payTo": "0x302afdd980aaefca3afa8df7222a6002774f6724",
+      "extra": {
+        "eip712": { "...": "..." }
+      }
+    }
+  ],
+  "paywall": { ... }
+}
+```
+
+關鍵字段說明：
+
+- `network`：必須是 `base`（Base 主網）；
+- `asset`：Base USDC 合約地址（示例為官方主網合約）；
+- `maxAmountRequired`：本次支付所需的 USDC 原子單位（1 USDC = 1,000,000 atomic units）；
+- `payTo`：平台收款地址，應與訂單詳情頁面一致；
+- `extra`：簽名所需的 EIP-712 域信息等。
+
+### 2. 生成 `X-PAYMENT`
+
+常見做法為使用官方 SDK（如 `x402-js`、`x402-fetch`、`x402.clients` 等）：
+
+1. 將付款錢包私鑰轉換為賬戶對象；
+2. 記錄 402 響應中的 `accepts` 數據，選擇 `network == "base"` 的支付選項；
+3. 調用 SDK 提供的簽名函數生成 Base64 編碼的 `X-PAYMENT` 字符串（無需客戶端直連 facilitator；平台後端會負責調用 facilitator 完成 verify/settle）；
+4. 建議校驗 `maxAmountRequired` 是否在可接受範圍，超過則提醒用戶充值。
+
+如需手動實現，請參考 x402 官方文檔，按照 `extra.eip712` 提供的域信息構造 EIP-712 結構體後進行簽名。
+
+### 3. 攜帶簽名重試
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+X-PAYMENT: {base64_signed_payload}
+
+{
+  "pay_way": "X402"
+}
+```
+
+若支付成功，響應狀態為 200，響應體返回更新後的訂單信息，並附帶：
+
+```
+X-PAYMENT-RESPONSE: eyJ0cmFuc2FjdGlvbiI6IjB4...==
+```
+
+`X-PAYMENT-RESPONSE` 可使用 SDK 的解碼函數獲取鏈上交易哈希、支付網絡、付款人地址等數據，用於業務入賬或展示。
+
+---
+
+## 四、多語言示例代碼
+
+以下示例均假設通過環境變量或配置文件注入：
+- `ACE_PLATFORM_TOKEN`：平台令牌；
+- `ACE_X402_ORDER_ID`：訂單 ID；
+- `ACE_X402_PRIVATE_KEY`：付款錢包私鑰（帶 `0x` 前綴）。
+
+### 1. Axios（TypeScript）
+
+```ts
+import axios from "axios";
+import { Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { buildPaymentHeader, decodePaymentResponse } from "x402-js";
+
+const baseURL = "https://platform.acedata.cloud";
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const privateKey = process.env.ACE_X402_PRIVATE_KEY as Hex;
+
+const account = privateKeyToAccount(privateKey);
+const api = axios.create({
+  baseURL,
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    "Content-Type": "application/json",
+  },
+});
+
+async function payOrder() {
+  const payPath = `/api/v1/orders/${orderId}/pay/`;
+
+  const initial = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { validateStatus: () => true }
+  );
+  if (initial.status !== 402) {
+    throw new Error(`unexpected status ${initial.status}`);
+  }
+
+  const requirement = initial.data.accepts.find(
+    (item: any) => item.network === "base"
+  );
+  if (!requirement) {
+    throw new Error("no base requirement returned");
+  }
+
+  const paymentHeader = await buildPaymentHeader({
+    account,
+    requirement,
+  });
+
+  const final = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { headers: { "X-PAYMENT": paymentHeader } }
+  );
+
+  if (final.status >= 400) {
+    throw new Error(`x402 payment failed: ${final.status} ${final.statusText}`);
+  }
+  const receipt = decodePaymentResponse(final.headers["x-payment-response"]);
+  console.log("x402 receipt", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 2. Fetch（JavaScript）
+
+```ts
+import { wrapFetchWithPayment, decodePaymentResponse } from "x402-fetch";
+import { privateKeyToAccount } from "viem/accounts";
+
+const account = privateKeyToAccount(process.env.ACE_X402_PRIVATE_KEY!);
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const fetchWithPayment = wrapFetchWithPayment(fetch, account);
+
+async function payOrder() {
+  const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+
+  const response = await fetchWithPayment(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${platformToken}`,
+    },
+    body: JSON.stringify({ pay_way: "X402" }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`x402 payment failed: ${response.status} ${errorBody}`);
+  }
+
+  const receipt = decodePaymentResponse(
+    response.headers.get("x-payment-response")!
+  );
+  console.log("x402 receipt", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 3. Python requests
+
+```python
+import os
+from eth_account import Account
+from x402.clients.requests import x402_requests
+from x402.clients.base import decode_x_payment_response
+
+order_id = os.environ["ACE_X402_ORDER_ID"]
+platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+session = x402_requests(
+    account,
+    payment_requirements_selector=lambda accepts, **_: next(
+        req for req in accepts if req.network == "base" and req.scheme == "exact"
+    ),
+)
+
+response = session.post(
+    f"https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/",
+    json={"pay_way": "X402"},
+    headers={"Authorization": f"Bearer {platform_token}"},
+)
+
+response.raise_for_status()
+receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+if receipt_header:
+    print("x402 receipt:", decode_x_payment_response(receipt_header))
+```
+
+### 4. Python httpx（異步）
+
+```python
+import asyncio
+import os
+from eth_account import Account
+from x402.clients.httpx import x402HttpxClient
+from x402.clients.base import decode_x_payment_response
+
+async def pay_order() -> None:
+    order_id = os.environ["ACE_X402_ORDER_ID"]
+    platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+    account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+    async with x402HttpxClient(
+        account=account,
+        base_url="https://platform.acedata.cloud",
+        headers={"Authorization": f"Bearer {platform_token}"},
+        payment_requirements_selector=lambda accepts, **_: next(
+            req for req in accepts if req.network == "base"
+        ),
+    ) as client:
+        response = await client.post(
+            f"/api/v1/orders/{order_id}/pay/",
+            json={"pay_way": "X402"},
+        )
+        response.raise_for_status()
+        receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+        if receipt_header:
+            print("x402 receipt:", decode_x_payment_response(receipt_header))
+
+asyncio.run(pay_order())
+```
+
+> 示例僅演示關鍵調用，生產環境請補充異常處理、重試策略、日誌與安全控制。
+
+---
+
+## 五、支付成功後的驗證
+
+- **控制台驗證**：訪問訂單詳情頁 `https://platform.acedata.cloud/console/orders/{order_id}`，若頁面顯示「支付成功」或訂單狀態已變為已支付/已完成，即代表鏈上結算完成。
+- **API 驗證**：調用 `GET https://platform.acedata.cloud/api/v1/orders/{order_id}/` 並攜帶 `Authorization: Bearer {platform_token}`，檢查響應中的 `state` 欄位（`PAID` 或 `FINISHED` 表示支付成功）。
+- **回傳頭部**：在支付成功的響應中讀取 `X-PAYMENT-RESPONSE`，可解析出鏈上交易哈希作為最終憑證；建議在系統日誌中保存該信息以便對賬。
+
+---
+
+## 六、常見問題排查
+
+- **仍然返回 402**：確認付款地址在 Base 主網擁有足夠 USDC，檢查 `maxAmountRequired` 是否超出錢包餘額或自定義限額。
+- **簽名失敗**：確保私鑰帶 `0x` 前綴；簽名時嚴格使用響應中的 `extra`（EIP-712 域）和 `payTo`，不要改動欄位順序。
+- **網絡不匹配**：`accepts` 中可能存在多條要求，請選擇 `network === "base"` 的選項。
+- **缺少 `X-PAYMENT-RESPONSE`**：說明支付未實際扣款，可根據響應體中的錯誤重新發起；如遇鏈上擁堵，請稍後重試。
+- **平台 Token 無效**：確認 Token 未被刪除，並以 `platform-v1-` 前綴開頭；若接口返回 401，可在控制台重新生成。
+
+---
+
+## 七、更多幫助
+
+- 在線文檔與常見問題：平台控制台頂部導航「文檔」。
+- 提交工單與客服支持：<https://platform.acedata.cloud/support>
+- 社區交流：Discord <https://discord.gg/f9GRuKCmRc>，X（Twitter）<https://x.com/acedatacloud>
+- 其他渠道：郵箱 `office@acedata.cloud`、`office@germey.tech`；公司地址 651 N Broad St, Suite 201, Middletown, Delaware, USA；WeChat 客服請在支持頁面查看最新二維碼。
+- 反饋建議：歡迎通過上述任意渠道告訴我們改進需求。
