@@ -97,7 +97,9 @@ def get_cached(rel_path: str, content_hash: str) -> str | None:
 def save_cache(rel_path: str, content_hash: str, content: str):
     p = CACHE_DIR / f"{rel_path}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"hash": content_hash, "content": content}, ensure_ascii=False))
+    p.write_text(
+        json.dumps({"hash": content_hash, "content": content}, ensure_ascii=False)
+    )
 
 
 def enhance_file(api_key: str, filepath: Path, docs_dir: Path) -> bool:
@@ -179,7 +181,9 @@ def main():
             stats["skipped"] += 1
         time.sleep(0.5)
 
-    print(f"\nEnhance complete: enhanced={stats['enhanced']} cached={stats['cached']} skipped={stats['skipped']}")
+    print(
+        f"\nEnhance complete: enhanced={stats['enhanced']} cached={stats['cached']} skipped={stats['skipped']}"
+    )
 
 
 if __name__ == "__main__":
