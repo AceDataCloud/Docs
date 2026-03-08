@@ -1,0 +1,349 @@
+---
+title: "AceDataCloud x402 Maksuintegraatio-opas"
+description: "x402 集成指南 - Ace Data Cloud"
+---
+
+x402 on HTTP 402 Payment Required -standardin mukainen lohkoketjumaksuprotokolla, joka mahdollistaa kutsujan suorittaa lohkoketjumaksun API-pyynnön yhteydessä. Se soveltuu erinomaisesti automatisoituihin ohjelmiin, AI-agentteihin ja mikropalveluiden välisiin maksuskenaarioihin. Tämän oppaan avulla voit ohjelmallisesti suorittaa AceDataCloud-tilauksen maksun omassa järjestelmässäsi, saavuttaen "pyynnöstä maksu" -kokemuksen.
+
+Viralliset tiedot:
+
+- x402 Yleiskatsaus-dokumentti: <https://docs.cdp.coinbase.com/x402/docs/overview>
+- x402 Avoimen lähdekoodin esimerkki: <https://github.com/coinbase/x402>
+
+Tämä dokumentti on suunnattu kehittäjille, jotka tarvitsevat AceDataCloud-alustan x402 maksukyvyn integroimista liiketoimintaansa. Se esittelee täydellisen prosessin ympäristön valmistelusta maksupyynnön suorittamiseen ja tarjoaa esimerkkikoodia Axiosille, Fetchille, Python requestsille ja httpx:lle. Keskeiset kohdat:
+
+- Maksuprosessi tapahtuu **Base-pääverkossa**, varat käytetään **USDC**:ssä;
+- `X-PAYMENT` -allekirjoitusotsikko on luotava EVM-yksityisavaimella, joka on hallussasi;
+- Kaikki API:t sijaitsevat `https://platform.acedata.cloud` -verkkotunnuksessa, `Authorization`-otsikon on sisällettävä **Platform Token**.
+
+---
+
+## I. Valmistelut
+
+### 1. Tarkista tilaus ja kirjaa maksutiedot
+
+Kirjaudu sisään konsoliin [https://platform.acedata.cloud](https://platform.acedata.cloud), tilausluettelosta tai tilausyksityiskohtien sivulta voit nähdä maksettavan tilauksen. Tilausyksityiskohdat näyttävät:
+
+- Tilaus ID (esimerkiksi `7744945e-5e77-4dcc-a9c4-528692d17b34`);
+- Maksuosoite `pay_to` (palautuu myös 402-vastauksessa, suositellaan käyttämään sivuston tietoja).
+
+Kirjaa ylös tilaus ID ja varmista `pay_to`-osoite, sillä allekirjoituksessa on varmistettava, että varat lähetetään tähän osoitteeseen.
+
+### 2. Valmistele maksulompakko ja varat
+
+- Valmistele EVM-lompakko, joka tukee Base-pääverkkoa, ja vie käytettävä yksityisavain;
+- Lataa Base-pääverkkoon riittävästi **USDC** (maksusumma on 6 desimaalin tarkkuudella);
+- x402 Facilitator maksaa verkkomaksut, maksulompakon on vain pidettävä riittävästi USDC:tä;
+- Yksityisavainta käytetään vain paikalliseen allekirjoitukseen, säilytä se huolellisesti, jotta se ei altistu selaimessa tai epäluotettavassa ympäristössä.
+
+### 3. Luo Platform Token
+
+Platform Tokenia käytetään alustalle API-kutsujen tekemiseen, ja se toimii samalla tavalla kuin kirjautumisen jälkeen selaimessa käytettävä käyttäjä Token, mutta se ei vanhene. Luo se seuraavien vaiheiden mukaan:
+
+1. Avaa konsolisivu [https://platform.acedata.cloud/console/platform-tokens](https://platform.acedata.cloud/console/platform-tokens);
+2. Napsauta "Luo Token", täytä ohjeiden mukaan muistiinpanotiedot ja luo se;
+3. Kopioi luotu Token (esimerkiksi `platform-v1-xxxx`), ja säilytä se huolellisesti `platform_token`-muodossa.
+
+![platform-token](https://cdn.acedata.cloud/6g86oz.png)
+
+Kaikissa myöhemmissä API-kutsujen otsikoissa on sisällettävä:
+
+```
+Authorization: Bearer {platform_token}
+```
+
+### 4. Pyydä perusinfoa
+
+- API:n perusverkkotunnus: `https://platform.acedata.cloud`
+- Maksupyyntöpolku: `/api/v1/orders/{order_id}/pay/`
+- Pyyntö ja vastaus ovat molemmat JSON-muodossa, koodattuina UTF-8:na.
+
+---
+
+## II. Maksuprosessin yleiskatsaus
+
+1. **Aloita maksupyyntö**: Ensimmäinen `POST`-pyyntö ilman `X-PAYMENT`-otsikkoa, joka laukaisee alustan palauttamaan 402 Payment Required;
+2. **Lue maksuvaatimukset**: Analysoi 402-vastauksen `accepts`-taulukko, varmista että `network` on `base`, `asset` on USDC, ja `payTo` vastaa tilaus-sivua;
+3. **Luo `X-PAYMENT`**: Käytä maksulompakon yksityisavainta, vastauksen vaatimuksia ja Facilitatorin palauttamaa EIP-712 kenttää allekirjoituksen luomiseen (yleensä virallisen SDK:n avulla);
+4. **Lisää allekirjoitus ja yritä uudelleen**: Lisää `X-PAYMENT`-otsikko samaan polkuun, alusta vahvistaa onnistuneesti ja palauttaa 200;
+5. **Analysoi tulos**: Lue vastauksen otsikko `X-PAYMENT-RESPONSE`, josta saat lohkoketjuun liittyvän transaktiohashin, todellisen veloitetun summan jne. tietoja tiliöintiä varten.
+
+---
+
+## III. Esimerkki **###**-integraatiosta
+
+### 1. Ensimmäinen pyyntö (laukaisee 402)
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+Tyypillinen 402-vastaus (kenttien järjestys voi vaihdella hieman):
+
+```json
+{
+  "error": "Maksu vaaditaan tälle tilaukselle.",
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "base",
+      "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54b268aa0e",
+      "maxAmountRequired": "1250000",
+      "payTo": "0x302afdd980aaefca3afa8df7222a6002774f6724",
+      "extra": {
+        "eip712": { "...": "..." }
+      }
+    }
+  ],
+  "paywall": { ... }
+}
+```
+
+Avainkenttien selitys:
+
+- `network`: on oltava `base` (Base-pääverkko);
+- `asset`: Base USDC -sopimuksen osoite (esimerkki virallisesta pääverkon sopimuksesta);
+- `maxAmountRequired`: tämän maksun vaadittu USDC:n atomiyksikkö (1 USDC = 1,000,000 atomiyksikköä);
+- `payTo`: alustan maksuosoite, joka tulee olla sama kuin tilausyksityiskohtien sivulla;
+- `extra`: allekirjoituksessa tarvittavat EIP-712 kenttä tiedot jne.
+
+### 2. Luo `X-PAYMENT`
+
+Yleinen käytäntö on käyttää virallista SDK:ta (kuten `x402-js`, `x402-fetch`, `x402.clients` jne.):
+
+1. Muunna maksulompakon yksityisavain tilitietueeksi;
+2. Tallenna 402-vastauksesta `accepts`-data, valitse maksuvaihtoehto, jossa `network == "base"`;
+3. Kutsu SDK:n tarjoamaa allekirjoitusfunktiota luodaksesi Base64-koodatun `X-PAYMENT`-merkkijonon (asiakkaan ei tarvitse suoraan yhdistää facilitatoriin; alustan taustajärjestelmä huolehtii facilitatorin kutsumisesta verify/settle);
+4. Suositellaan tarkistamaan, että `maxAmountRequired` on hyväksyttävissä rajoissa, ylittäessäsi ilmoita käyttäjälle, että hänen on ladattava lisää varoja.
+
+Jos haluat toteuttaa manuaalisesti, katso x402 virallista dokumentaatiota, rakenna EIP-712 -rakenteet `extra.eip712` -tietojen mukaan ja allekirjoita.
+
+### 3. Lisää allekirjoitus ja yritä uudelleen
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+X-PAYMENT: {base64_signed_payload}
+
+{
+  "pay_way": "X402"
+}
+```
+
+Jos maksu onnistuu, vastaustila on 200, ja vastaus sisältää päivitetyt tilaus tiedot, ja mukana on:
+
+```
+X-PAYMENT-RESPONSE: eyJ0cmFuc2FjdGlvbiI6IjB4...==
+```
+
+`X-PAYMENT-RESPONSE` voidaan purkaa SDK:n dekoodausfunktiolla, josta saat lohkoketjuun liittyvän transaktiohashin, maksaverkon, maksajan osoitteen jne. tietoja liiketoiminnan kirjaamista tai näyttämistä varten.
+
+---
+
+## IV. Monikieliset esimerkkikoodit
+
+Seuraavat esimerkit olettavat, että ympäristömuuttujat tai konfiguraatiotiedostot on injektoitu:
+- `ACE_PLATFORM_TOKEN`：Alustatunnus；
+- `ACE_X402_ORDER_ID`：Tilauksen ID；
+- `ACE_X402_PRIVATE_KEY`：Maksulompakon yksityinen avain (alkuperä `0x` etuliitteellä).
+
+### 1. Axios (TypeScript)
+
+```ts
+import axios from "axios";
+import { Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { buildPaymentHeader, decodePaymentResponse } from "x402-js";
+
+const baseURL = "https://platform.acedata.cloud";
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const privateKey = process.env.ACE_X402_PRIVATE_KEY as Hex;
+
+const account = privateKeyToAccount(privateKey);
+const api = axios.create({
+  baseURL,
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    "Content-Type": "application/json",
+  },
+});
+
+async function payOrder() {
+  const payPath = `/api/v1/orders/${orderId}/pay/`;
+
+  const initial = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { validateStatus: () => true }
+  );
+  if (initial.status !== 402) {
+    throw new Error(`odottamaton tila ${initial.status}`);
+  }
+
+  const requirement = initial.data.accepts.find(
+    (item: any) => item.network === "base"
+  );
+  if (!requirement) {
+    throw new Error("ei perusvaatimusta palautettu");
+  }
+
+  const paymentHeader = await buildPaymentHeader({
+    account,
+    requirement,
+  });
+
+  const final = await api.post(
+    payPath,
+    { pay_way: "X402" },
+    { headers: { "X-PAYMENT": paymentHeader } }
+  );
+
+  if (final.status >= 400) {
+    throw new Error(`x402 maksaminen epäonnistui: ${final.status} ${final.statusText}`);
+  }
+  const receipt = decodePaymentResponse(final.headers["x-payment-response"]);
+  console.log("x402 kuitti", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 2. Fetch (JavaScript)
+
+```ts
+import { wrapFetchWithPayment, decodePaymentResponse } from "x402-fetch";
+import { privateKeyToAccount } from "viem/accounts";
+
+const account = privateKeyToAccount(process.env.ACE_X402_PRIVATE_KEY!);
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_X402_ORDER_ID!;
+const fetchWithPayment = wrapFetchWithPayment(fetch, account);
+
+async function payOrder() {
+  const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+
+  const response = await fetchWithPayment(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${platformToken}`,
+    },
+    body: JSON.stringify({ pay_way: "X402" }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`x402 maksaminen epäonnistui: ${response.status} ${errorBody}`);
+  }
+
+  const receipt = decodePaymentResponse(
+    response.headers.get("x-payment-response")!
+  );
+  console.log("x402 kuitti", receipt);
+}
+
+payOrder().catch(console.error);
+```
+
+### 3. Python requests
+
+```python
+import os
+from eth_account import Account
+from x402.clients.requests import x402_requests
+from x402.clients.base import decode_x_payment_response
+
+order_id = os.environ["ACE_X402_ORDER_ID"]
+platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+session = x402_requests(
+    account,
+    payment_requirements_selector=lambda accepts, **_: next(
+        req for req in accepts if req.network == "base" and req.scheme == "exact"
+    ),
+)
+
+response = session.post(
+    f"https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/",
+    json={"pay_way": "X402"},
+    headers={"Authorization": f"Bearer {platform_token}"},
+)
+
+response.raise_for_status()
+receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+if receipt_header:
+    print("x402 kuitti:", decode_x_payment_response(receipt_header))
+```
+
+### 4. Python httpx (asynkroninen)
+
+```python
+import asyncio
+import os
+from eth_account import Account
+from x402.clients.httpx import x402HttpxClient
+from x402.clients.base import decode_x_payment_response
+
+async def pay_order() -> None:
+    order_id = os.environ["ACE_X402_ORDER_ID"]
+    platform_token = os.environ["ACE_PLATFORM_TOKEN"]
+    account = Account.from_key(os.environ["ACE_X402_PRIVATE_KEY"])
+
+    async with x402HttpxClient(
+        account=account,
+        base_url="https://platform.acedata.cloud",
+        headers={"Authorization": f"Bearer {platform_token}"},
+        payment_requirements_selector=lambda accepts, **_: next(
+            req for req in accepts if req.network == "base"
+        ),
+    ) as client:
+        response = await client.post(
+            f"/api/v1/orders/{order_id}/pay/",
+            json={"pay_way": "X402"},
+        )
+        response.raise_for_status()
+        receipt_header = response.headers.get("X-PAYMENT-RESPONSE")
+        if receipt_header:
+            print("x402 kuitti:", decode_x_payment_response(receipt_header))
+
+asyncio.run(pay_order())
+```
+
+> Esimerkki näyttää vain keskeiset kutsut, tuotantoympäristössä tulee lisätä poikkeusten käsittely, uudelleenyritysohjeet, lokit ja turvallisuusvalvonta.
+
+---
+
+## Viisi, maksamisen onnistumisen vahvistaminen
+
+- **Ohjauspaneelin vahvistus**: Käy tilauksen yksityiskohtasivulla `https://platform.acedata.cloud/console/orders/{order_id}`. Jos sivu näyttää "Maksaminen onnistui" tai tilauksen tila on muuttunut maksetuksi/valmiiksi, se tarkoittaa, että ketjussa tapahtunut selvitys on valmis.
+- **API-vahvistus**: Kutsu `GET https://platform.acedata.cloud/api/v1/orders/{order_id}/` ja liitä `Authorization: Bearer {platform_token}`, tarkista vastauksen `state`-kenttä ( `PAID` tai `FINISHED` tarkoittaa, että maksaminen onnistui).
+- **Vastauspäätteen lukeminen**: Maksamisen onnistumisen vastauksessa lue `X-PAYMENT-RESPONSE`, josta voidaan purkaa ketjun tapahtuman hash lopulliseksi todisteeksi; suositellaan tallentamaan tämä tieto järjestelmän lokiin tiliä varten.
+
+---
+
+## Kuusi, yleiset ongelmat ja niiden ratkaisut
+
+- **Palauttaa edelleen 402**: Varmista, että maksuosoitteella on riittävästi USDC Base-pääverkossa, tarkista, onko `maxAmountRequired` ylittänyt lompakon saldon tai mukautetun rajan.
+- **Allekirjoitus epäonnistui**: Varmista, että yksityinen avain sisältää `0x` etuliitteen; allekirjoittaessasi käytä tarkasti vastauksessa olevaa `extra` (EIP-712 kenttä) ja `payTo`, älä muuta kenttien järjestystä.
+- **Verkko ei vastaa**: `accepts`-listassa voi olla useita vaatimuksia, valitse vaihtoehto, jossa `network === "base"`.
+- **Puuttuu `X-PAYMENT-RESPONSE`**: Tämä tarkoittaa, että maksua ei ole oikeasti veloitettu, voit yrittää uudelleen vastauksen virheen perusteella; jos kohtaat ketjun ruuhkaa, yritä myöhemmin uudelleen.
+- **Alustatunnus on virheellinen**: Varmista, että tunnusta ei ole poistettu ja että se alkaa `platform-v1-` etuliitteellä; jos rajapinta palauttaa 401, voit luoda sen uudelleen ohjauspaneelissa.
+
+---
+
+## Seitsemän, lisäapua
+
+- Verkkodokumentaatio ja usein kysytyt kysymykset: Alustapaneelin yläreunan navigointi "Dokumentaatio".
+- Tuki ja asiakaspalvelu: <https://platform.acedata.cloud/support>
+- Yhteisöviestintä: Discord <https://discord.gg/f9GRuKCmRc>, X (Twitter) <https://x.com/acedatacloud>
+- Muut kanavat: sähköposti `office@acedata.cloud`, `office@germey.tech`; yrityksen osoite 651 N Broad St, Suite 201, Middletown, Delaware, USA; WeChat-asiakaspalvelu, tarkista viimeisin QR-koodi tukisivulta.
+- Palaute ja ehdotukset: Tervetuloa kertomaan meille parannustarpeista yllä olevien kanavien kautta.
