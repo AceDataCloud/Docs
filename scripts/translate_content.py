@@ -31,8 +31,23 @@ MODEL = "gpt-4.1-mini"
 CACHE_DIR = DOCS_DIR / ".cache" / "translate"
 
 ALL_TARGET_LANGUAGES = [
-    "en", "zh-TW", "ja", "ko", "es", "fr", "de", "pt",
-    "ru", "ar", "it", "fi", "sv", "el", "uk", "pl", "sr",
+    "en",
+    "zh-TW",
+    "ja",
+    "ko",
+    "es",
+    "fr",
+    "de",
+    "pt",
+    "ru",
+    "ar",
+    "it",
+    "fi",
+    "sv",
+    "el",
+    "uk",
+    "pl",
+    "sr",
 ]
 
 LANGUAGE_NAMES_ZH = {
@@ -78,6 +93,7 @@ ROOT_FILES = [
 # ===========================================================================
 # LLM helpers
 # ===========================================================================
+
 
 def get_api_key() -> str:
     return os.environ.get("ACEDATACLOUD_OPENAI_KEY", "")
@@ -135,7 +151,9 @@ def get_cached(lang: str, rel_path: str, content_hash: str) -> str | None:
 def save_cache(lang: str, rel_path: str, content_hash: str, content: str):
     p = CACHE_DIR / lang / f"{rel_path}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"hash": content_hash, "content": content}, ensure_ascii=False))
+    p.write_text(
+        json.dumps({"hash": content_hash, "content": content}, ensure_ascii=False)
+    )
 
 
 # ===========================================================================
@@ -258,11 +276,19 @@ def collect_root_files(docs_dir: Path) -> list[Path]:
 def main():
     import argparse
 
+<<<<<<< Updated upstream
     t0 = time.time()
 
     parser = argparse.ArgumentParser(description="Translate docs from zh-CN to all target languages")
+=======
+    parser = argparse.ArgumentParser(
+        description="Translate docs from zh-CN to all target languages"
+    )
+>>>>>>> Stashed changes
     parser.add_argument("--output-dir", type=Path, default=DOCS_DIR)
-    parser.add_argument("--languages", nargs="*", default=None, help="Target languages (default: all)")
+    parser.add_argument(
+        "--languages", nargs="*", default=None, help="Target languages (default: all)"
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--root-only", action="store_true",
                         help="Only translate root MDX files (intro, quickstart, auth). "
@@ -288,8 +314,15 @@ def main():
 
     if args.dry_run:
         for f in src_files:
+<<<<<<< Updated upstream
             print(f"  {f.relative_to(args.output_dir)}", flush=True)
         print(f"\nWould translate {len(src_files)} files × {len(langs)} languages = {len(src_files) * len(langs)} translations", flush=True)
+=======
+            print(f"  {f.relative_to(args.output_dir)}")
+        print(
+            f"\nWould translate {len(src_files)} files × {len(langs)} languages = {len(src_files) * len(langs)} translations"
+        )
+>>>>>>> Stashed changes
         return
 
     stats = {"translated": 0, "cached": 0, "failed": 0}
@@ -337,6 +370,7 @@ def main():
                 print(f" ✗ FAILED ({dt:.1f}s)", flush=True)
             time.sleep(0.3)
 
+<<<<<<< Updated upstream
         lang_dt = time.time() - lang_t0
         print(f"  {lang} done: {lang_translated} translated, {lang_cached} cached ({lang_dt:.1f}s)", flush=True)
 
@@ -346,6 +380,11 @@ def main():
     print(f"  translated={stats['translated']} cached={stats['cached']} failed={stats['failed']}", flush=True)
     print(f"  LLM calls={llm_calls}", flush=True)
     print(f"{'='*40}", flush=True)
+=======
+    print(
+        f"\nTranslation complete: translated={stats['translated']} cached={stats['cached']} failed={stats['failed']}"
+    )
+>>>>>>> Stashed changes
 
 
 if __name__ == "__main__":

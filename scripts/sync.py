@@ -549,16 +549,23 @@ def _sanitize_html_for_mdx(content: str) -> str:
             r"\1className=",
             part,
         )
-        # Self-close <img ...> tags that aren't already self-closed
-        part = re.sub(
-            r"(<img\b[^>]*?)(?<!/)>",
-            r"\1 />",
-            part,
-        )
+        # Self-close void elements that aren't already self-closed
+        for tag in ("img", "br", "hr", "input", "source", "meta", "link"):
+            part = re.sub(
+                rf"(<{tag}\b[^>]*?)(?<!/)>",
+                rf"\1 />",
+                part,
+            )
         # Angle-bracket URLs → markdown links
         part = re.sub(
             r"<(https?://[^>]+)>",
             r"[\1](\1)",
+            part,
+        )
+        # Escape bare < that don't start valid HTML/JSX tags (e.g. <= in tables)
+        part = re.sub(
+            r"<(?![a-zA-Z/!])",
+            r"&lt;",
             part,
         )
         parts[i] = part

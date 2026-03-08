@@ -55,37 +55,154 @@ CATEGORY_ORDER = [
 # ---------------------------------------------------------------------------
 
 COMPARISONS = [
-    {"slug": "claude-vs-openai-api", "title": "Claude vs OpenAI API 对比", "services": ["claude", "openai"], "topic": "AI 聊天模型 API"},
-    {"slug": "gemini-vs-deepseek-api", "title": "Gemini vs DeepSeek API 对比", "services": ["gemini", "deepseek"], "topic": "AI 聊天模型 API"},
-    {"slug": "midjourney-vs-flux-api", "title": "Midjourney vs Flux API 对比", "services": ["midjourney", "flux"], "topic": "AI 图像生成 API"},
-    {"slug": "sora-vs-luma-vs-kling-api", "title": "Sora vs Luma vs Kling API 对比", "services": ["sora", "luma", "kling"], "topic": "AI 视频生成 API"},
-    {"slug": "suno-vs-producer-api", "title": "Suno vs Producer API 对比", "services": ["suno", "producer"], "topic": "AI 音乐生成 API"},
-    {"slug": "hailuo-vs-seedance-api", "title": "Hailuo vs Seedance API 对比", "services": ["hailuo", "seedance"], "topic": "AI 视频生成 API"},
-    {"slug": "veo-vs-sora-api", "title": "Veo vs Sora API 对比", "services": ["veo", "sora"], "topic": "AI 视频生成 API"},
-    {"slug": "seedream-vs-midjourney-api", "title": "Seedream vs Midjourney API 对比", "services": ["seedream", "midjourney"], "topic": "AI 图像生成 API"},
-    {"slug": "grok-vs-kimi-api", "title": "Grok vs Kimi API 对比", "services": ["grok", "kimi"], "topic": "AI 聊天模型 API"},
+    {
+        "slug": "claude-vs-openai-api",
+        "title": "Claude vs OpenAI API 对比",
+        "services": ["claude", "openai"],
+        "topic": "AI 聊天模型 API",
+    },
+    {
+        "slug": "gemini-vs-deepseek-api",
+        "title": "Gemini vs DeepSeek API 对比",
+        "services": ["gemini", "deepseek"],
+        "topic": "AI 聊天模型 API",
+    },
+    {
+        "slug": "midjourney-vs-flux-api",
+        "title": "Midjourney vs Flux API 对比",
+        "services": ["midjourney", "flux"],
+        "topic": "AI 图像生成 API",
+    },
+    {
+        "slug": "sora-vs-luma-vs-kling-api",
+        "title": "Sora vs Luma vs Kling API 对比",
+        "services": ["sora", "luma", "kling"],
+        "topic": "AI 视频生成 API",
+    },
+    {
+        "slug": "suno-vs-producer-api",
+        "title": "Suno vs Producer API 对比",
+        "services": ["suno", "producer"],
+        "topic": "AI 音乐生成 API",
+    },
+    {
+        "slug": "hailuo-vs-seedance-api",
+        "title": "Hailuo vs Seedance API 对比",
+        "services": ["hailuo", "seedance"],
+        "topic": "AI 视频生成 API",
+    },
+    {
+        "slug": "veo-vs-sora-api",
+        "title": "Veo vs Sora API 对比",
+        "services": ["veo", "sora"],
+        "topic": "AI 视频生成 API",
+    },
+    {
+        "slug": "seedream-vs-midjourney-api",
+        "title": "Seedream vs Midjourney API 对比",
+        "services": ["seedream", "midjourney"],
+        "topic": "AI 图像生成 API",
+    },
+    {
+        "slug": "grok-vs-kimi-api",
+        "title": "Grok vs Kimi API 对比",
+        "services": ["grok", "kimi"],
+        "topic": "AI 聊天模型 API",
+    },
 ]
 
 USE_CASES = [
-    {"slug": "build-ai-chatbot", "title": "构建 AI 聊天机器人", "services": ["claude", "openai"], "topic": "使用 Claude/OpenAI API 构建多轮对话聊天机器人"},
-    {"slug": "ai-image-generation-app", "title": "AI 图像生成应用", "services": ["midjourney", "flux", "seedream"], "topic": "使用 Midjourney/Flux/Seedream API 构建图像生成应用"},
-    {"slug": "ai-video-generation-pipeline", "title": "AI 视频生成流水线", "services": ["sora", "luma", "kling"], "topic": "使用 Sora/Luma/Kling API 构建视频生成流水线"},
-    {"slug": "ai-music-generation", "title": "AI 音乐生成应用", "services": ["suno", "producer"], "topic": "使用 Suno/Producer API 实现 AI 音乐创作"},
-    {"slug": "web-search-integration", "title": "Web 搜索集成", "services": ["serp"], "topic": "使用 Google Search API (SERP) 为应用添加实时搜索功能"},
-    {"slug": "ai-qr-code-art", "title": "AI 艺术二维码", "services": ["qrart"], "topic": "使用 QR Art API 生成艺术风格二维码"},
-    {"slug": "mcp-server-integration", "title": "MCP Server 集成", "services": ["suno", "midjourney", "serp"], "topic": "将 AI 服务通过 MCP 协议集成到 Cursor/Claude 等编程工具"},
-    {"slug": "build-saas-with-ai-api", "title": "基于 AI API 构建 SaaS 产品", "services": ["claude", "openai", "midjourney"], "topic": "使用 Ace Data Cloud 统一 API 快速搭建 AI SaaS 产品"},
+    {
+        "slug": "build-ai-chatbot",
+        "title": "构建 AI 聊天机器人",
+        "services": ["claude", "openai"],
+        "topic": "使用 Claude/OpenAI API 构建多轮对话聊天机器人",
+    },
+    {
+        "slug": "ai-image-generation-app",
+        "title": "AI 图像生成应用",
+        "services": ["midjourney", "flux", "seedream"],
+        "topic": "使用 Midjourney/Flux/Seedream API 构建图像生成应用",
+    },
+    {
+        "slug": "ai-video-generation-pipeline",
+        "title": "AI 视频生成流水线",
+        "services": ["sora", "luma", "kling"],
+        "topic": "使用 Sora/Luma/Kling API 构建视频生成流水线",
+    },
+    {
+        "slug": "ai-music-generation",
+        "title": "AI 音乐生成应用",
+        "services": ["suno", "producer"],
+        "topic": "使用 Suno/Producer API 实现 AI 音乐创作",
+    },
+    {
+        "slug": "web-search-integration",
+        "title": "Web 搜索集成",
+        "services": ["serp"],
+        "topic": "使用 Google Search API (SERP) 为应用添加实时搜索功能",
+    },
+    {
+        "slug": "ai-qr-code-art",
+        "title": "AI 艺术二维码",
+        "services": ["qrart"],
+        "topic": "使用 QR Art API 生成艺术风格二维码",
+    },
+    {
+        "slug": "mcp-server-integration",
+        "title": "MCP Server 集成",
+        "services": ["suno", "midjourney", "serp"],
+        "topic": "将 AI 服务通过 MCP 协议集成到 Cursor/Claude 等编程工具",
+    },
+    {
+        "slug": "build-saas-with-ai-api",
+        "title": "基于 AI API 构建 SaaS 产品",
+        "services": ["claude", "openai", "midjourney"],
+        "topic": "使用 Ace Data Cloud 统一 API 快速搭建 AI SaaS 产品",
+    },
 ]
 
 BLOG_ARTICLES = [
-    {"slug": "unified-ai-api-platform", "title": "为什么选择统一 AI API 平台", "topic": "分析使用统一 API 平台（如 Ace Data Cloud）对比直接对接各 AI 厂商 API 的优势"},
-    {"slug": "openai-compatible-api-guide", "title": "OpenAI 兼容 API 完全指南", "topic": "详解如何通过 OpenAI 兼容接口一次性接入 Claude/Gemini/DeepSeek/Grok 等多种模型"},
-    {"slug": "best-ai-apis-2025", "title": "2025 年最佳 AI API 推荐", "topic": "盘点 2025 年最值得关注的 AI API：聊天、图像、视频、音乐、搜索等各领域"},
-    {"slug": "ai-video-generation-guide", "title": "AI 视频生成 API 入门", "topic": "介绍 Sora/Veo/Luma/Kling/Hailuo/Seedance 等视频生成 API 的使用及对比"},
-    {"slug": "suno-music-api-tutorial", "title": "Suno 音乐生成 API 教程", "topic": "深入讲解如何使用 Suno API 生成定制音乐、填词、分离人声"},
-    {"slug": "midjourney-api-guide", "title": "Midjourney API 调用指南", "topic": "详解通过 API 调用 Midjourney 进行图像生成、编辑、描述、视频等操作"},
-    {"slug": "mcp-servers-explained", "title": "MCP Server 是什么", "topic": "解释 Model Context Protocol (MCP) 协议，以及如何使用 MCP Server 连接 AI 工具与 API"},
-    {"slug": "ai-api-pricing-comparison", "title": "AI API 价格对比分析", "topic": "对比各大 AI API 平台的定价策略，分析 Ace Data Cloud 的按量付费优势"},
+    {
+        "slug": "unified-ai-api-platform",
+        "title": "为什么选择统一 AI API 平台",
+        "topic": "分析使用统一 API 平台（如 Ace Data Cloud）对比直接对接各 AI 厂商 API 的优势",
+    },
+    {
+        "slug": "openai-compatible-api-guide",
+        "title": "OpenAI 兼容 API 完全指南",
+        "topic": "详解如何通过 OpenAI 兼容接口一次性接入 Claude/Gemini/DeepSeek/Grok 等多种模型",
+    },
+    {
+        "slug": "best-ai-apis-2025",
+        "title": "2025 年最佳 AI API 推荐",
+        "topic": "盘点 2025 年最值得关注的 AI API：聊天、图像、视频、音乐、搜索等各领域",
+    },
+    {
+        "slug": "ai-video-generation-guide",
+        "title": "AI 视频生成 API 入门",
+        "topic": "介绍 Sora/Veo/Luma/Kling/Hailuo/Seedance 等视频生成 API 的使用及对比",
+    },
+    {
+        "slug": "suno-music-api-tutorial",
+        "title": "Suno 音乐生成 API 教程",
+        "topic": "深入讲解如何使用 Suno API 生成定制音乐、填词、分离人声",
+    },
+    {
+        "slug": "midjourney-api-guide",
+        "title": "Midjourney API 调用指南",
+        "topic": "详解通过 API 调用 Midjourney 进行图像生成、编辑、描述、视频等操作",
+    },
+    {
+        "slug": "mcp-servers-explained",
+        "title": "MCP Server 是什么",
+        "topic": "解释 Model Context Protocol (MCP) 协议，以及如何使用 MCP Server 连接 AI 工具与 API",
+    },
+    {
+        "slug": "ai-api-pricing-comparison",
+        "title": "AI API 价格对比分析",
+        "topic": "对比各大 AI API 平台的定价策略，分析 Ace Data Cloud 的按量付费优势",
+    },
 ]
 
 
@@ -241,7 +358,7 @@ def gen_tutorial(api_key: str, svc: dict, lang: str, out: Path) -> bool:
     lang_d = lang_map.get(lang, lang)
 
     prompt = f"""为 {name} 服务写 {lang_d} 快速入门。
-服务: {name}，分类: {svc.get('category','')}
+服务: {name}，分类: {svc.get("category", "")}
 主端点: {method} https://api.acedata.cloud{path}
 其他端点: {api_list}
 按结构生成：简介→前置条件→基础用法→响应处理→进阶→错误处理→下一步（链接 /guides/{alias}/ 和 /api-reference/{alias}/）"""
@@ -342,12 +459,14 @@ def gen_comparison(api_key: str, comp: dict, services: list[dict], out: Path) ->
     for s, a in zip(infos, comp["services"]):
         if s:
             paths = [api.get("path", "") for api in s.get("apis", [])[:3]]
-            details.append(f"- {a}: 分类={s.get('category','')}, 端点: {', '.join(paths)}")
+            details.append(
+                f"- {a}: 分类={s.get('category', '')}, 端点: {', '.join(paths)}"
+            )
         else:
             details.append(f"- {a}: 未知")
 
-    prompt = f"""写「{comp['title']}」对比文章。
-主题: {comp['topic']}
+    prompt = f"""写「{comp["title"]}」对比文章。
+主题: {comp["topic"]}
 服务:\n{chr(10).join(details)}
 结构：概述→对比表格→详细分析→场景推荐→Python 代码示例（api.acedata.cloud）→总结"""
 
@@ -364,9 +483,9 @@ def gen_comparison(api_key: str, comp: dict, services: list[dict], out: Path) ->
 
     names = [display_name(s) if s else a for s, a in zip(infos, comp["services"])]
     fm = f"""---
-title: "{comp['title']}"
-sidebarTitle: "{' vs '.join(names)}"
-description: "{comp['topic']}：功能、定价、场景全面对比"
+title: "{comp["title"]}"
+sidebarTitle: "{" vs ".join(names)}"
+description: "{comp["topic"]}：功能、定价、场景全面对比"
 ---
 
 """
@@ -387,8 +506,8 @@ def gen_use_case(api_key: str, uc: dict, services: list[dict], out: Path) -> boo
         else:
             details.append(f"- {a}")
 
-    prompt = f"""写「{uc['title']}」用例指南。
-主题: {uc['topic']}
+    prompt = f"""写「{uc["title"]}」用例指南。
+主题: {uc["topic"]}
 服务:\n{chr(10).join(details)}
 结构：概述→技术架构→环境准备→分步实现（完整 Python）→测试→优化建议→相关链接"""
 
@@ -404,8 +523,8 @@ def gen_use_case(api_key: str, uc: dict, services: list[dict], out: Path) -> boo
         return False
 
     fm = f"""---
-title: "{uc['title']}"
-description: "{uc['topic']}"
+title: "{uc["title"]}"
+description: "{uc["topic"]}"
 ---
 
 """
@@ -417,7 +536,7 @@ description: "{uc['topic']}"
 
 def gen_blog(api_key: str, art: dict, out: Path) -> bool:
     slug = art["slug"]
-    prompt = f"""写博客「{art['title']}」。\n主题: {art['topic']}\n结构：引言→3-5个要点→代码示例（如适用）→总结"""
+    prompt = f"""写博客「{art["title"]}」。\n主题: {art["topic"]}\n结构：引言→3-5个要点→代码示例（如适用）→总结"""
 
     ph = _hash(f"blog_{slug}_v3")
     content = get_cached("blog", slug, ph)
@@ -431,8 +550,8 @@ def gen_blog(api_key: str, art: dict, out: Path) -> bool:
         return False
 
     fm = f"""---
-title: "{art['title']}"
-description: "{art['topic']}"
+title: "{art["title"]}"
+description: "{art["topic"]}"
 ---
 
 """
@@ -527,8 +646,14 @@ def main():
         if ok:
             stats["blog"] += 1
 
+<<<<<<< Updated upstream
     elapsed = time.time() - t0
     print(f"\nSEO generation complete in {elapsed:.1f}s: tutorials={stats['tutorials']} comparisons={stats['comparisons']} use-cases={stats['use_cases']} blog={stats['blog']}", flush=True)
+=======
+    print(
+        f"\nSEO generation complete: tutorials={stats['tutorials']} comparisons={stats['comparisons']} use-cases={stats['use_cases']} blog={stats['blog']}"
+    )
+>>>>>>> Stashed changes
 
 
 if __name__ == "__main__":
