@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
-import subprocess
 import sys
 import time as _time
 from pathlib import Path
@@ -581,6 +579,101 @@ def _build_tutorials_nav(output_dir: Path) -> list:
     return nav
 
 
+def _copy_seo_pages(docs_dir: Path, output_dir: Path):
+    """Copy pre-generated SEO content from PlatformBackend/docs to Mintlify output.
+
+    Source files:  tutorial_{service}_{lang}.md, comparison_{slug}.md,
+                   use_case_{slug}.md, blog_{slug}.md
+    Destination:   tutorials/{service}/{lang}.mdx, comparisons/{slug}.mdx,
+                   use-cases/{slug}.mdx, blog/{slug}.mdx
+    """
+    if not docs_dir.is_dir():
+        log(f"  WARNING: {docs_dir} not found, skipping SEO pages")
+        return
+
+    counts: dict[str, int] = {"tutorials": 0, "comparisons": 0, "use-cases": 0, "blog": 0}
+
+    for src in sorted(docs_dir.glob("*.md")):
+        name = src.stem  # e.g. tutorial_claude_python
+
+        if name.startswith("tutorial_"):
+            # tutorial_{service}_{lang}.md → tutorials/{service}/{lang}.mdx
+            rest = name[len("tutorial_"):]  # e.g. claude_python or nano-banana_curl
+            # Find the last _ that separates service from lang
+            for lang in ("python", "javascript", "curl"):
+                suffix = f"_{lang}"
+                if rest.endswith(suffix):
+                    service = rest[: -len(suffix)]
+                    dst = output_dir / "tutorials" / service / f"{lang}.mdx"
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    _write_seo_mdx(src, dst)
+                    counts["tutorials"] += 1
+                    break
+
+        elif name.startswith("comparison_"):
+            slug = name[len("comparison_"):]
+            dst = output_dir / "comparisons" / f"{slug}.mdx"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _write_seo_mdx(src, dst)
+            counts["comparisons"] += 1
+
+        elif name.startswith("use_case_"):
+            slug = name[len("use_case_"):]
+            dst = output_dir / "use-cases" / f"{slug}.mdx"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _write_seo_mdx(src, dst)
+            counts["use-cases"] += 1
+
+        elif name.startswith("blog_"):
+            slug = name[len("blog_"):]
+            dst = output_dir / "blog" / f"{slug}.mdx"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            _write_seo_mdx(src, dst)
+            counts["blog"] += 1
+
+    for cat, n in counts.items():
+        log(f"  {cat}: {n} files")
+    log(f"  Total: {sum(counts.values())} SEO pages copied")
+
+
+def _write_seo_mdx(src: Path, dst: Path):
+    """Read a Markdown source and write as MDX with frontmatter.
+
+    If the source already has frontmatter (---), keep it.
+    Otherwise, extract the first H1 as the title and generate frontmatter.
+    """
+    content = src.read_text(encoding="utf-8")
+
+    if content.startswith("---"):
+        # Already has frontmatter
+        dst.write_text(content, encoding="utf-8")
+        return
+
+    # Extract title from first H1
+    title = ""
+    lines = content.split("\n")
+    body_start = 0
+    for i, line in enumerate(lines):
+        if line.startswith("# "):
+            title = line[2:].strip()
+            body_start = i + 1
+            break
+
+    if not title:
+        title = src.stem.replace("_", " ").replace("-", " ").title()
+
+    body = "\n".join(lines[body_start:]).strip()
+    mdx = f"""---
+title: "{title}"
+---
+
+{body}
+"""
+    dst.write_text(mdx, encoding="utf-8")
+
+
+
+
 def _build_simple_nav(directory: str, output_dir: Path) -> list[str]:
     """Auto-discover MDX pages in a flat directory."""
     d = output_dir / directory
@@ -1138,21 +1231,13 @@ Authorization: Bearer YOUR_API_TOKEN
     log("Step 5 done")
 
     # ---------------------------------------------------------------------------
-    # 6. Generate SEO pages (tutorials, comparisons, use-cases, blog)
+    # 6. Copy pre-generated SEO pages (tutorials, comparisons, use-cases, blog)
     # ---------------------------------------------------------------------------
     log()
     log("=" * 60)
-    log("Step 6/8: Generate SEO pages (tutorials, comparisons, use-cases, blog)")
+    log("Step 6/8: Copy pre-generated SEO pages from PlatformBackend/docs")
     log("=" * 60)
-    seo_script = Path(__file__).parent / "generate_seo_pages.py"
-    if seo_script.exists():
-        log("Running SEO page generation...")
-        result = subprocess.run(
-            [sys.executable, "-u", str(seo_script), "--backend-dir", str(backend_dir), "--output-dir", str(output_dir)],
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
-        )
-        if result.returncode != 0:
-            log(f"  SEO generation exited with code {result.returncode}")
+    _copy_seo_pages(backend_dir / "docs", output_dir)
     log("Step 6 done")
 
     # ---------------------------------------------------------------------------
