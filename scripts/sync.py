@@ -19,207 +19,151 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Service categorization
+# Config: display order + icons for categories, docs to skip.
+# Everything else is data-driven from service_api_mapping.json.
 # ---------------------------------------------------------------------------
-SERVICE_CATEGORIES = {
-    "AI Chat": {
-        "icon": "comments",
-        "services": ["claude", "openai", "gemini", "deepseek", "grok", "kimi"],
-    },
-    "AI Image": {
-        "icon": "image",
-        "services": ["midjourney", "flux", "seedream", "nano-banana", "qrart", "face", "headshots"],
-    },
-    "AI Video": {
-        "icon": "video",
-        "services": ["sora", "veo", "luma", "kling", "hailuo", "seedance", "wan", "pika", "pixverse"],
-    },
-    "AI Audio": {
-        "icon": "music",
-        "services": ["suno", "fish", "producer", "riffusion", "udio"],
-    },
-    "Web & Data": {
-        "icon": "globe",
-        "services": ["serp", "localization", "shorturl", "aichat"],
-    },
-    "CAPTCHA": {
-        "icon": "shield-halved",
-        "services": ["recaptcha", "hcaptcha", "image2text"],
-    },
-    "Identity": {
-        "icon": "id-card",
-        "services": ["identity"],
-    },
-    "Proxy": {
-        "icon": "network-wired",
-        "services": ["global-rotating-proxy", "adsl", "adsl-http-proxy", "cellular-rotating-proxy"],
-    },
+CATEGORY_ORDER = [
+    "AI Chat", "AI Image", "AI Video", "AI Audio",
+    "Web & Data", "CAPTCHA", "Identity", "Proxy",
+]
+
+CATEGORY_ICONS: dict[str, str] = {
+    "AI Chat": "comments",
+    "AI Image": "image",
+    "AI Video": "video",
+    "AI Audio": "music",
+    "Web & Data": "globe",
+    "CAPTCHA": "shield-halved",
+    "Identity": "id-card",
+    "Proxy": "network-wired",
 }
 
-# Map service alias → human-readable name
-SERVICE_NAMES = {
-    "claude": "Claude",
-    "openai": "OpenAI",
-    "gemini": "Gemini",
-    "deepseek": "DeepSeek",
-    "grok": "Grok",
-    "kimi": "Kimi",
-    "midjourney": "Midjourney",
-    "flux": "Flux",
-    "seedream": "Seedream",
-    "nano-banana": "Nano Banana",
-    "qrart": "QR Art",
-    "face": "Face",
-    "headshots": "Headshots",
-    "sora": "Sora",
-    "veo": "Veo",
-    "luma": "Luma",
-    "kling": "Kling",
-    "hailuo": "Hailuo",
-    "seedance": "Seedance",
-    "wan": "Wan",
-    "pika": "Pika",
-    "pixverse": "Pixverse",
-    "suno": "Suno",
-    "fish": "Fish Audio",
-    "producer": "Producer",
-    "riffusion": "Riffusion",
-    "udio": "Udio",
-    "serp": "Google Search",
-    "localization": "Localization",
-    "shorturl": "Short URL",
-    "aichat": "AI Chat Widget",
-    "recaptcha": "reCAPTCHA",
-    "hcaptcha": "hCaptcha",
-    "image2text": "Image2Text",
-    "identity": "Identity Verification",
-    "global-rotating-proxy": "Global Rotating Proxy",
-    "adsl": "ADSL Rotating Proxy",
-    "adsl-http-proxy": "ADSL HTTP Proxy",
-    "cellular-rotating-proxy": "Cellular Rotating Proxy",
+# Doc keys that should never appear in the docs site.
+SKIP_DOC_KEYS = {
+    "acedataext",
+    "application_remaining_amount",
+    "nexior_vercel_deployment",
+    "acedatacloud_chat_api_integration_article",
+    "tw_comments",
+    "tw_posts",
+    "tw_users",
 }
 
-# Map development doc key → service alias
-DEV_DOC_SERVICE_MAP = {
-    "claude_chat_completions": "claude",
-    "claude_messages": "claude",
-    "claude_messages_count_tokens": "claude",
-    "claude_code": "claude",
-    "claude_code_desktop": "claude",
-    "claude_code_github_actions": "claude",
-    "claude_code_jetbrains": "claude",
-    "claude_code_terminal": "claude",
-    "claude_code_vscode": "claude",
-    "openai_chat_completions": "openai",
-    "openai_chat_completions_4o_image": "openai",
-    "openai_embeddings": "openai",
-    "openai_images_generations": "openai",
-    "openai_images_edits": "openai",
-    "openai_responses": "openai",
-    "gemini_chat_completions": "gemini",
-    "deepseek_chat_completions": "deepseek",
-    "grok_chat_completions": "grok",
-    "kimi_chat_completions": "kimi",
-    "midjourney_imagine": "midjourney",
-    "midjourney_edits": "midjourney",
-    "midjourney_describe": "midjourney",
-    "midjourney_translate": "midjourney",
-    "midjourney_videos": "midjourney",
-    "midjourney_tasks": "midjourney",
-    "flux_images": "flux",
-    "flux_tasks": "flux",
-    "seedream_images": "seedream",
-    "seedream_tasks": "seedream",
-    "nanobanana_images": "nano-banana",
-    "nanobanana_tasks": "nano-banana",
-    "qrart_generate": "qrart",
-    "qrart_tasks": "qrart",
-    "face_analyze": "face",
-    "face_beautify": "face",
-    "face_cartoon": "face",
-    "face_change_age": "face",
-    "face_change_gender": "face",
-    "face_detect_live": "face",
-    "face_swap": "face",
-    "headshots_generation": "headshots",
-    "headshots_tasks": "headshots",
-    "sora_videos": "sora",
-    "sora_tasks": "sora",
-    "veo_videos": "veo",
-    "veo_tasks": "veo",
-    "luma_videos": "luma",
-    "luma_tasks": "luma",
-    "kling_videos": "kling",
-    "kling_motion": "kling",
-    "kling_tasks": "kling",
-    "hailuo_videos": "hailuo",
-    "hailuo_tasks": "hailuo",
-    "seedance_videos": "seedance",
-    "seedance_tasks": "seedance",
-    "wan_videos": "wan",
-    "wan_tasks": "wan",
-    "pika_videos": "pika",
-    "pika_tasks": "pika",
-    "pixverse_videos": "pixverse",
-    "pixverse_character": "pixverse",
-    "pixverse_tasks": "pixverse",
-    "suno_audios": "suno",
-    "suno_persona": "suno",
-    "suno_mp4": "suno",
-    "suno_timing": "suno",
-    "suno_vox": "suno",
-    "suno_wav": "suno",
-    "suno_midi": "suno",
-    "suno_style": "suno",
-    "suno_lyrics": "suno",
-    "suno_mashup_lyrics": "suno",
-    "suno_tasks": "suno",
-    "suno_upload": "suno",
-    "fish_audios": "fish",
-    "fish_voices": "fish",
-    "fish_tasks": "fish",
-    "producer_audios": "producer",
-    "producer_videos": "producer",
-    "producer_upload": "producer",
-    "producer_wav": "producer",
-    "producer_tasks": "producer",
-    "producer_lyrics": "producer",
-    "riffusion_audios": "riffusion",
-    "riffusion_tasks": "riffusion",
-    "riffusion_upload": "riffusion",
-    "udio_audios": "udio",
-    "udio_tasks": "udio",
-    "serp_google": "serp",
-    "localization_translation": "localization",
-    "short_url": "shorturl",
-    "aichat_conversations": "aichat",
-    "captcha_recognition_recaptcha2": "recaptcha",
-    "captcha_token_recaptcha2": "recaptcha",
-    "captcha_token_recaptcha3": "recaptcha",
-    "captcha_recognition_hcaptcha": "hcaptcha",
-    "captcha_token_hcaptcha": "hcaptcha",
-    "captcha_recognition_image2text": "image2text",
-    "identity_bankcard_check-1e": "identity",
-    "identity_bankcard_check-2e": "identity",
-    "identity_bankcard_check-3e": "identity",
-    "identity_bankcard_check-4e": "identity",
-    "identity_idcard_check-1e": "identity",
-    "identity_idcard_check-2e": "identity",
-    "identity_idcard_ocr": "identity",
-    "identity_phone_check-1e": "identity",
-    "identity_phone_check-2e": "identity",
-    "identity_phone_check-3e": "identity",
-    "adsl_extract_proxy": "adsl-http-proxy",
-    "adsl_rotating_proxy": "adsl",
-    "global_rotating_proxy": "global-rotating-proxy",
-    "cellular_rotating_proxy": "cellular-rotating-proxy",
-    "acedataext": None,  # skip
-    "application_remaining_amount": None,  # platform internal
-    "nexior_vercel_deployment": None,  # platform internal
-    "tw_comments": None,  # skip
-    "tw_posts": None,  # skip
-    "tw_users": None,  # skip
-}
+
+def _normalize(s: str) -> str:
+    """Normalize for fuzzy matching: lowercase, strip hyphens and underscores."""
+    return s.lower().replace("-", "").replace("_", "")
+
+
+def build_service_names(service_by_alias: dict[str, dict]) -> dict[str, str]:
+    """Build alias → display_name map from enriched mapping data."""
+    names: dict[str, str] = {}
+    for alias, svc in service_by_alias.items():
+        # Prefer display_name from enriched mapping, fall back to alias title-case
+        names[alias] = svc.get("display_name") or alias.replace("-", " ").replace("_", " ").title()
+    return names
+
+
+def build_categories(
+    service_by_alias: dict[str, dict],
+) -> dict[str, dict]:
+    """
+    Build category → {icon, services} from the mapping's ``category`` field.
+    Returns categories in CATEGORY_ORDER, with any extras appended.
+    """
+    cat_services: dict[str, list[str]] = {}  # category name → [alias, ...]
+    for alias, svc in service_by_alias.items():
+        cat = svc.get("category")
+        if not cat:
+            continue
+        cat_services.setdefault(cat, []).append(alias)
+
+    # Sort services within each category by rank (lower = first)
+    for cat, aliases in cat_services.items():
+        aliases.sort(key=lambda a: service_by_alias[a].get("rank", 0))
+
+    ordered: dict[str, dict] = {}
+    for cat_name in CATEGORY_ORDER:
+        if cat_name in cat_services:
+            ordered[cat_name] = {
+                "icon": CATEGORY_ICONS.get(cat_name, "circle"),
+                "services": cat_services.pop(cat_name),
+            }
+    # Append any new categories not yet in CATEGORY_ORDER
+    for cat_name, aliases in sorted(cat_services.items()):
+        ordered[cat_name] = {
+            "icon": CATEGORY_ICONS.get(cat_name, "circle"),
+            "services": aliases,
+        }
+    return ordered
+
+
+def build_doc_service_map(
+    service_by_alias: dict[str, dict], backend_dir: Path
+) -> dict[str, Optional[str]]:
+    """
+    Auto-derive development doc_key → service_alias by matching against
+    API paths and service aliases.  Returns None values for skipped docs.
+    """
+    # normalized API path → alias  (e.g. "captcharecognitionrecaptcha2" → "recaptcha")
+    path_to_alias: dict[str, str] = {}
+    for alias, svc in service_by_alias.items():
+        for api in svc.get("apis", []):
+            path = api.get("path", "")
+            norm = _normalize(path.strip("/").replace("/", "_"))
+            if norm:
+                path_to_alias[norm] = alias
+
+    # normalized alias → original alias (longer first for prefix matching)
+    alias_norms = sorted(
+        ((alias, _normalize(alias)) for alias in service_by_alias),
+        key=lambda t: -len(t[1]),
+    )
+
+    doc_map: dict[str, Optional[str]] = {}
+    docs_dir = backend_dir / "docs"
+
+    for md_file in sorted(docs_dir.glob("development_*.md")):
+        doc_key = md_file.stem.removeprefix("development_")
+
+        # Strip _title suffix variants used for Translation titles
+        if doc_key.endswith("_title"):
+            continue
+
+        if doc_key in SKIP_DOC_KEYS:
+            doc_map[doc_key] = None
+            continue
+
+        norm_key = _normalize(doc_key)
+
+        # Strategy 1: exact match on normalized API path
+        if norm_key in path_to_alias:
+            doc_map[doc_key] = path_to_alias[norm_key]
+            continue
+
+        # Strategy 2: doc key starts with a normalized API path (longest first)
+        matched = False
+        for path_norm, alias in sorted(path_to_alias.items(), key=lambda x: -len(x[0])):
+            if norm_key.startswith(path_norm):
+                doc_map[doc_key] = alias
+                matched = True
+                break
+        if matched:
+            continue
+
+        # Strategy 3: doc key starts with a service alias (longest first)
+        for alias_orig, alias_norm in alias_norms:
+            if norm_key.startswith(alias_norm):
+                doc_map[doc_key] = alias_orig
+                matched = True
+                break
+        if matched:
+            continue
+
+        print(f"  WARNING: unmapped doc '{doc_key}', skipping")
+        doc_map[doc_key] = None
+
+    return doc_map
 
 
 def load_service_mapping(backend_dir: Path) -> list[dict]:
@@ -249,18 +193,122 @@ def resolve_t_keys(obj):
     return obj
 
 
+# Valid keywords for OpenAPI 3.0 Schema Objects
+_VALID_SCHEMA_KEYS = {
+    'type', 'format', 'description', 'default', 'example', 'examples',
+    'enum', 'const', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum',
+    'multipleOf', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems',
+    'uniqueItems', 'minProperties', 'maxProperties', 'items', 'properties',
+    'required', 'additionalProperties', 'oneOf', 'allOf', 'anyOf', 'not',
+    'discriminator', 'nullable', 'readOnly', 'writeOnly', 'deprecated', 'title', '$ref',
+}
+
+
+def _clean_schema(obj: dict) -> dict:
+    """Clean a JSON Schema for OpenAPI 3.0 compliance."""
+    if not isinstance(obj, dict):
+        return obj
+    cleaned = {}
+    for k, v in obj.items():
+        if k not in _VALID_SCHEMA_KEYS and not k.startswith('x-'):
+            continue
+        if k == 'type' and v == 'float':
+            cleaned['type'] = 'number'
+            cleaned.setdefault('format', 'float')
+            continue
+        if k == 'const':
+            cleaned['enum'] = [v]
+            continue
+        if k in ('items', 'additionalProperties', 'not') and isinstance(v, dict):
+            cleaned[k] = _clean_schema(v)
+        elif k == 'properties' and isinstance(v, dict):
+            cleaned[k] = {pk: _clean_schema(pv) for pk, pv in v.items()}
+        elif k in ('oneOf', 'allOf', 'anyOf') and isinstance(v, list):
+            cleaned[k] = [_clean_schema(item) for item in v]
+        else:
+            cleaned[k] = v
+    if 'type' in cleaned and 'example' in cleaned:
+        t, ex = cleaned['type'], cleaned['example']
+        if t == 'object' and isinstance(ex, str):
+            cleaned['type'] = 'string'
+        elif t == 'object' and isinstance(ex, (int, float)):
+            cleaned['type'] = 'number'
+    if 'required' in cleaned and isinstance(cleaned['required'], list) and not cleaned['required']:
+        del cleaned['required']
+    return cleaned
+
+
+def clean_openapi_spec(spec: dict) -> dict:
+    """Clean an OpenAPI spec for strict validation compliance."""
+    if 'paths' not in spec:
+        return spec
+    cleaned = dict(spec)
+    cleaned_paths = {}
+    _resp_keys = {'description', 'headers', 'content', 'links'}
+    _rb_keys = {'description', 'content', 'required'}
+    _mt_keys = {'schema', 'example', 'examples', 'encoding'}
+    for path, path_item in spec['paths'].items():
+        if not isinstance(path_item, dict):
+            cleaned_paths[path] = path_item
+            continue
+        ci = {}
+        for method, op in path_item.items():
+            if method not in ('get', 'post', 'put', 'delete', 'patch', 'options', 'head', 'trace'):
+                ci[method] = op
+                continue
+            if not isinstance(op, dict):
+                ci[method] = op
+                continue
+            cop = dict(op)
+            if 'requestBody' in cop and isinstance(cop['requestBody'], dict):
+                rb = {k: v for k, v in cop['requestBody'].items() if k in _rb_keys or k.startswith('x-')}
+                if 'content' in rb:
+                    rb['content'] = {
+                        ct: {k: (_clean_schema(v) if k == 'schema' else v) for k, v in mt.items() if k in _mt_keys}
+                        for ct, mt in rb['content'].items() if isinstance(mt, dict)
+                    }
+                cop['requestBody'] = rb
+            if 'responses' in cop and isinstance(cop['responses'], dict):
+                new_resps = {}
+                for code, resp in cop['responses'].items():
+                    if not isinstance(resp, dict):
+                        new_resps[code] = resp
+                        continue
+                    cr = {k: v for k, v in resp.items() if k in _resp_keys or k.startswith('x-')}
+                    if 'description' not in cr:
+                        cr['description'] = 'Response'
+                    if 'content' in cr:
+                        cr['content'] = {
+                            ct: {k: (_clean_schema(v) if k == 'schema' else v) for k, v in mt.items() if k in _mt_keys}
+                            for ct, mt in cr['content'].items() if isinstance(mt, dict)
+                        }
+                    new_resps[code] = cr
+                cop['responses'] = new_resps
+            if 'parameters' in cop and isinstance(cop['parameters'], list):
+                cop['parameters'] = [
+                    {k: (_clean_schema(v) if k == 'schema' else v) for k, v in p.items()}
+                    for p in cop['parameters'] if isinstance(p, dict)
+                ]
+            ci[method] = cop
+        cleaned_paths[path] = ci
+    cleaned['paths'] = cleaned_paths
+    return cleaned
+
+
 def merge_openapi_specs(backend_dir: Path, service: dict) -> dict | None:
     """Merge multiple per-API OpenAPI specs into one per-service spec."""
     apis = service.get("apis", [])
     if not apis:
         return None
 
+    display = service.get("display_name") or service.get("alias", "API")
+
     merged = {
         "openapi": "3.0.0",
         "info": {
-            "title": SERVICE_NAMES.get(service.get("alias", ""), service.get("alias", "API")),
+            "title": display,
             "version": "1.0.0",
-            "description": f"API reference for {SERVICE_NAMES.get(service.get('alias', ''), service.get('alias', ''))} on Ace Data Cloud.",
+            "description": f"API reference for {display} on Ace Data Cloud.",
         },
         "servers": [
             {
@@ -297,10 +345,12 @@ def merge_openapi_specs(backend_dir: Path, service: dict) -> dict | None:
 
     # Resolve translation keys
     merged = resolve_t_keys(merged)
+    # Clean for strict OpenAPI 3.0 compliance (Mintlify validation)
+    merged = clean_openapi_spec(merged)
     return merged
 
 
-def convert_dev_doc_to_mdx(content: str, doc_key: str, service_alias: str) -> str:
+def convert_dev_doc_to_mdx(content: str, doc_key: str, service_name: str) -> str:
     """Convert a PlatformBackend development markdown doc to Mintlify MDX format."""
     # Extract a title from the first heading or generate one
     title_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
@@ -325,7 +375,6 @@ def convert_dev_doc_to_mdx(content: str, doc_key: str, service_alias: str) -> st
     content = re.sub(r'\$t\(([^)]+)\)', lambda m: m.group(1).replace('_', ' ').title(), content)
 
     # Build frontmatter
-    service_name = SERVICE_NAMES.get(service_alias, service_alias)
     frontmatter = f"""---
 title: "{title}"
 description: "Integration guide for {service_name} on Ace Data Cloud"
@@ -368,8 +417,13 @@ title: "{title}"
 """
 
 
-def build_navigation(service_map: dict, dev_docs_by_service: dict, output_dir: Path) -> dict:
-    """Build the Mintlify navigation structure."""
+def build_navigation(
+    categories: dict[str, dict],
+    service_names: dict[str, str],
+    dev_docs_by_service: dict,
+    output_dir: Path,
+) -> dict:
+    """Build the Mintlify navigation structure from dynamic data."""
     tabs = []
 
     # Tab 1: Guides (Getting Started + Integration Guides by category)
@@ -381,7 +435,7 @@ def build_navigation(service_map: dict, dev_docs_by_service: dict, output_dir: P
     ]
 
     # Integration guides by category
-    for cat_name, cat_info in SERVICE_CATEGORIES.items():
+    for cat_name, cat_info in categories.items():
         pages = []
         for svc_alias in cat_info["services"]:
             if svc_alias in dev_docs_by_service:
@@ -391,7 +445,7 @@ def build_navigation(service_map: dict, dev_docs_by_service: dict, output_dir: P
                 else:
                     svc_pages = [f"guides/{svc_alias}/{d}" for d in docs]
                     pages.append({
-                        "group": SERVICE_NAMES.get(svc_alias, svc_alias),
+                        "group": service_names.get(svc_alias, svc_alias),
                         "pages": svc_pages,
                     })
         if pages:
@@ -423,13 +477,13 @@ def build_navigation(service_map: dict, dev_docs_by_service: dict, output_dir: P
             "pages": ["api-reference/introduction"],
         }
     ]
-    for cat_name, cat_info in SERVICE_CATEGORIES.items():
+    for cat_name, cat_info in categories.items():
         cat_pages = []
         for svc_alias in cat_info["services"]:
             openapi_path = f"openapi/{svc_alias}.json"
             if (output_dir / openapi_path).exists():
                 cat_pages.append({
-                    "group": SERVICE_NAMES.get(svc_alias, svc_alias),
+                    "group": service_names.get(svc_alias, svc_alias),
                     "openapi": {
                         "source": f"/{openapi_path}",
                         "directory": f"api-reference/{svc_alias}",
@@ -940,6 +994,11 @@ Browse APIs by category:
                     "name": "Authorization",
                 },
             },
+            "openapi": sorted(
+                f"/openapi/{f.name}"
+                for f in (output_dir / "openapi").iterdir()
+                if f.suffix == ".json"
+            ),
         },
         "variables": {
             "BASE_URL": "https://api.acedata.cloud",
