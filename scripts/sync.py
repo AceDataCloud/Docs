@@ -16,6 +16,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -497,7 +499,7 @@ def convert_dev_doc_to_mdx(content: str, doc_key: str, service_name: str) -> str
     # Build frontmatter
     frontmatter = f"""---
 title: "{title}"
-description: "Integration guide for {service_name} on Ace Data Cloud"
+description: "{service_name} 集成指南 - Ace Data Cloud"
 ---
 
 """
@@ -516,7 +518,7 @@ def generate_mcp_doc(content: str, mcp_name: str) -> str:
 
     return f"""---
 title: "{title}"
-description: "MCP server for {mcp_name} integration"
+description: "{mcp_name} MCP 服务器集成"
 ---
 
 {content.strip()}
@@ -545,6 +547,39 @@ title: "{title}"
 """
 
 
+def _build_tutorials_nav(output_dir: Path) -> list:
+    """Auto-discover tutorial pages and group by service."""
+    tut_dir = output_dir / "tutorials"
+    if not tut_dir.is_dir():
+        return []
+    groups: dict[str, list[str]] = {}
+    for f in sorted(tut_dir.rglob("*.mdx")):
+        rel = f.relative_to(tut_dir)
+        parts = rel.parts
+        if len(parts) == 2:
+            svc = parts[0]
+            groups.setdefault(svc, []).append(f"tutorials/{svc}/{rel.stem}")
+        elif len(parts) == 1:
+            groups.setdefault("_root", []).append(f"tutorials/{rel.stem}")
+    nav = []
+    for svc, pages in groups.items():
+        if svc == "_root":
+            nav.extend(pages)
+        elif len(pages) == 1:
+            nav.append(pages[0])
+        else:
+            nav.append({"group": svc.replace("-", " ").title(), "pages": pages})
+    return nav
+
+
+def _build_simple_nav(directory: str, output_dir: Path) -> list[str]:
+    """Auto-discover MDX pages in a flat directory."""
+    d = output_dir / directory
+    if not d.is_dir():
+        return []
+    return sorted(f"{directory}/{f.stem}" for f in d.iterdir() if f.suffix == ".mdx")
+
+
 def build_navigation(
     categories: dict[str, dict],
     service_names: dict[str, str],
@@ -554,15 +589,14 @@ def build_navigation(
     """Build the Mintlify navigation structure from dynamic data."""
     tabs = []
 
-    # Tab 1: Guides (Getting Started + Integration Guides by category)
+    # Tab 1: 指南 (入门 + 集成指南)
     guide_groups = [
         {
-            "group": "Getting Started",
+            "group": "入门",
             "pages": ["introduction", "quickstart", "authentication"],
         }
     ]
 
-    # Integration guides by category
     for cat_name, cat_info in categories.items():
         pages = []
         for svc_alias in cat_info["services"]:
@@ -587,29 +621,18 @@ def build_navigation(
                 }
             )
 
-    # X402 and other special guides
     special_pages = []
     if (output_dir / "guides" / "x402.mdx").exists():
         special_pages.append("guides/x402")
     if special_pages:
-        guide_groups.append(
-            {
-                "group": "Advanced",
-                "pages": special_pages,
-            }
-        )
+        guide_groups.append({"group": "高级", "pages": special_pages})
 
-    tabs.append(
-        {
-            "tab": "Guides",
-            "groups": guide_groups,
-        }
-    )
+    tabs.append({"tab": "指南", "groups": guide_groups})
 
-    # Tab 2: API Reference (auto-populated from OpenAPI per service category)
+    # Tab 2: API 参考
     api_groups = [
         {
-            "group": "Overview",
+            "group": "概览",
             "pages": ["api-reference/introduction"],
         }
     ]
@@ -630,14 +653,29 @@ def build_navigation(
         if cat_pages:
             api_groups.extend(cat_pages)
 
-    tabs.append(
-        {
-            "tab": "API Reference",
-            "groups": api_groups,
-        }
-    )
+    tabs.append({"tab": "API 参考", "groups": api_groups})
 
-    # Tab 3: MCP Servers
+    # Tab 3: 教程
+    tut_pages = _build_tutorials_nav(output_dir)
+    if tut_pages:
+        tabs.append({"tab": "教程", "groups": [{"group": "教程", "pages": tut_pages}]})
+
+    # Tab 4: 对比
+    cmp_pages = _build_simple_nav("comparisons", output_dir)
+    if cmp_pages:
+        tabs.append({"tab": "对比", "groups": [{"group": "服务对比", "pages": cmp_pages}]})
+
+    # Tab 5: 用例
+    uc_pages = _build_simple_nav("use-cases", output_dir)
+    if uc_pages:
+        tabs.append({"tab": "用例", "groups": [{"group": "应用场景", "pages": uc_pages}]})
+
+    # Tab 6: 博客
+    blog_pages = _build_simple_nav("blog", output_dir)
+    if blog_pages:
+        tabs.append({"tab": "博客", "groups": [{"group": "博客", "pages": blog_pages}]})
+
+    # Tab 7: MCP 服务器
     mcp_pages = []
     mcp_dir = output_dir / "mcp"
     if mcp_dir.exists():
@@ -645,21 +683,16 @@ def build_navigation(
             if f.suffix == ".mdx":
                 mcp_pages.append(f"mcp/{f.stem}")
     if mcp_pages:
+        all_mcp = (
+            ["mcp/overview"] + mcp_pages
+            if (output_dir / "mcp" / "overview.mdx").exists()
+            else mcp_pages
+        )
         tabs.append(
-            {
-                "tab": "MCP Servers",
-                "groups": [
-                    {
-                        "group": "MCP Servers",
-                        "pages": ["mcp/overview"] + mcp_pages
-                        if (output_dir / "mcp" / "overview.mdx").exists()
-                        else mcp_pages,
-                    }
-                ],
-            }
+            {"tab": "MCP 服务器", "groups": [{"group": "MCP 服务器", "pages": all_mcp}]}
         )
 
-    # Tab 4: Resources
+    # Tab 8: 资源
     resource_pages = []
     if (output_dir / "resources" / "privacy.mdx").exists():
         resource_pages.append("resources/privacy")
@@ -668,24 +701,19 @@ def build_navigation(
     if (output_dir / "resources" / "support.mdx").exists():
         resource_pages.append("resources/support")
     if resource_pages:
-        tabs.append(
-            {
-                "tab": "Resources",
-                "groups": [{"group": "Resources", "pages": resource_pages}],
-            }
-        )
+        tabs.append({"tab": "资源", "groups": [{"group": "资源", "pages": resource_pages}]})
 
     return {
         "tabs": tabs,
         "global": {
             "anchors": [
                 {
-                    "anchor": "Platform",
+                    "anchor": "平台",
                     "href": "https://platform.acedata.cloud",
                     "icon": "browser",
                 },
                 {
-                    "anchor": "API Status",
+                    "anchor": "API 状态",
                     "href": "https://status.acedata.cloud",
                     "icon": "signal",
                 },
@@ -813,11 +841,11 @@ def main():
         )
     cards_block = "\n".join(mcp_cards) if mcp_cards else ""
     mcp_overview = f"""---
-title: "MCP Servers"
-description: "Model Context Protocol servers for AI tool integration"
+title: "MCP 服务器"
+description: "用于 AI 工具集成的 Model Context Protocol 服务器"
 ---
 
-Ace Data Cloud provides MCP (Model Context Protocol) servers that allow AI assistants like Claude, Cursor, and Windsurf to directly use our APIs.
+Ace Data Cloud 提供 MCP（Model Context Protocol）服务器，让 Claude、Cursor、Windsurf 等 AI 助手直接调用我们的 API。
 
 <CardGroup cols={{2}}>
 {cards_block}
@@ -857,48 +885,48 @@ Ace Data Cloud provides MCP (Model Context Protocol) servers that allow AI assis
 
     # Introduction page
     intro = """---
-title: "Introduction"
-description: "Ace Data Cloud provides unified APIs for AI services including LLMs, image generation, video generation, music generation, web search, and more."
+title: "简介"
+description: "Ace Data Cloud 提供统一 AI API 平台，一个 API Key 即可访问 LLM 聊天、图像生成、视频生成、音乐生成、网页搜索等 50+ AI 服务。"
 ---
 
-## What is Ace Data Cloud?
+## 什么是 Ace Data Cloud？
 
-Ace Data Cloud is a unified API platform that provides access to the world's leading AI services through a single API key and consistent interface.
+Ace Data Cloud 是一个统一 AI API 平台，通过一个 API Key 和一致的接口，访问全球领先的 AI 服务。
 
 <CardGroup cols={2}>
-  <Card title="AI Chat" icon="comments" href="/guides/claude/claude_chat_completions">
-    Access Claude, GPT, Gemini, DeepSeek, Grok, and Kimi through OpenAI-compatible endpoints.
+  <Card title="AI 聊天" icon="comments" href="/guides/claude/claude_chat_completions">
+    通过 OpenAI 兼容接口访问 Claude、GPT、Gemini、DeepSeek、Grok、Kimi 等模型。
   </Card>
-  <Card title="AI Image" icon="image" href="/guides/midjourney/midjourney_imagine">
-    Generate images with Midjourney, Flux, DALL·E, Seedream, and more.
+  <Card title="AI 图像" icon="image" href="/guides/midjourney/midjourney_imagine">
+    使用 Midjourney、Flux、DALL·E、Seedream 等生成图像。
   </Card>
-  <Card title="AI Video" icon="video" href="/guides/sora/sora_videos">
-    Create videos with Sora, Veo, Luma, Kling, Hailuo, and Seedance.
+  <Card title="AI 视频" icon="video" href="/guides/sora/sora_videos">
+    使用 Sora、Veo、Luma、Kling、Hailuo、Seedance 等生成视频。
   </Card>
-  <Card title="AI Audio" icon="music" href="/guides/suno/suno_audios">
-    Generate music and audio with Suno, Fish Audio, and Producer.
+  <Card title="AI 音频" icon="music" href="/guides/suno/suno_audios">
+    使用 Suno、Fish Audio、Producer 等生成音乐和音频。
   </Card>
 </CardGroup>
 
-## Key Features
+## 核心优势
 
-- **Unified API** — One API key for 50+ AI services
-- **OpenAI Compatible** — Drop-in replacement for ChatGPT, Claude, Gemini
-- **Interactive Playground** — Test every API directly in the docs
-- **Pay-as-you-go** — No subscriptions, only pay for what you use
-- **MCP Servers** — Native integration with AI coding assistants
+- **统一 API** — 一个 API Key 访问 50+ AI 服务
+- **OpenAI 兼容** — Claude、Gemini、DeepSeek 等均可通过 OpenAI 接口直接调用
+- **交互式沙盒** — 在文档中直接测试每个 API
+- **按量付费** — 无订阅费，按实际使用量计费
+- **MCP 服务器** — 原生支持 Cursor、Claude 等 AI 编程工具
 
-## Quick Links
+## 快速链接
 
 <CardGroup cols={3}>
-  <Card title="Get API Key" icon="key" href="https://platform.acedata.cloud">
-    Sign up and get your API token
+  <Card title="获取 API Key" icon="key" href="https://platform.acedata.cloud">
+    注册并获取 API Token
   </Card>
-  <Card title="API Reference" icon="code" href="/api-reference/introduction">
-    Interactive API documentation
+  <Card title="API 参考" icon="code" href="/api-reference/introduction">
+    交互式 API 文档
   </Card>
-  <Card title="MCP Servers" icon="plug" href="/mcp/overview">
-    Connect AI assistants to our APIs
+  <Card title="MCP 服务器" icon="plug" href="/mcp/overview">
+    将 AI 助手连接到我们的 API
   </Card>
 </CardGroup>
 """
@@ -906,29 +934,29 @@ Ace Data Cloud is a unified API platform that provides access to the world's lea
 
     # Quickstart page
     quickstart = """---
-title: "Quickstart"
-description: "Get started with Ace Data Cloud APIs in 5 minutes"
+title: "快速开始"
+description: "5 分钟上手 Ace Data Cloud API"
 ---
 
-## 1. Get Your API Key
+## 1. 获取 API Key
 
-Sign up at [platform.acedata.cloud](https://platform.acedata.cloud) and create an API credential.
+在 [platform.acedata.cloud](https://platform.acedata.cloud) 注册账号并创建 API 凭证。
 
 <Steps>
-  <Step title="Create an Account">
-    Visit [platform.acedata.cloud](https://platform.acedata.cloud) and sign up.
+  <Step title="注册账号">
+    访问 [platform.acedata.cloud](https://platform.acedata.cloud) 完成注册。
   </Step>
-  <Step title="Subscribe to a Service">
-    Browse available services and click **Acquire** to subscribe. Most services offer free credits to start.
+  <Step title="订阅服务">
+    浏览可用服务，点击**获取**完成订阅。大部分服务提供免费额度。
   </Step>
-  <Step title="Create a Credential">
-    Go to your service's **Credentials** section and create a new API token.
+  <Step title="创建凭证">
+    进入服务的**凭证**页面，创建 API Token。
   </Step>
 </Steps>
 
-## 2. Make Your First Request
+## 2. 发送第一个请求
 
-All APIs use Bearer token authentication:
+所有 API 使用 Bearer Token 认证：
 
 <CodeGroup>
 
@@ -938,7 +966,7 @@ curl -X POST https://api.acedata.cloud/v1/chat/completions \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "claude-sonnet-4-20250514",
-    "messages": [{"role": "user", "content": "Hello!"}]
+    "messages": [{"role": "user", "content": "你好！"}]
   }'
 ```
 
@@ -950,7 +978,7 @@ response = requests.post(
     headers={"Authorization": "Bearer YOUR_API_TOKEN"},
     json={
         "model": "claude-sonnet-4-20250514",
-        "messages": [{"role": "user", "content": "Hello!"}],
+        "messages": [{"role": "user", "content": "你好！"}],
     },
 )
 print(response.json())
@@ -965,7 +993,7 @@ const response = await fetch("https://api.acedata.cloud/v1/chat/completions", {
   },
   body: JSON.stringify({
     model: "claude-sonnet-4-20250514",
-    messages: [{ role: "user", content: "Hello!" }],
+    messages: [{ role: "user", content: "你好！" }],
   }),
 });
 const data = await response.json();
@@ -974,14 +1002,14 @@ console.log(data);
 
 </CodeGroup>
 
-## 3. Explore the APIs
+## 3. 探索更多 API
 
 <CardGroup cols={2}>
-  <Card title="API Reference" icon="code" href="/api-reference/introduction">
-    Browse and test all endpoints interactively
+  <Card title="API 参考" icon="code" href="/api-reference/introduction">
+    浏览并交互式测试所有 API 端点
   </Card>
-  <Card title="Integration Guides" icon="book" href="/guides/claude/claude_chat_completions">
-    Step-by-step tutorials for each service
+  <Card title="集成指南" icon="book" href="/guides/claude/claude_chat_completions">
+    每个服务的详细集成教程
   </Card>
 </CardGroup>
 """
@@ -989,40 +1017,40 @@ console.log(data);
 
     # Authentication page
     auth_page = """---
-title: "Authentication"
-description: "How to authenticate with Ace Data Cloud APIs"
+title: "认证"
+description: "如何使用 Ace Data Cloud API 进行身份认证"
 ---
 
-All Ace Data Cloud APIs use **Bearer token** authentication.
+所有 Ace Data Cloud API 使用 **Bearer Token** 认证。
 
-## Getting Your Token
+## 获取 Token
 
-1. Sign up at [platform.acedata.cloud](https://platform.acedata.cloud)
-2. Subscribe to the services you need
-3. Create a credential (API token) for each service
+1. 在 [platform.acedata.cloud](https://platform.acedata.cloud) 注册账号
+2. 订阅需要的服务
+3. 为每个服务创建凭证（API Token）
 
-## Using Your Token
+## 使用 Token
 
-Include the token in the `Authorization` header of every request:
+在每个请求的 `Authorization` 头中包含 Token：
 
 ```bash
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
 <Note>
-  Each token is tied to a specific service subscription. Use different tokens for different services, or create a **Global** credential that works across all your subscriptions.
+  每个 Token 绑定到特定的服务订阅。不同服务使用不同的 Token，或创建**全局**凭证以跨服务使用。
 </Note>
 
-## Rate Limits
+## 速率限制
 
-Rate limits vary by service and subscription tier. If you exceed the limit, the API returns `429 Too Many Requests`.
+速率限制因服务和订阅级别而异。超出限制时，API 返回 `429 Too Many Requests`。
 
-## Security Best Practices
+## 安全最佳实践
 
-- Never expose your API token in client-side code
-- Use environment variables to store tokens
-- Rotate tokens periodically
-- Use separate tokens for development and production
+- 不要在客户端代码中暴露 API Token
+- 使用环境变量存储 Token
+- 定期轮换 Token
+- 开发和生产环境使用不同的 Token
 """
     (output_dir / "authentication.mdx").write_text(auth_page, encoding="utf-8")
 
@@ -1030,57 +1058,73 @@ Rate limits vary by service and subscription tier. If you exceed the limit, the 
     api_ref_dir = output_dir / "api-reference"
     api_ref_dir.mkdir(parents=True, exist_ok=True)
     api_intro = """---
-title: "API Reference"
-description: "Interactive API reference for all Ace Data Cloud services"
+title: "API 参考"
+description: "Ace Data Cloud 所有服务的交互式 API 参考文档"
 ---
 
-## Base URL
+## 基础 URL
 
-All API endpoints are served from:
+所有 API 端点的基础地址：
 
 ```
 https://api.acedata.cloud
 ```
 
-## Authentication
+## 认证
 
-All endpoints require Bearer token authentication:
+所有端点需要 Bearer Token 认证：
 
 ```
 Authorization: Bearer YOUR_API_TOKEN
 ```
 
-## Try It Out
+## 在线测试
 
-Every endpoint in this reference includes an interactive playground. Enter your API token and test requests directly from the browser.
+本参考文档中的每个端点都包含交互式沙盒。输入 API Token 即可直接在浏览器中测试请求。
 
 <Note>
-  Get your API token at [platform.acedata.cloud](https://platform.acedata.cloud).
+  在 [platform.acedata.cloud](https://platform.acedata.cloud) 获取 API Token。
 </Note>
 
-## Services
+## 服务分类
 
-Browse APIs by category:
+按类别浏览 API：
 
 <CardGroup cols={2}>
-  <Card title="AI Chat" icon="comments">
-    Claude, OpenAI, Gemini, DeepSeek, Grok, Kimi — OpenAI-compatible chat completions
+  <Card title="AI 聊天" icon="comments">
+    Claude、OpenAI、Gemini、DeepSeek、Grok、Kimi — OpenAI 兼容聊天补全接口
   </Card>
-  <Card title="AI Image" icon="image">
-    Midjourney, Flux, Seedream, DALL·E, QR Art, Face tools
+  <Card title="AI 图像" icon="image">
+    Midjourney、Flux、Seedream、DALL·E、QR Art、人脸工具
   </Card>
-  <Card title="AI Video" icon="video">
-    Sora, Veo, Luma, Kling, Hailuo, Seedance, Wan, Pika
+  <Card title="AI 视频" icon="video">
+    Sora、Veo、Luma、Kling、Hailuo、Seedance、Wan、Pika
   </Card>
-  <Card title="AI Audio" icon="music">
-    Suno, Fish Audio, Producer, Riffusion, Udio
+  <Card title="AI 音频" icon="music">
+    Suno、Fish Audio、Producer、Riffusion、Udio
   </Card>
 </CardGroup>
 """
     (api_ref_dir / "introduction.mdx").write_text(api_intro, encoding="utf-8")
 
     # ---------------------------------------------------------------------------
-    # 6. Generate docs.json
+    # 6. Generate SEO pages (tutorials, comparisons, use-cases, blog)
+    # ---------------------------------------------------------------------------
+    seo_script = Path(__file__).parent / "generate_seo_pages.py"
+    if seo_script.exists():
+        print("Running SEO page generation...")
+        result = subprocess.run(
+            [sys.executable, str(seo_script), "--backend-dir", str(backend_dir), "--output-dir", str(output_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout:
+            print(result.stdout)
+        if result.returncode != 0:
+            print(f"  SEO generation warning: {result.stderr}", file=sys.stderr)
+
+    # ---------------------------------------------------------------------------
+    # 7. Generate docs.json
     # ---------------------------------------------------------------------------
     navigation = build_navigation(
         categories, service_names, dev_docs_by_service, output_dir
@@ -1090,7 +1134,7 @@ Browse APIs by category:
         "$schema": "https://mintlify.com/docs.json",
         "theme": "mint",
         "name": "Ace Data Cloud",
-        "description": "Unified API platform for AI services — LLMs, image generation, video generation, music, search, and more.",
+        "description": "统一 AI API 平台 — LLM 聊天、图像生成、视频生成、音乐、搜索等。",
         "colors": {
             "primary": "#6366F1",
             "light": "#818CF8",
@@ -1105,14 +1149,27 @@ Browse APIs by category:
         "navbar": {
             "links": [
                 {"type": "github", "href": "https://github.com/AceDataCloud"},
-                {"label": "Platform", "href": "https://platform.acedata.cloud"},
+                {"label": "平台", "href": "https://platform.acedata.cloud"},
             ],
             "primary": {
                 "type": "button",
-                "label": "Get API Key",
+                "label": "获取 API Key",
                 "href": "https://platform.acedata.cloud",
             },
         },
+        "languages": [
+            {"language": "zh-CN", "isDefault": True},
+            {"language": "en"},
+            {"language": "ja"},
+            {"language": "ko"},
+            {"language": "es"},
+            {"language": "fr"},
+            {"language": "de"},
+            {"language": "pt"},
+            {"language": "ru"},
+            {"language": "ar"},
+            {"language": "it"},
+        ],
         "navigation": navigation,
         "footer": {
             "socials": {
@@ -1144,7 +1201,7 @@ Browse APIs by category:
     print("Generated docs.json")
 
     # ---------------------------------------------------------------------------
-    # 7. Cleanup: remove old starter template files
+    # 8. Cleanup: remove old starter template files
     # ---------------------------------------------------------------------------
     starter_files = [
         "development.mdx",
