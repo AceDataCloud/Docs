@@ -240,12 +240,24 @@ def load_openapi_spec(backend_dir: Path, api_id: str) -> dict | None:
         return json.load(f)
 
 
+def _t_key_to_title(key: str) -> str:
+    """Convert a $t() translation key to a clean, concise display title."""
+    # Strip common prefixes that add no value
+    for prefix in (
+        "api_description_",
+        "service_title_",
+        "service_description_",
+    ):
+        if key.startswith(prefix):
+            key = key[len(prefix) :]
+            break
+    return key.replace("_", " ").title()
+
+
 def resolve_t_keys(obj):
     """Replace $t(key) translation markers with the key itself as a readable title."""
     if isinstance(obj, str):
-        return re.sub(
-            r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), obj
-        )
+        return re.sub(r"\$t\(([^)]+)\)", lambda m: _t_key_to_title(m.group(1)), obj)
     if isinstance(obj, dict):
         return {k: resolve_t_keys(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -423,6 +435,44 @@ def clean_openapi_spec(spec: dict) -> dict:
     return cleaned
 
 
+_MAX_SUMMARY_LEN = 80
+
+
+def _path_to_short_title(path: str, method: str) -> str:
+    """Generate a concise title from an API path.
+
+    Example: POST /face/analyze → 'Face Analyze'
+             POST /identity/phone/check-3e → 'Phone Check 3E'
+    """
+    segments = [s for s in path.strip("/").split("/") if s]
+    # Drop generic first segments that match the service name prefix
+    if len(segments) > 1:
+        segments = segments[1:]  # e.g. /face/analyze → ['analyze']
+    title = " ".join(s.replace("-", " ").replace("_", " ") for s in segments).title()
+    return title or f"{method.upper()} {path}"
+
+
+def _clean_verbose_summaries(spec: dict):
+    """Ensure all operation summaries are concise.
+
+    If a summary exceeds _MAX_SUMMARY_LEN characters, move the full text to
+    ``description`` (if not already set) and replace the summary with a short
+    title derived from the path.
+    """
+    for path, methods in spec.get("paths", {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, op in methods.items():
+            if not isinstance(op, dict):
+                continue
+            summary = op.get("summary", "")
+            if len(summary) > _MAX_SUMMARY_LEN:
+                # Preserve full text as description
+                if not op.get("description"):
+                    op["description"] = summary
+                op["summary"] = _path_to_short_title(path, method)
+
+
 def merge_openapi_specs(backend_dir: Path, service: dict) -> dict | None:
     """Merge multiple per-API OpenAPI specs into one per-service spec."""
     apis = service.get("apis", [])
@@ -473,9 +523,46 @@ def merge_openapi_specs(backend_dir: Path, service: dict) -> dict | None:
 
     # Resolve translation keys
     merged = resolve_t_keys(merged)
+    # Clean verbose summaries — move long text to description, generate short title
+    _clean_verbose_summaries(merged)
     # Clean for strict OpenAPI 3.0 compliance (Mintlify validation)
     merged = clean_openapi_spec(merged)
     return merged
+
+
+def _sanitize_html_for_mdx(content: str) -> str:
+    """Sanitize HTML in markdown content so it is valid JSX for MDX.
+
+    Fixes:
+    - ``class=`` → ``className=`` (reserved word in JSX)
+    - Self-close void elements: ``<img ...>`` → ``<img ... />``
+    - Angle-bracket URLs: ``<https://...>`` → ``[https://...](https://...)``
+    """
+    # Only transform HTML outside of fenced code blocks
+    parts = re.split(r"(^```.*?^```)", content, flags=re.MULTILINE | re.DOTALL)
+    for i, part in enumerate(parts):
+        if part.startswith("```"):
+            continue  # skip code blocks
+        # class → className in HTML tags
+        part = re.sub(
+            r"(<[a-zA-Z][^>]*)\bclass=",
+            r"\1className=",
+            part,
+        )
+        # Self-close <img ...> tags that aren't already self-closed
+        part = re.sub(
+            r"(<img\b[^>]*?)(?<!/)>",
+            r"\1 />",
+            part,
+        )
+        # Angle-bracket URLs → markdown links
+        part = re.sub(
+            r"<(https?://[^>]+)>",
+            r"[\1](\1)",
+            part,
+        )
+        parts[i] = part
+    return "".join(parts)
 
 
 def convert_dev_doc_to_mdx(content: str, doc_key: str, service_name: str) -> str:
@@ -504,6 +591,9 @@ def convert_dev_doc_to_mdx(content: str, doc_key: str, service_name: str) -> str
         r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), content
     )
 
+    # Sanitize HTML for MDX/JSX compatibility
+    content = _sanitize_html_for_mdx(content)
+
     # Build frontmatter
     frontmatter = f"""---
 title: "{title}"
@@ -523,6 +613,7 @@ def generate_mcp_doc(content: str, mcp_name: str) -> str:
     content = re.sub(
         r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), content
     )
+    content = _sanitize_html_for_mdx(content)
 
     return f"""---
 title: "{title}"
@@ -546,6 +637,7 @@ def generate_extra_doc(content: str, doc_key: str) -> str:
     content = re.sub(
         r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), content
     )
+    content = _sanitize_html_for_mdx(content)
 
     return f"""---
 title: "{title}"
@@ -651,7 +743,8 @@ def _write_seo_mdx(src: Path, dst: Path):
     content = src.read_text(encoding="utf-8")
 
     if content.startswith("---"):
-        # Already has frontmatter
+        # Already has frontmatter — still sanitize HTML for MDX
+        content = _sanitize_html_for_mdx(content)
         dst.write_text(content, encoding="utf-8")
         return
 
@@ -669,6 +762,7 @@ def _write_seo_mdx(src: Path, dst: Path):
         title = src.stem.replace("_", " ").replace("-", " ").title()
 
     body = "\n".join(lines[body_start:]).strip()
+    body = _sanitize_html_for_mdx(body)
     mdx = f"""---
 title: "{title}"
 ---
@@ -1350,10 +1444,10 @@ Authorization: Bearer YOUR_API_TOKEN
     Midjourney、Flux、Seedream、DALL·E、QR Art、人脸工具
   </Card>
   <Card title="AI 视频" icon="video">
-    Sora、Veo、Luma、Kling、Hailuo、Seedance、Wan、Pika
+    Sora、Veo、Luma、Kling、Hailuo、Seedance、Wan
   </Card>
   <Card title="AI 音频" icon="music">
-    Suno、Fish Audio、Producer、Riffusion、Udio
+    Suno、Fish Audio、Producer
   </Card>
 </CardGroup>
 """
