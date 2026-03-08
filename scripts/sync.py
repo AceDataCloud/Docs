@@ -28,6 +28,7 @@ def log(msg: str = ""):
     elapsed = _time.time() - _T0
     print(f"[{elapsed:6.1f}s] {msg}", flush=True)
 
+
 # ---------------------------------------------------------------------------
 # Config: display order + icons for categories, docs to skip.
 # Everything else is data-driven from service_api_mapping.json.
@@ -159,7 +160,7 @@ def build_doc_service_map(
     )
 
     doc_map: dict[str, Optional[str]] = {}
-    docs_dir = backend_dir / "docs"
+    docs_dir = backend_dir / "docs" / "zh-CN"
 
     for md_file in sorted(docs_dir.glob("development_*.md")):
         doc_key = md_file.stem.removeprefix("development_")
@@ -591,14 +592,19 @@ def _copy_seo_pages(docs_dir: Path, output_dir: Path):
         log(f"  WARNING: {docs_dir} not found, skipping SEO pages")
         return
 
-    counts: dict[str, int] = {"tutorials": 0, "comparisons": 0, "use-cases": 0, "blog": 0}
+    counts: dict[str, int] = {
+        "tutorials": 0,
+        "comparisons": 0,
+        "use-cases": 0,
+        "blog": 0,
+    }
 
     for src in sorted(docs_dir.glob("*.md")):
         name = src.stem  # e.g. tutorial_claude_python
 
         if name.startswith("tutorial_"):
             # tutorial_{service}_{lang}.md → tutorials/{service}/{lang}.mdx
-            rest = name[len("tutorial_"):]  # e.g. claude_python or nano-banana_curl
+            rest = name[len("tutorial_") :]  # e.g. claude_python or nano-banana_curl
             # Find the last _ that separates service from lang
             for lang in ("python", "javascript", "curl"):
                 suffix = f"_{lang}"
@@ -611,21 +617,21 @@ def _copy_seo_pages(docs_dir: Path, output_dir: Path):
                     break
 
         elif name.startswith("comparison_"):
-            slug = name[len("comparison_"):]
+            slug = name[len("comparison_") :]
             dst = output_dir / "comparisons" / f"{slug}.mdx"
             dst.parent.mkdir(parents=True, exist_ok=True)
             _write_seo_mdx(src, dst)
             counts["comparisons"] += 1
 
         elif name.startswith("use_case_"):
-            slug = name[len("use_case_"):]
+            slug = name[len("use_case_") :]
             dst = output_dir / "use-cases" / f"{slug}.mdx"
             dst.parent.mkdir(parents=True, exist_ok=True)
             _write_seo_mdx(src, dst)
             counts["use-cases"] += 1
 
         elif name.startswith("blog_"):
-            slug = name[len("blog_"):]
+            slug = name[len("blog_") :]
             dst = output_dir / "blog" / f"{slug}.mdx"
             dst.parent.mkdir(parents=True, exist_ok=True)
             _write_seo_mdx(src, dst)
@@ -670,8 +676,6 @@ title: "{title}"
 {body}
 """
     dst.write_text(mdx, encoding="utf-8")
-
-
 
 
 def _build_simple_nav(directory: str, output_dir: Path) -> list[str]:
@@ -765,12 +769,16 @@ def build_navigation(
     # Tab 4: 对比
     cmp_pages = _build_simple_nav("comparisons", output_dir)
     if cmp_pages:
-        tabs.append({"tab": "对比", "groups": [{"group": "服务对比", "pages": cmp_pages}]})
+        tabs.append(
+            {"tab": "对比", "groups": [{"group": "服务对比", "pages": cmp_pages}]}
+        )
 
     # Tab 5: 用例
     uc_pages = _build_simple_nav("use-cases", output_dir)
     if uc_pages:
-        tabs.append({"tab": "用例", "groups": [{"group": "应用场景", "pages": uc_pages}]})
+        tabs.append(
+            {"tab": "用例", "groups": [{"group": "应用场景", "pages": uc_pages}]}
+        )
 
     # Tab 6: 博客
     blog_pages = _build_simple_nav("blog", output_dir)
@@ -803,7 +811,9 @@ def build_navigation(
     if (output_dir / "resources" / "support.mdx").exists():
         resource_pages.append("resources/support")
     if resource_pages:
-        tabs.append({"tab": "资源", "groups": [{"group": "资源", "pages": resource_pages}]})
+        tabs.append(
+            {"tab": "资源", "groups": [{"group": "资源", "pages": resource_pages}]}
+        )
 
     return {
         "tabs": tabs,
@@ -822,6 +832,127 @@ def build_navigation(
             ]
         },
     }
+
+
+# Target languages matching PlatformBackend/docs/ subdirectories
+TARGET_LANGUAGES = [
+    "en",
+    "zh-tw",
+    "ja",
+    "ko",
+    "es",
+    "fr",
+    "de",
+    "pt",
+    "ru",
+    "ar",
+    "it",
+    "fi",
+    "sv",
+    "el",
+    "uk",
+    "pl",
+    "sr",
+]
+
+# Mintlify expects specific language codes (may differ from directory names)
+_LANG_DIR_TO_MINTLIFY = {
+    "zh-tw": "zh-TW",
+}
+
+
+def _mintlify_lang(lang_dir: str) -> str:
+    """Map PlatformBackend language directory name to Mintlify language code."""
+    return _LANG_DIR_TO_MINTLIFY.get(lang_dir, lang_dir)
+
+
+def _sync_translated_content(
+    backend_dir: Path,
+    output_dir: Path,
+    doc_service_map: dict[str, Optional[str]],
+    service_names: dict[str, str],
+    categories: dict[str, dict],
+    dev_docs_by_service: dict[str, list[str]],
+):
+    """Copy pre-translated content from PlatformBackend/docs/{lang}/ to Mintlify
+    language directories.
+
+    For each target language that has a directory in PlatformBackend/docs/,
+    apply the same MD→MDX conversion as the zh-CN base, placing output into
+    {output_dir}/{mintlify_lang}/guides/..., tutorials/..., etc.
+    """
+    total_files = 0
+
+    for lang_dir in TARGET_LANGUAGES:
+        lang_docs = backend_dir / "docs" / lang_dir
+        if not lang_docs.is_dir():
+            continue
+
+        mlang = _mintlify_lang(lang_dir)
+        lang_out = output_dir / mlang
+        lang_count = 0
+
+        # --- Development guides ---
+        for md_file in sorted(lang_docs.glob("development_*.md")):
+            doc_key = md_file.stem.removeprefix("development_")
+            if doc_key.endswith("_title"):
+                continue
+            service_alias = doc_service_map.get(doc_key)
+            if service_alias is None:
+                continue
+            content = md_file.read_text(encoding="utf-8")
+            svc_name = service_names.get(service_alias, service_alias)
+            mdx_content = convert_dev_doc_to_mdx(content, doc_key, svc_name)
+            svc_dir = lang_out / "guides" / service_alias
+            svc_dir.mkdir(parents=True, exist_ok=True)
+            (svc_dir / f"{doc_key}.mdx").write_text(mdx_content, encoding="utf-8")
+            lang_count += 1
+
+        # --- MCP docs ---
+        for md_file in sorted(lang_docs.glob("mcp_*.md")):
+            mcp_name = md_file.stem.removeprefix("mcp_")
+            content = md_file.read_text(encoding="utf-8")
+            mdx_content = generate_mcp_doc(content, mcp_name)
+            mcp_out = lang_out / "mcp"
+            mcp_out.mkdir(parents=True, exist_ok=True)
+            (mcp_out / f"{mcp_name}.mdx").write_text(mdx_content, encoding="utf-8")
+            lang_count += 1
+
+        # --- Extra docs (privacy, terms, support) ---
+        for doc_key, out_rel in [
+            ("privacy", "resources/privacy.mdx"),
+            ("terms", "resources/terms.mdx"),
+            ("support", "resources/support.mdx"),
+        ]:
+            src = lang_docs / f"{doc_key}.md"
+            if src.exists():
+                content = src.read_text(encoding="utf-8")
+                mdx = generate_extra_doc(content, doc_key)
+                dst = lang_out / out_rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(mdx, encoding="utf-8")
+                lang_count += 1
+
+        # --- X402 guide ---
+        x402_src = lang_docs / "x402_integration_guide.md"
+        if x402_src.exists():
+            content = x402_src.read_text(encoding="utf-8")
+            mdx = convert_dev_doc_to_mdx(content, "x402_integration_guide", "x402")
+            guides_out = lang_out / "guides"
+            guides_out.mkdir(parents=True, exist_ok=True)
+            (guides_out / "x402.mdx").write_text(mdx, encoding="utf-8")
+            lang_count += 1
+
+        # --- SEO pages (tutorials, comparisons, use-cases, blog) ---
+        _copy_seo_pages(lang_docs, lang_out)
+
+        total_files += lang_count
+        if lang_count > 0:
+            log(f"  {mlang}: {lang_count} guide/mcp/resource pages (+ SEO pages)")
+
+    log(
+        f"  Total translated pages: {total_files} (across {len(TARGET_LANGUAGES)} languages)"
+    )
 
 
 def main():
@@ -900,7 +1031,7 @@ def main():
     log("Step 2/8: Convert development guides to MDX")
     log("=" * 60)
     dev_docs_by_service: dict[str, list[str]] = {}  # alias → [doc_key, ...]
-    docs_dir = backend_dir / "docs"
+    docs_dir = backend_dir / "docs" / "zh-CN"
 
     for md_file in sorted(docs_dir.glob("development_*.md")):
         doc_key = md_file.stem.removeprefix("development_")
@@ -1237,8 +1368,25 @@ Authorization: Bearer YOUR_API_TOKEN
     log("=" * 60)
     log("Step 6/8: Copy pre-generated SEO pages from PlatformBackend/docs")
     log("=" * 60)
-    _copy_seo_pages(backend_dir / "docs", output_dir)
+    _copy_seo_pages(backend_dir / "docs" / "zh-CN", output_dir)
     log("Step 6 done")
+
+    # ---------------------------------------------------------------------------
+    # 6b. Copy pre-translated content from PlatformBackend/docs/{lang}/
+    # ---------------------------------------------------------------------------
+    log()
+    log("=" * 60)
+    log("Step 6b: Copy pre-translated content from PlatformBackend")
+    log("=" * 60)
+    _sync_translated_content(
+        backend_dir,
+        output_dir,
+        doc_service_map,
+        service_names,
+        categories,
+        dev_docs_by_service,
+    )
+    log("Step 6b done")
 
     # ---------------------------------------------------------------------------
     # 7. Generate docs.json
@@ -1290,6 +1438,13 @@ Authorization: Bearer YOUR_API_TOKEN
             {"language": "ru"},
             {"language": "ar"},
             {"language": "it"},
+            {"language": "fi"},
+            {"language": "sv"},
+            {"language": "el"},
+            {"language": "uk"},
+            {"language": "pl"},
+            {"language": "sr"},
+            {"language": "zh-TW"},
         ],
         "navigation": navigation,
         "footer": {
