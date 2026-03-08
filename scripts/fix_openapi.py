@@ -51,6 +51,11 @@ def clean_schema(obj):
             cleaned.setdefault('format', 'float')
             continue
 
+        # Fix 'type': 'int' -> 'type': 'integer'
+        if k == 'type' and v == 'int':
+            cleaned['type'] = 'integer'
+            continue
+
         # Replace 'const' with 'enum' (const not in OpenAPI 3.0)
         if k == 'const':
             cleaned['enum'] = [v]

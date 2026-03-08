@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -23,8 +24,14 @@ from typing import Optional
 # Everything else is data-driven from service_api_mapping.json.
 # ---------------------------------------------------------------------------
 CATEGORY_ORDER = [
-    "AI Chat", "AI Image", "AI Video", "AI Audio",
-    "Web & Data", "CAPTCHA", "Identity", "Proxy",
+    "AI Chat",
+    "AI Image",
+    "AI Video",
+    "AI Audio",
+    "Web & Data",
+    "CAPTCHA",
+    "Identity",
+    "Proxy",
 ]
 
 CATEGORY_ICONS: dict[str, str] = {
@@ -47,6 +54,26 @@ SKIP_DOC_KEYS = {
     "tw_comments",
     "tw_posts",
     "tw_users",
+    # Private services without public documentation yet
+    "pika_tasks",
+    "pika_videos",
+    "pixverse_character",
+    "pixverse_tasks",
+    "pixverse_videos",
+    "riffusion_audios",
+    "riffusion_tasks",
+    "riffusion_upload",
+    "udio_audios",
+    "udio_tasks",
+}
+
+# Private services to exclude entirely from docs (OpenAPI + guides).
+EXCLUDE_FROM_DOCS: set[str] = {
+    "pika",
+    "pixverse",
+    "riffusion",
+    "udio",
+    "chatdoc",
 }
 
 
@@ -60,7 +87,9 @@ def build_service_names(service_by_alias: dict[str, dict]) -> dict[str, str]:
     names: dict[str, str] = {}
     for alias, svc in service_by_alias.items():
         # Prefer display_name from enriched mapping, fall back to alias title-case
-        names[alias] = svc.get("display_name") or alias.replace("-", " ").replace("_", " ").title()
+        names[alias] = (
+            svc.get("display_name") or alias.replace("-", " ").replace("_", " ").title()
+        )
     return names
 
 
@@ -151,6 +180,25 @@ def build_doc_service_map(
         if matched:
             continue
 
+        # Strategy 2b: long common prefix between doc key and API path (≥80% match)
+        best_match = None
+        best_overlap = 0
+        for path_norm, alias in path_to_alias.items():
+            # Compute common prefix length
+            common = 0
+            for a, b in zip(norm_key, path_norm):
+                if a == b:
+                    common += 1
+                else:
+                    break
+            min_len = min(len(norm_key), len(path_norm))
+            if min_len > 0 and common / min_len >= 0.8 and common > best_overlap:
+                best_overlap = common
+                best_match = alias
+        if best_match:
+            doc_map[doc_key] = best_match
+            continue
+
         # Strategy 3: doc key starts with a service alias (longest first)
         for alias_orig, alias_norm in alias_norms:
             if norm_key.startswith(alias_norm):
@@ -185,7 +233,9 @@ def load_openapi_spec(backend_dir: Path, api_id: str) -> dict | None:
 def resolve_t_keys(obj):
     """Replace $t(key) translation markers with the key itself as a readable title."""
     if isinstance(obj, str):
-        return re.sub(r'\$t\(([^)]+)\)', lambda m: m.group(1).replace('_', ' ').title(), obj)
+        return re.sub(
+            r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), obj
+        )
     if isinstance(obj, dict):
         return {k: resolve_t_keys(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -195,12 +245,42 @@ def resolve_t_keys(obj):
 
 # Valid keywords for OpenAPI 3.0 Schema Objects
 _VALID_SCHEMA_KEYS = {
-    'type', 'format', 'description', 'default', 'example', 'examples',
-    'enum', 'const', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum',
-    'multipleOf', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems',
-    'uniqueItems', 'minProperties', 'maxProperties', 'items', 'properties',
-    'required', 'additionalProperties', 'oneOf', 'allOf', 'anyOf', 'not',
-    'discriminator', 'nullable', 'readOnly', 'writeOnly', 'deprecated', 'title', '$ref',
+    "type",
+    "format",
+    "description",
+    "default",
+    "example",
+    "examples",
+    "enum",
+    "const",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "maxProperties",
+    "items",
+    "properties",
+    "required",
+    "additionalProperties",
+    "oneOf",
+    "allOf",
+    "anyOf",
+    "not",
+    "discriminator",
+    "nullable",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
+    "title",
+    "$ref",
 }
 
 
@@ -210,88 +290,126 @@ def _clean_schema(obj: dict) -> dict:
         return obj
     cleaned = {}
     for k, v in obj.items():
-        if k not in _VALID_SCHEMA_KEYS and not k.startswith('x-'):
+        if k not in _VALID_SCHEMA_KEYS and not k.startswith("x-"):
             continue
-        if k == 'type' and v == 'float':
-            cleaned['type'] = 'number'
-            cleaned.setdefault('format', 'float')
+        if k == "type" and v == "float":
+            cleaned["type"] = "number"
+            cleaned.setdefault("format", "float")
             continue
-        if k == 'const':
-            cleaned['enum'] = [v]
+        if k == "type" and v == "int":
+            cleaned["type"] = "integer"
             continue
-        if k in ('items', 'additionalProperties', 'not') and isinstance(v, dict):
+        if k == "const":
+            cleaned["enum"] = [v]
+            continue
+        if k in ("items", "additionalProperties", "not") and isinstance(v, dict):
             cleaned[k] = _clean_schema(v)
-        elif k == 'properties' and isinstance(v, dict):
+        elif k == "properties" and isinstance(v, dict):
             cleaned[k] = {pk: _clean_schema(pv) for pk, pv in v.items()}
-        elif k in ('oneOf', 'allOf', 'anyOf') and isinstance(v, list):
+        elif k in ("oneOf", "allOf", "anyOf") and isinstance(v, list):
             cleaned[k] = [_clean_schema(item) for item in v]
         else:
             cleaned[k] = v
-    if 'type' in cleaned and 'example' in cleaned:
-        t, ex = cleaned['type'], cleaned['example']
-        if t == 'object' and isinstance(ex, str):
-            cleaned['type'] = 'string'
-        elif t == 'object' and isinstance(ex, (int, float)):
-            cleaned['type'] = 'number'
-    if 'required' in cleaned and isinstance(cleaned['required'], list) and not cleaned['required']:
-        del cleaned['required']
+    if "type" in cleaned and "example" in cleaned:
+        t, ex = cleaned["type"], cleaned["example"]
+        if t == "object" and isinstance(ex, str):
+            cleaned["type"] = "string"
+        elif t == "object" and isinstance(ex, (int, float)):
+            cleaned["type"] = "number"
+    if (
+        "required" in cleaned
+        and isinstance(cleaned["required"], list)
+        and not cleaned["required"]
+    ):
+        del cleaned["required"]
     return cleaned
 
 
 def clean_openapi_spec(spec: dict) -> dict:
     """Clean an OpenAPI spec for strict validation compliance."""
-    if 'paths' not in spec:
+    if "paths" not in spec:
         return spec
     cleaned = dict(spec)
     cleaned_paths = {}
-    _resp_keys = {'description', 'headers', 'content', 'links'}
-    _rb_keys = {'description', 'content', 'required'}
-    _mt_keys = {'schema', 'example', 'examples', 'encoding'}
-    for path, path_item in spec['paths'].items():
+    _resp_keys = {"description", "headers", "content", "links"}
+    _rb_keys = {"description", "content", "required"}
+    _mt_keys = {"schema", "example", "examples", "encoding"}
+    for path, path_item in spec["paths"].items():
         if not isinstance(path_item, dict):
             cleaned_paths[path] = path_item
             continue
         ci = {}
         for method, op in path_item.items():
-            if method not in ('get', 'post', 'put', 'delete', 'patch', 'options', 'head', 'trace'):
+            if method not in (
+                "get",
+                "post",
+                "put",
+                "delete",
+                "patch",
+                "options",
+                "head",
+                "trace",
+            ):
                 ci[method] = op
                 continue
             if not isinstance(op, dict):
                 ci[method] = op
                 continue
             cop = dict(op)
-            if 'requestBody' in cop and isinstance(cop['requestBody'], dict):
-                rb = {k: v for k, v in cop['requestBody'].items() if k in _rb_keys or k.startswith('x-')}
-                if 'content' in rb:
-                    rb['content'] = {
-                        ct: {k: (_clean_schema(v) if k == 'schema' else v) for k, v in mt.items() if k in _mt_keys}
-                        for ct, mt in rb['content'].items() if isinstance(mt, dict)
+            if "requestBody" in cop and isinstance(cop["requestBody"], dict):
+                rb = {
+                    k: v
+                    for k, v in cop["requestBody"].items()
+                    if k in _rb_keys or k.startswith("x-")
+                }
+                if "content" in rb:
+                    rb["content"] = {
+                        ct: {
+                            k: (_clean_schema(v) if k == "schema" else v)
+                            for k, v in mt.items()
+                            if k in _mt_keys
+                        }
+                        for ct, mt in rb["content"].items()
+                        if isinstance(mt, dict)
                     }
-                cop['requestBody'] = rb
-            if 'responses' in cop and isinstance(cop['responses'], dict):
+                cop["requestBody"] = rb
+            if "responses" in cop and isinstance(cop["responses"], dict):
                 new_resps = {}
-                for code, resp in cop['responses'].items():
+                for code, resp in cop["responses"].items():
                     if not isinstance(resp, dict):
                         new_resps[code] = resp
                         continue
-                    cr = {k: v for k, v in resp.items() if k in _resp_keys or k.startswith('x-')}
-                    if 'description' not in cr:
-                        cr['description'] = 'Response'
-                    if 'content' in cr:
-                        cr['content'] = {
-                            ct: {k: (_clean_schema(v) if k == 'schema' else v) for k, v in mt.items() if k in _mt_keys}
-                            for ct, mt in cr['content'].items() if isinstance(mt, dict)
+                    cr = {
+                        k: v
+                        for k, v in resp.items()
+                        if k in _resp_keys or k.startswith("x-")
+                    }
+                    if "description" not in cr:
+                        cr["description"] = "Response"
+                    if "content" in cr:
+                        cr["content"] = {
+                            ct: {
+                                k: (_clean_schema(v) if k == "schema" else v)
+                                for k, v in mt.items()
+                                if k in _mt_keys
+                            }
+                            for ct, mt in cr["content"].items()
+                            if isinstance(mt, dict)
                         }
                     new_resps[code] = cr
-                cop['responses'] = new_resps
-            if 'parameters' in cop and isinstance(cop['parameters'], list):
-                cop['parameters'] = [
-                    {k: (_clean_schema(v) if k == 'schema' else v) for k, v in p.items()}
-                    for p in cop['parameters'] if isinstance(p, dict)
+                cop["responses"] = new_resps
+            if "parameters" in cop and isinstance(cop["parameters"], list):
+                cop["parameters"] = [
+                    {
+                        k: (_clean_schema(v) if k == "schema" else v)
+                        for k, v in p.items()
+                    }
+                    for p in cop["parameters"]
+                    if isinstance(p, dict)
                 ]
             ci[method] = cop
         cleaned_paths[path] = ci
-    cleaned['paths'] = cleaned_paths
+    cleaned["paths"] = cleaned_paths
     return cleaned
 
 
@@ -353,7 +471,7 @@ def merge_openapi_specs(backend_dir: Path, service: dict) -> dict | None:
 def convert_dev_doc_to_mdx(content: str, doc_key: str, service_name: str) -> str:
     """Convert a PlatformBackend development markdown doc to Mintlify MDX format."""
     # Extract a title from the first heading or generate one
-    title_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
+    title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
     if title_match:
         title = title_match.group(1).strip()
     else:
@@ -362,17 +480,19 @@ def convert_dev_doc_to_mdx(content: str, doc_key: str, service_name: str) -> str
     # Clean up the content
     # Remove the first h1 if we extracted it
     if title_match:
-        content = content[:title_match.start()] + content[title_match.end():]
+        content = content[: title_match.start()] + content[title_match.end() :]
 
     # Replace image references that use platform URLs with relative paths
     content = re.sub(
-        r'!\[([^\]]*)\]\(https://cdn\.acedata\.cloud/([^)]+)\)',
-        r'![\1](https://cdn.acedata.cloud/\2)',
+        r"!\[([^\]]*)\]\(https://cdn\.acedata\.cloud/([^)]+)\)",
+        r"![\1](https://cdn.acedata.cloud/\2)",
         content,
     )
 
     # Replace $t() references
-    content = re.sub(r'\$t\(([^)]+)\)', lambda m: m.group(1).replace('_', ' ').title(), content)
+    content = re.sub(
+        r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), content
+    )
 
     # Build frontmatter
     frontmatter = f"""---
@@ -386,11 +506,13 @@ description: "Integration guide for {service_name} on Ace Data Cloud"
 
 def generate_mcp_doc(content: str, mcp_name: str) -> str:
     """Convert MCP doc to MDX."""
-    title_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
+    title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
     title = title_match.group(1).strip() if title_match else f"MCP {mcp_name}"
     if title_match:
-        content = content[:title_match.start()] + content[title_match.end():]
-    content = re.sub(r'\$t\(([^)]+)\)', lambda m: m.group(1).replace('_', ' ').title(), content)
+        content = content[: title_match.start()] + content[title_match.end() :]
+    content = re.sub(
+        r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), content
+    )
 
     return f"""---
 title: "{title}"
@@ -403,11 +525,17 @@ description: "MCP server for {mcp_name} integration"
 
 def generate_extra_doc(content: str, doc_key: str) -> str:
     """Convert extra docs (privacy, terms, etc.) to MDX."""
-    title_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
-    title = title_match.group(1).strip() if title_match else doc_key.replace('_', ' ').title()
+    title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+    title = (
+        title_match.group(1).strip()
+        if title_match
+        else doc_key.replace("_", " ").title()
+    )
     if title_match:
-        content = content[:title_match.start()] + content[title_match.end():]
-    content = re.sub(r'\$t\(([^)]+)\)', lambda m: m.group(1).replace('_', ' ').title(), content)
+        content = content[: title_match.start()] + content[title_match.end() :]
+    content = re.sub(
+        r"\$t\(([^)]+)\)", lambda m: m.group(1).replace("_", " ").title(), content
+    )
 
     return f"""---
 title: "{title}"
@@ -444,31 +572,39 @@ def build_navigation(
                     pages.append(f"guides/{svc_alias}/{docs[0]}")
                 else:
                     svc_pages = [f"guides/{svc_alias}/{d}" for d in docs]
-                    pages.append({
-                        "group": service_names.get(svc_alias, svc_alias),
-                        "pages": svc_pages,
-                    })
+                    pages.append(
+                        {
+                            "group": service_names.get(svc_alias, svc_alias),
+                            "pages": svc_pages,
+                        }
+                    )
         if pages:
-            guide_groups.append({
-                "group": cat_name,
-                "icon": cat_info["icon"],
-                "pages": pages,
-            })
+            guide_groups.append(
+                {
+                    "group": cat_name,
+                    "icon": cat_info["icon"],
+                    "pages": pages,
+                }
+            )
 
     # X402 and other special guides
     special_pages = []
     if (output_dir / "guides" / "x402.mdx").exists():
         special_pages.append("guides/x402")
     if special_pages:
-        guide_groups.append({
-            "group": "Advanced",
-            "pages": special_pages,
-        })
+        guide_groups.append(
+            {
+                "group": "Advanced",
+                "pages": special_pages,
+            }
+        )
 
-    tabs.append({
-        "tab": "Guides",
-        "groups": guide_groups,
-    })
+    tabs.append(
+        {
+            "tab": "Guides",
+            "groups": guide_groups,
+        }
+    )
 
     # Tab 2: API Reference (auto-populated from OpenAPI per service category)
     api_groups = [
@@ -482,20 +618,24 @@ def build_navigation(
         for svc_alias in cat_info["services"]:
             openapi_path = f"openapi/{svc_alias}.json"
             if (output_dir / openapi_path).exists():
-                cat_pages.append({
-                    "group": service_names.get(svc_alias, svc_alias),
-                    "openapi": {
-                        "source": f"/{openapi_path}",
-                        "directory": f"api-reference/{svc_alias}",
-                    },
-                })
+                cat_pages.append(
+                    {
+                        "group": service_names.get(svc_alias, svc_alias),
+                        "openapi": {
+                            "source": f"/{openapi_path}",
+                            "directory": f"api-reference/{svc_alias}",
+                        },
+                    }
+                )
         if cat_pages:
             api_groups.extend(cat_pages)
 
-    tabs.append({
-        "tab": "API Reference",
-        "groups": api_groups,
-    })
+    tabs.append(
+        {
+            "tab": "API Reference",
+            "groups": api_groups,
+        }
+    )
 
     # Tab 3: MCP Servers
     mcp_pages = []
@@ -505,15 +645,19 @@ def build_navigation(
             if f.suffix == ".mdx":
                 mcp_pages.append(f"mcp/{f.stem}")
     if mcp_pages:
-        tabs.append({
-            "tab": "MCP Servers",
-            "groups": [
-                {
-                    "group": "MCP Servers",
-                    "pages": ["mcp/overview"] + mcp_pages if (output_dir / "mcp" / "overview.mdx").exists() else mcp_pages,
-                }
-            ],
-        })
+        tabs.append(
+            {
+                "tab": "MCP Servers",
+                "groups": [
+                    {
+                        "group": "MCP Servers",
+                        "pages": ["mcp/overview"] + mcp_pages
+                        if (output_dir / "mcp" / "overview.mdx").exists()
+                        else mcp_pages,
+                    }
+                ],
+            }
+        )
 
     # Tab 4: Resources
     resource_pages = []
@@ -524,10 +668,12 @@ def build_navigation(
     if (output_dir / "resources" / "support.mdx").exists():
         resource_pages.append("resources/support")
     if resource_pages:
-        tabs.append({
-            "tab": "Resources",
-            "groups": [{"group": "Resources", "pages": resource_pages}],
-        })
+        tabs.append(
+            {
+                "tab": "Resources",
+                "groups": [{"group": "Resources", "pages": resource_pages}],
+            }
+        )
 
     return {
         "tabs": tabs,
@@ -549,7 +695,9 @@ def build_navigation(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sync PlatformBackend docs to Mintlify")
+    parser = argparse.ArgumentParser(
+        description="Sync PlatformBackend docs to Mintlify"
+    )
     parser.add_argument("--backend-dir", required=True, help="Path to PlatformBackend")
     parser.add_argument("--output-dir", required=True, help="Path to Docs repo root")
     args = parser.parse_args()
@@ -562,35 +710,26 @@ def main():
 
     # Load service mapping
     services = load_service_mapping(backend_dir)
-    service_by_alias = {}
-
-    # Map $t(service_title_*) patterns to aliases for services without explicit alias
-    T_TITLE_TO_ALIAS = {
-        "service_title_deepseek": "deepseek",
-        "service_title_face_change": "face",
-        "service_title_identity": "identity",
-        "service_title_qrart": "qrart",
-        "service_title_shorturl": "shorturl",
-        "service_title_aichat": "aichat",
-        "service_title_image2text": "image2text",
-        "service_title_global_rotating_proxy": "global-rotating-proxy",
-        "service_title_adsl_http_proxy": "adsl-http-proxy",
-        "service_title_cellular_rotating_proxy": "cellular-rotating-proxy",
-        "service_title_localization": "localization",
-    }
+    service_by_alias: dict[str, dict] = {}
 
     for svc in services:
-        if svc.get("private"):
+        if svc.get("alias") in EXCLUDE_FROM_DOCS:
             continue
         alias = svc.get("alias")
         if not alias:
-            # Try to derive alias from $t() title
+            # Derive alias from $t(service_title_xxx) → xxx with underscores → hyphens
             title = svc.get("title", "")
-            m = re.match(r'^\$t\(([^)]+)\)$', title)
+            m = re.match(r"^\$t\(service_title_([^)]+)\)$", title)
             if m:
-                alias = T_TITLE_TO_ALIAS.get(m.group(1))
+                alias = m.group(1).replace("_", "-")
+                svc["alias"] = alias
         if alias:
             service_by_alias[alias] = svc
+
+    # Build dynamic lookup tables
+    service_names = build_service_names(service_by_alias)
+    categories = build_categories(service_by_alias)
+    doc_service_map = build_doc_service_map(service_by_alias, backend_dir)
 
     # ---------------------------------------------------------------------------
     # 1. Generate merged OpenAPI specs per service
@@ -626,12 +765,13 @@ def main():
 
     for md_file in sorted(docs_dir.glob("development_*.md")):
         doc_key = md_file.stem.removeprefix("development_")
-        service_alias = DEV_DOC_SERVICE_MAP.get(doc_key)
+        service_alias = doc_service_map.get(doc_key)
         if service_alias is None:
             continue  # skip unmapped docs
 
         content = md_file.read_text(encoding="utf-8")
-        mdx_content = convert_dev_doc_to_mdx(content, doc_key, service_alias)
+        svc_name = service_names.get(service_alias, service_alias)
+        mdx_content = convert_dev_doc_to_mdx(content, doc_key, svc_name)
 
         svc_dir = guides_dir / service_alias
         svc_dir.mkdir(parents=True, exist_ok=True)
@@ -640,7 +780,9 @@ def main():
 
         dev_docs_by_service.setdefault(service_alias, []).append(doc_key)
 
-    print(f"Generated {sum(len(v) for v in dev_docs_by_service.values())} guide pages across {len(dev_docs_by_service)} services")
+    print(
+        f"Generated {sum(len(v) for v in dev_docs_by_service.values())} guide pages across {len(dev_docs_by_service)} services"
+    )
 
     # ---------------------------------------------------------------------------
     # 3. MCP docs
@@ -659,36 +801,26 @@ def main():
         out_path.write_text(mdx_content, encoding="utf-8")
         mcp_count += 1
 
-    # MCP overview page
-    mcp_overview = """---
+    # MCP overview page — dynamically built from discovered MCP docs
+    mcp_cards = []
+    for md_file in sorted(docs_dir.glob("mcp_*.md")):
+        name = md_file.stem.removeprefix("mcp_")
+        display = name.replace("-", " ").replace("_", " ").title()
+        mcp_cards.append(
+            f'  <Card title="{display}" href="/mcp/{name}">\n'
+            f"    {display} MCP server\n"
+            f"  </Card>"
+        )
+    cards_block = "\n".join(mcp_cards) if mcp_cards else ""
+    mcp_overview = f"""---
 title: "MCP Servers"
 description: "Model Context Protocol servers for AI tool integration"
 ---
 
 Ace Data Cloud provides MCP (Model Context Protocol) servers that allow AI assistants like Claude, Cursor, and Windsurf to directly use our APIs.
 
-<CardGroup cols={2}>
-  <Card title="Suno" icon="music" href="/mcp/suno">
-    AI music generation
-  </Card>
-  <Card title="Midjourney" icon="image" href="/mcp/midjourney">
-    AI image generation
-  </Card>
-  <Card title="SERP" icon="magnifying-glass" href="/mcp/serp">
-    Google search
-  </Card>
-  <Card title="Luma" icon="video" href="/mcp/luma">
-    AI video generation
-  </Card>
-  <Card title="Sora" icon="film" href="/mcp/sora">
-    OpenAI video generation
-  </Card>
-  <Card title="Veo" icon="camera-movie" href="/mcp/veo">
-    Google video generation
-  </Card>
-  <Card title="Nano Banana" icon="wand-magic-sparkles" href="/mcp/nanobanana">
-    Gemini image generation
-  </Card>
+<CardGroup cols={{2}}>
+{cards_block}
 </CardGroup>
 """
     (mcp_dir / "overview.mdx").write_text(mcp_overview, encoding="utf-8")
@@ -950,7 +1082,9 @@ Browse APIs by category:
     # ---------------------------------------------------------------------------
     # 6. Generate docs.json
     # ---------------------------------------------------------------------------
-    navigation = build_navigation(service_by_alias, dev_docs_by_service, output_dir)
+    navigation = build_navigation(
+        categories, service_names, dev_docs_by_service, output_dir
+    )
 
     docs_json = {
         "$schema": "https://mintlify.com/docs.json",
