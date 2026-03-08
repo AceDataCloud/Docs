@@ -933,10 +933,12 @@ Browse APIs by category:
             },
         },
         "api": {
-            "playground": {"mode": "simple"},
-            "auth": {
-                "method": "bearer",
-                "name": "Authorization",
+            "playground": {"display": "simple"},
+            "mdx": {
+                "auth": {
+                    "method": "bearer",
+                    "name": "Authorization",
+                },
             },
         },
         "variables": {
