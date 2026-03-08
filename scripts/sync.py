@@ -15,6 +15,8 @@ import argparse
 import json
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -515,7 +517,27 @@ def build_navigation(
             ],
         })
 
-    # Tab 4: Resources
+    # -----------------------------------------------------------------------
+    # SEO tabs: Tutorials, Comparisons, Use Cases, Blog
+    # Auto-discovered from generated files on disk
+    # -----------------------------------------------------------------------
+    tutorials_nav = _build_tutorials_nav(output_dir, categories, service_names)
+    if tutorials_nav:
+        tabs.append({"tab": "Tutorials", "groups": tutorials_nav})
+
+    comparisons_nav = _build_simple_nav(output_dir, "comparisons", "Comparisons")
+    if comparisons_nav:
+        tabs.append({"tab": "Comparisons", "groups": comparisons_nav})
+
+    use_cases_nav = _build_simple_nav(output_dir, "use-cases", "Use Cases")
+    if use_cases_nav:
+        tabs.append({"tab": "Use Cases", "groups": use_cases_nav})
+
+    blog_nav = _build_simple_nav(output_dir, "blog", "Blog")
+    if blog_nav:
+        tabs.append({"tab": "Blog", "groups": blog_nav})
+
+    # Tab: Resources (always last)
     resource_pages = []
     if (output_dir / "resources" / "privacy.mdx").exists():
         resource_pages.append("resources/privacy")
@@ -548,6 +570,53 @@ def build_navigation(
     }
 
 
+def _build_tutorials_nav(
+    output_dir: Path, categories: dict[str, dict], service_names: dict[str, str]
+) -> list[dict]:
+    """Auto-discover tutorial pages and group them by category."""
+    tutorials_dir = output_dir / "tutorials"
+    if not tutorials_dir.exists():
+        return []
+
+    groups = []
+    for cat_name, cat_info in categories.items():
+        pages = []
+        for svc_alias in cat_info["services"]:
+            svc_dir = tutorials_dir / svc_alias
+            if not svc_dir.exists():
+                continue
+            svc_pages = sorted(
+                f"tutorials/{svc_alias}/{f.stem}"
+                for f in svc_dir.iterdir()
+                if f.suffix == ".mdx"
+            )
+            if svc_pages:
+                pages.append({
+                    "group": service_names.get(svc_alias, svc_alias),
+                    "pages": svc_pages,
+                })
+        if pages:
+            groups.append({
+                "group": f"{cat_name} Tutorials",
+                "icon": cat_info["icon"],
+                "pages": pages,
+            })
+    return groups
+
+
+def _build_simple_nav(output_dir: Path, dirname: str, display_name: str) -> list[dict]:
+    """Auto-discover pages in a flat directory and make a nav group."""
+    d = output_dir / dirname
+    if not d.exists():
+        return []
+    pages = sorted(
+        f"{dirname}/{f.stem}" for f in d.iterdir() if f.suffix == ".mdx"
+    )
+    if not pages:
+        return []
+    return [{"group": display_name, "pages": pages}]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sync PlatformBackend docs to Mintlify")
     parser.add_argument("--backend-dir", required=True, help="Path to PlatformBackend")
@@ -562,35 +631,26 @@ def main():
 
     # Load service mapping
     services = load_service_mapping(backend_dir)
-    service_by_alias = {}
-
-    # Map $t(service_title_*) patterns to aliases for services without explicit alias
-    T_TITLE_TO_ALIAS = {
-        "service_title_deepseek": "deepseek",
-        "service_title_face_change": "face",
-        "service_title_identity": "identity",
-        "service_title_qrart": "qrart",
-        "service_title_shorturl": "shorturl",
-        "service_title_aichat": "aichat",
-        "service_title_image2text": "image2text",
-        "service_title_global_rotating_proxy": "global-rotating-proxy",
-        "service_title_adsl_http_proxy": "adsl-http-proxy",
-        "service_title_cellular_rotating_proxy": "cellular-rotating-proxy",
-        "service_title_localization": "localization",
-    }
+    service_by_alias: dict[str, dict] = {}
 
     for svc in services:
         if svc.get("private"):
             continue
         alias = svc.get("alias")
         if not alias:
-            # Try to derive alias from $t() title
+            # Derive alias from $t(service_title_xxx) → xxx with underscores → hyphens
             title = svc.get("title", "")
-            m = re.match(r'^\$t\(([^)]+)\)$', title)
+            m = re.match(r'^\$t\(service_title_([^)]+)\)$', title)
             if m:
-                alias = T_TITLE_TO_ALIAS.get(m.group(1))
+                alias = m.group(1).replace("_", "-")
+                svc["alias"] = alias
         if alias:
             service_by_alias[alias] = svc
+
+    # Build dynamic lookup tables
+    service_names = build_service_names(service_by_alias)
+    categories = build_categories(service_by_alias)
+    doc_service_map = build_doc_service_map(service_by_alias, backend_dir)
 
     # ---------------------------------------------------------------------------
     # 1. Generate merged OpenAPI specs per service
@@ -626,12 +686,15 @@ def main():
 
     for md_file in sorted(docs_dir.glob("development_*.md")):
         doc_key = md_file.stem.removeprefix("development_")
-        service_alias = DEV_DOC_SERVICE_MAP.get(doc_key)
+        if doc_key.endswith("_title"):
+            continue
+        service_alias = doc_service_map.get(doc_key)
         if service_alias is None:
-            continue  # skip unmapped docs
+            continue  # skip unmapped / explicitly skipped docs
 
         content = md_file.read_text(encoding="utf-8")
-        mdx_content = convert_dev_doc_to_mdx(content, doc_key, service_alias)
+        svc_name = service_names.get(service_alias, service_alias)
+        mdx_content = convert_dev_doc_to_mdx(content, doc_key, svc_name)
 
         svc_dir = guides_dir / service_alias
         svc_dir.mkdir(parents=True, exist_ok=True)
@@ -659,36 +722,23 @@ def main():
         out_path.write_text(mdx_content, encoding="utf-8")
         mcp_count += 1
 
-    # MCP overview page
-    mcp_overview = """---
+    # MCP overview page — auto-generated from discovered MCP docs
+    mcp_cards = []
+    for md_file in sorted(docs_dir.glob("mcp_*.md")):
+        name = md_file.stem.removeprefix("mcp_")
+        display = service_names.get(name, name.replace("_", " ").title())
+        href = f"/mcp/{name}"
+        mcp_cards.append(f'  <Card title="{display}" href="{href}">\n    {display} MCP server\n  </Card>')
+    cards_block = "\n".join(mcp_cards) if mcp_cards else ""
+    mcp_overview = f"""---
 title: "MCP Servers"
 description: "Model Context Protocol servers for AI tool integration"
 ---
 
 Ace Data Cloud provides MCP (Model Context Protocol) servers that allow AI assistants like Claude, Cursor, and Windsurf to directly use our APIs.
 
-<CardGroup cols={2}>
-  <Card title="Suno" icon="music" href="/mcp/suno">
-    AI music generation
-  </Card>
-  <Card title="Midjourney" icon="image" href="/mcp/midjourney">
-    AI image generation
-  </Card>
-  <Card title="SERP" icon="magnifying-glass" href="/mcp/serp">
-    Google search
-  </Card>
-  <Card title="Luma" icon="video" href="/mcp/luma">
-    AI video generation
-  </Card>
-  <Card title="Sora" icon="film" href="/mcp/sora">
-    OpenAI video generation
-  </Card>
-  <Card title="Veo" icon="camera-movie" href="/mcp/veo">
-    Google video generation
-  </Card>
-  <Card title="Nano Banana" icon="wand-magic-sparkles" href="/mcp/nanobanana">
-    Gemini image generation
-  </Card>
+<CardGroup cols={{2}}>
+{cards_block}
 </CardGroup>
 """
     (mcp_dir / "overview.mdx").write_text(mcp_overview, encoding="utf-8")
@@ -948,9 +998,30 @@ Browse APIs by category:
     (api_ref_dir / "introduction.mdx").write_text(api_intro, encoding="utf-8")
 
     # ---------------------------------------------------------------------------
-    # 6. Generate docs.json
+    # 6. Generate SEO pages (tutorials, comparisons, use-cases, blog)
     # ---------------------------------------------------------------------------
-    navigation = build_navigation(service_by_alias, dev_docs_by_service, output_dir)
+    seo_script = Path(__file__).parent / "generate_seo_pages.py"
+    if seo_script.exists():
+        print("\nGenerating SEO pages...")
+        result = subprocess.run(
+            [sys.executable, str(seo_script)],
+            cwd=str(output_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print("  SEO pages generated successfully")
+        else:
+            print(f"  Warning: SEO generation exited with code {result.returncode}")
+            if result.stderr:
+                print(f"  stderr: {result.stderr[:500]}")
+    else:
+        print(f"\nSkipping SEO pages — {seo_script} not found")
+
+    # ---------------------------------------------------------------------------
+    # 7. Generate docs.json
+    # ---------------------------------------------------------------------------
+    navigation = build_navigation(categories, service_names, dev_docs_by_service, output_dir)
 
     docs_json = {
         "$schema": "https://mintlify.com/docs.json",
@@ -1010,7 +1081,7 @@ Browse APIs by category:
     print("Generated docs.json")
 
     # ---------------------------------------------------------------------------
-    # 7. Cleanup: remove old starter template files
+    # 8. Cleanup: remove old starter template files
     # ---------------------------------------------------------------------------
     starter_files = [
         "development.mdx",
@@ -1043,10 +1114,19 @@ Browse APIs by category:
         if dp.exists() and not any(dp.iterdir()):
             dp.rmdir()
 
+    # Count SEO pages
+    seo_counts = {}
+    for d in ["tutorials", "comparisons", "use-cases", "blog"]:
+        dp = output_dir / d
+        if dp.exists():
+            seo_counts[d] = sum(1 for _ in dp.rglob("*.mdx"))
+
     print("\nSync complete!")
     print(f"  OpenAPI specs: {len(generated_specs)}")
     print(f"  Guide pages:   {sum(len(v) for v in dev_docs_by_service.values())}")
     print(f"  MCP pages:     {mcp_count}")
+    for d, c in seo_counts.items():
+        print(f"  {d:14s}: {c}")
 
 
 if __name__ == "__main__":
