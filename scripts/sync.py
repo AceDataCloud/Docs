@@ -1539,8 +1539,8 @@ Authorization: Bearer YOUR_API_TOKEN
         },
         "favicon": "/favicon.svg",
         "logo": {
-            "light": "/logo/light.svg",
-            "dark": "/logo/dark.svg",
+            "light": "/logo/light.png",
+            "dark": "/logo/dark.png",
             "href": "https://acedata.cloud",
         },
         "navbar": {
