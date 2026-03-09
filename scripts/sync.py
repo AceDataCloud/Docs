@@ -850,40 +850,16 @@ def build_navigation(
             if not (output_dir / openapi_path).exists():
                 continue
             svc_name = service_names.get(svc_alias, svc_alias)
-            guide_docs = dev_docs_by_service.get(svc_alias, [])
-            guide_pages = [f"guides/{svc_alias}/{d}" for d in guide_docs]
 
-            if guide_pages:
-                # Service has both API endpoints and integration guides — pair them
-                cat_pages.append(
-                    {
-                        "group": svc_name,
-                        "pages": [
-                            {
-                                "group": "API 端点",
-                                "openapi": {
-                                    "source": f"/{openapi_path}",
-                                    "directory": f"api-reference/{svc_alias}",
-                                },
-                            },
-                            {
-                                "group": "集成指南",
-                                "pages": guide_pages,
-                            },
-                        ],
-                    }
-                )
-            else:
-                # No guide pages — just the OpenAPI reference
-                cat_pages.append(
-                    {
-                        "group": svc_name,
-                        "openapi": {
-                            "source": f"/{openapi_path}",
-                            "directory": f"api-reference/{svc_alias}",
-                        },
-                    }
-                )
+            cat_pages.append(
+                {
+                    "group": svc_name,
+                    "openapi": {
+                        "source": f"/{openapi_path}",
+                        "directory": f"api-reference/{svc_alias}",
+                    },
+                }
+            )
         if cat_pages:
             api_groups.extend(cat_pages)
 
@@ -918,7 +894,7 @@ def build_navigation(
     mcp_dir = output_dir / "mcp"
     if mcp_dir.exists():
         for f in sorted(mcp_dir.iterdir()):
-            if f.suffix == ".mdx":
+            if f.suffix == ".mdx" and f.stem != "overview":
                 mcp_pages.append(f"mcp/{f.stem}")
     if mcp_pages:
         all_mcp = (
@@ -999,6 +975,9 @@ def _mintlify_lang(lang_dir: str) -> str:
 # ---------------------------------------------------------------------------
 _LANG_TO_MINTLIFY_CODE: dict[str, str] = {
     "zh-tw": "zh-Hant",
+    "ja": "jp",
+    "uk": "ua",
+    "pt": "pt-BR",
 }
 
 # Languages NOT supported by Mintlify's language enum — content is synced
@@ -1327,43 +1306,16 @@ def build_language_navigation(
             if not (output_dir / openapi_path).exists():
                 continue
             svc_name = service_names.get(svc_alias, svc_alias)
-            guide_docs = dev_docs_by_service.get(svc_alias, [])
-            existing_guides = [
-                d
-                for d in guide_docs
-                if (lang_dir / "guides" / svc_alias / f"{d}.mdx").exists()
-            ]
-            guide_pages = [f"{lang_out}/guides/{svc_alias}/{d}" for d in existing_guides]
 
-            if guide_pages:
-                api_groups.append(
-                    {
-                        "group": svc_name,
-                        "pages": [
-                            {
-                                "group": _t(lang, "API 端点"),
-                                "openapi": {
-                                    "source": f"/{openapi_path}",
-                                    "directory": f"{lang_out}/api-reference/{svc_alias}",
-                                },
-                            },
-                            {
-                                "group": _t(lang, "集成指南"),
-                                "pages": guide_pages,
-                            },
-                        ],
-                    }
-                )
-            else:
-                api_groups.append(
-                    {
-                        "group": svc_name,
-                        "openapi": {
-                            "source": f"/{openapi_path}",
-                            "directory": f"{lang_out}/api-reference/{svc_alias}",
-                        },
-                    }
-                )
+            api_groups.append(
+                {
+                    "group": svc_name,
+                    "openapi": {
+                        "source": f"/{openapi_path}",
+                        "directory": f"{lang_out}/api-reference/{svc_alias}",
+                    },
+                }
+            )
     if api_groups:
         tabs.append({"tab": _t(lang, "API 参考"), "groups": api_groups})
 
@@ -1417,7 +1369,7 @@ def build_language_navigation(
     mcp_dir = lang_dir / "mcp"
     if mcp_dir.is_dir():
         mcp_pages = sorted(
-            f"{lang_out}/mcp/{f.stem}" for f in mcp_dir.iterdir() if f.suffix == ".mdx"
+            f"{lang_out}/mcp/{f.stem}" for f in mcp_dir.iterdir() if f.suffix == ".mdx" and f.stem != "overview"
         )
         if mcp_pages:
             all_mcp = (
@@ -2030,7 +1982,7 @@ Authorization: Bearer YOUR_API_TOKEN
         "logo": {
             "light": "/logo/light.png",
             "dark": "/logo/dark.png",
-            "href": "https://acedata.cloud",
+            "href": "/",
         },
         "navbar": {
             "links": [
