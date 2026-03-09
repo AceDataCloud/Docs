@@ -975,9 +975,6 @@ def _mintlify_lang(lang_dir: str) -> str:
 # ---------------------------------------------------------------------------
 _LANG_TO_MINTLIFY_CODE: dict[str, str] = {
     "zh-tw": "zh-Hant",
-    "ja": "jp",
-    "uk": "ua",
-    "pt": "pt-BR",
 }
 
 # Languages NOT supported by Mintlify's language enum — content is synced
