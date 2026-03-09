@@ -278,15 +278,20 @@ def main():
 
     t0 = time.time()
 
-    parser = argparse.ArgumentParser(description="Translate docs from zh-CN to all target languages")
+    parser = argparse.ArgumentParser(
+        description="Translate docs from zh-CN to all target languages"
+    )
     parser.add_argument("--output-dir", type=Path, default=DOCS_DIR)
     parser.add_argument(
         "--languages", nargs="*", default=None, help="Target languages (default: all)"
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--root-only", action="store_true",
-                        help="Only translate root MDX files (intro, quickstart, auth). "
-                             "Use when PlatformBackend translations handle guides/tutorials.")
+    parser.add_argument(
+        "--root-only",
+        action="store_true",
+        help="Only translate root MDX files (intro, quickstart, auth). "
+        "Use when PlatformBackend translations handle guides/tutorials.",
+    )
     args = parser.parse_args()
 
     api_key = get_api_key()
@@ -309,7 +314,10 @@ def main():
     if args.dry_run:
         for f in src_files:
             print(f"  {f.relative_to(args.output_dir)}", flush=True)
-        print(f"\nWould translate {len(src_files)} files × {len(langs)} languages = {len(src_files) * len(langs)} translations", flush=True)
+        print(
+            f"\nWould translate {len(src_files)} files × {len(langs)} languages = {len(src_files) * len(langs)} translations",
+            flush=True,
+        )
         return
 
     stats = {"translated": 0, "cached": 0, "failed": 0}
@@ -317,15 +325,21 @@ def main():
     done = 0
     llm_calls = 0
 
-    print(f"\nTotal: {total} translations ({len(src_files)} files × {len(langs)} languages)", flush=True)
+    print(
+        f"\nTotal: {total} translations ({len(src_files)} files × {len(langs)} languages)",
+        flush=True,
+    )
 
     for lang_idx, lang in enumerate(langs):
         lang_t0 = time.time()
         lang_translated = 0
         lang_cached = 0
-        print(f"\n{'='*40}", flush=True)
-        print(f"Language {lang_idx+1}/{len(langs)}: {lang} ({LANGUAGE_NAMES_ZH.get(lang, lang)})", flush=True)
-        print(f"{'='*40}", flush=True)
+        print(f"\n{'=' * 40}", flush=True)
+        print(
+            f"Language {lang_idx + 1}/{len(langs)}: {lang} ({LANGUAGE_NAMES_ZH.get(lang, lang)})",
+            flush=True,
+        )
+        print(f"{'=' * 40}", flush=True)
         for src in src_files:
             done += 1
             rel = src.relative_to(args.output_dir)
@@ -358,14 +372,20 @@ def main():
             time.sleep(0.3)
 
         lang_dt = time.time() - lang_t0
-        print(f"  {lang} done: {lang_translated} translated, {lang_cached} cached ({lang_dt:.1f}s)", flush=True)
+        print(
+            f"  {lang} done: {lang_translated} translated, {lang_cached} cached ({lang_dt:.1f}s)",
+            flush=True,
+        )
 
     elapsed = time.time() - t0
-    print(f"\n{'='*40}", flush=True)
+    print(f"\n{'=' * 40}", flush=True)
     print(f"Translation complete in {elapsed:.1f}s", flush=True)
-    print(f"  translated={stats['translated']} cached={stats['cached']} failed={stats['failed']}", flush=True)
+    print(
+        f"  translated={stats['translated']} cached={stats['cached']} failed={stats['failed']}",
+        flush=True,
+    )
     print(f"  LLM calls={llm_calls}", flush=True)
-    print(f"{'='*40}", flush=True)
+    print(f"{'=' * 40}", flush=True)
 
 
 if __name__ == "__main__":
