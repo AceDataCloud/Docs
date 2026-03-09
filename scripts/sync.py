@@ -990,8 +990,497 @@ _LANG_DIR_TO_MINTLIFY = {
 
 
 def _mintlify_lang(lang_dir: str) -> str:
-    """Map PlatformBackend language directory name to Mintlify language code."""
+    """Map PlatformBackend language directory name to Mintlify output directory."""
     return _LANG_DIR_TO_MINTLIFY.get(lang_dir, lang_dir)
+
+
+# ---------------------------------------------------------------------------
+# Mintlify language enum codes (used in docs.json "language" field)
+# ---------------------------------------------------------------------------
+_LANG_TO_MINTLIFY_CODE: dict[str, str] = {
+    "zh-tw": "zh-Hant",
+}
+
+# Languages NOT supported by Mintlify's language enum — content is synced
+# but they cannot appear in the language switcher.
+_UNSUPPORTED_MINTLIFY_LANGS: set[str] = {"fi", "el", "sr"}
+
+
+def _mintlify_code(lang_dir: str) -> str:
+    """Map language directory name to Mintlify language enum value."""
+    return _LANG_TO_MINTLIFY_CODE.get(lang_dir, lang_dir)
+
+
+# ---------------------------------------------------------------------------
+# Translated navigation labels for secondary languages
+# ---------------------------------------------------------------------------
+_NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "en": {
+        "指南": "Guides",
+        "入门": "Getting Started",
+        "高级": "Advanced",
+        "API 参考": "API Reference",
+        "概览": "Overview",
+        "API 端点": "API Endpoints",
+        "集成指南": "Integration Guides",
+        "教程": "Tutorials",
+        "对比": "Comparisons",
+        "服务对比": "Service Comparisons",
+        "用例": "Use Cases",
+        "应用场景": "Use Cases",
+        "博客": "Blog",
+        "MCP 服务器": "MCP Servers",
+        "资源": "Resources",
+    },
+    "ja": {
+        "指南": "ガイド",
+        "入门": "はじめに",
+        "高级": "上級",
+        "API 参考": "API リファレンス",
+        "概览": "概要",
+        "API 端点": "API エンドポイント",
+        "集成指南": "統合ガイド",
+        "教程": "チュートリアル",
+        "对比": "比較",
+        "服务对比": "サービス比較",
+        "用例": "ユースケース",
+        "应用场景": "ユースケース",
+        "博客": "ブログ",
+        "MCP 服务器": "MCP サーバー",
+        "资源": "リソース",
+    },
+    "ko": {
+        "指南": "가이드",
+        "入门": "시작하기",
+        "高级": "고급",
+        "API 参考": "API 레퍼런스",
+        "概览": "개요",
+        "API 端点": "API 엔드포인트",
+        "集成指南": "통합 가이드",
+        "教程": "튜토리얼",
+        "对比": "비교",
+        "服务对比": "서비스 비교",
+        "用例": "사용 사례",
+        "应用场景": "사용 사례",
+        "博客": "블로그",
+        "MCP 服务器": "MCP 서버",
+        "资源": "리소스",
+    },
+    "es": {
+        "指南": "Guías",
+        "入门": "Primeros pasos",
+        "高级": "Avanzado",
+        "API 参考": "Referencia API",
+        "概览": "Descripción general",
+        "API 端点": "Endpoints API",
+        "集成指南": "Guías de integración",
+        "教程": "Tutoriales",
+        "对比": "Comparaciones",
+        "服务对比": "Comparación de servicios",
+        "用例": "Casos de uso",
+        "应用场景": "Casos de uso",
+        "博客": "Blog",
+        "MCP 服务器": "Servidores MCP",
+        "资源": "Recursos",
+    },
+    "fr": {
+        "指南": "Guides",
+        "入门": "Démarrage",
+        "高级": "Avancé",
+        "API 参考": "Référence API",
+        "概览": "Aperçu",
+        "API 端点": "Points d'accès API",
+        "集成指南": "Guides d'intégration",
+        "教程": "Tutoriels",
+        "对比": "Comparaisons",
+        "服务对比": "Comparaison de services",
+        "用例": "Cas d'utilisation",
+        "应用场景": "Cas d'utilisation",
+        "博客": "Blog",
+        "MCP 服务器": "Serveurs MCP",
+        "资源": "Ressources",
+    },
+    "de": {
+        "指南": "Anleitungen",
+        "入门": "Erste Schritte",
+        "高级": "Erweitert",
+        "API 参考": "API-Referenz",
+        "概览": "Übersicht",
+        "API 端点": "API-Endpunkte",
+        "集成指南": "Integrationsleitfäden",
+        "教程": "Tutorials",
+        "对比": "Vergleiche",
+        "服务对比": "Servicevergleiche",
+        "用例": "Anwendungsfälle",
+        "应用场景": "Anwendungsfälle",
+        "博客": "Blog",
+        "MCP 服务器": "MCP-Server",
+        "资源": "Ressourcen",
+    },
+    "pt": {
+        "指南": "Guias",
+        "入门": "Primeiros passos",
+        "高级": "Avançado",
+        "API 参考": "Referência API",
+        "概览": "Visão geral",
+        "API 端点": "Endpoints API",
+        "集成指南": "Guias de integração",
+        "教程": "Tutoriais",
+        "对比": "Comparações",
+        "服务对比": "Comparação de serviços",
+        "用例": "Casos de uso",
+        "应用场景": "Casos de uso",
+        "博客": "Blog",
+        "MCP 服务器": "Servidores MCP",
+        "资源": "Recursos",
+    },
+    "ru": {
+        "指南": "Руководства",
+        "入门": "Начало работы",
+        "高级": "Продвинутый",
+        "API 参考": "Справочник API",
+        "概览": "Обзор",
+        "API 端点": "Конечные точки API",
+        "集成指南": "Руководства по интеграции",
+        "教程": "Учебники",
+        "对比": "Сравнения",
+        "服务对比": "Сравнение сервисов",
+        "用例": "Примеры использования",
+        "应用场景": "Примеры использования",
+        "博客": "Блог",
+        "MCP 服务器": "MCP-серверы",
+        "资源": "Ресурсы",
+    },
+    "ar": {
+        "指南": "الأدلة",
+        "入门": "البداية",
+        "高级": "متقدم",
+        "API 参考": "مرجع API",
+        "概览": "نظرة عامة",
+        "API 端点": "نقاط نهاية API",
+        "集成指南": "أدلة التكامل",
+        "教程": "دروس",
+        "对比": "مقارنات",
+        "服务对比": "مقارنة الخدمات",
+        "用例": "حالات الاستخدام",
+        "应用场景": "حالات الاستخدام",
+        "博客": "مدونة",
+        "MCP 服务器": "خوادم MCP",
+        "资源": "الموارد",
+    },
+    "it": {
+        "指南": "Guide",
+        "入门": "Inizia",
+        "高级": "Avanzato",
+        "API 参考": "Riferimento API",
+        "概览": "Panoramica",
+        "API 端点": "Endpoint API",
+        "集成指南": "Guide all'integrazione",
+        "教程": "Tutorial",
+        "对比": "Confronti",
+        "服务对比": "Confronto servizi",
+        "用例": "Casi d'uso",
+        "应用场景": "Casi d'uso",
+        "博客": "Blog",
+        "MCP 服务器": "Server MCP",
+        "资源": "Risorse",
+    },
+    "zh-tw": {
+        "指南": "指南",
+        "入门": "入門",
+        "高级": "進階",
+        "API 参考": "API 參考",
+        "概览": "概覽",
+        "API 端点": "API 端點",
+        "集成指南": "整合指南",
+        "教程": "教學",
+        "对比": "比較",
+        "服务对比": "服務比較",
+        "用例": "應用案例",
+        "应用场景": "應用案例",
+        "博客": "部落格",
+        "MCP 服务器": "MCP 伺服器",
+        "资源": "資源",
+    },
+}
+
+
+def _t(lang: str, label: str) -> str:
+    """Translate a Chinese navigation label. Falls back to English, then original."""
+    tr = _NAV_TRANSLATIONS.get(lang)
+    if tr and label in tr:
+        return tr[label]
+    en = _NAV_TRANSLATIONS.get("en", {})
+    return en.get(label, label)
+
+
+def _build_tutorials_nav_for(tut_dir: Path, lang_prefix: str) -> list:
+    """Auto-discover tutorial pages for a language directory."""
+    if not tut_dir.is_dir():
+        return []
+    groups: dict[str, list[str]] = {}
+    for f in sorted(tut_dir.rglob("*.mdx")):
+        rel = f.relative_to(tut_dir)
+        parts = rel.parts
+        if len(parts) == 2:
+            svc = parts[0]
+            groups.setdefault(svc, []).append(f"{lang_prefix}/tutorials/{svc}/{rel.stem}")
+        elif len(parts) == 1:
+            groups.setdefault("_root", []).append(f"{lang_prefix}/tutorials/{rel.stem}")
+    nav = []
+    for svc, pages in groups.items():
+        if svc == "_root":
+            nav.extend(pages)
+        elif len(pages) == 1:
+            nav.append(pages[0])
+        else:
+            nav.append({"group": svc.replace("-", " ").title(), "pages": pages})
+    return nav
+
+
+def build_language_navigation(
+    lang: str,
+    categories: dict[str, dict],
+    service_names: dict[str, str],
+    dev_docs_by_service: dict,
+    output_dir: Path,
+) -> list[dict] | None:
+    """Build Mintlify tabs for a secondary language.
+
+    Returns a list of tab dicts, or None if no content exists for this language.
+    Mirrors the structure of build_navigation() but prefixes all page paths
+    with the Mintlify output directory (e.g. ``en/``, ``zh-TW/``) and uses
+    translated labels.
+    """
+    lang_out = _mintlify_lang(lang)  # output directory name
+    lang_dir = output_dir / lang_out
+
+    if not lang_dir.is_dir():
+        return None
+
+    tabs: list[dict] = []
+
+    # --- Guides tab ---
+    guide_groups: list[dict] = []
+    intro_path = lang_dir / "introduction.mdx"
+    qs_path = lang_dir / "quickstart.mdx"
+    auth_path = lang_dir / "authentication.mdx"
+    getting_started_pages = []
+    if intro_path.exists():
+        getting_started_pages.append(f"{lang_out}/introduction")
+    if qs_path.exists():
+        getting_started_pages.append(f"{lang_out}/quickstart")
+    if auth_path.exists():
+        getting_started_pages.append(f"{lang_out}/authentication")
+    if getting_started_pages:
+        guide_groups.append({"group": _t(lang, "入门"), "pages": getting_started_pages})
+
+    for cat_name, cat_info in categories.items():
+        pages: list = []
+        for svc_alias in cat_info["services"]:
+            if svc_alias not in dev_docs_by_service:
+                continue
+            docs = dev_docs_by_service[svc_alias]
+            existing = [
+                d for d in docs if (lang_dir / "guides" / svc_alias / f"{d}.mdx").exists()
+            ]
+            if not existing:
+                continue
+            if len(existing) == 1:
+                pages.append(f"{lang_out}/guides/{svc_alias}/{existing[0]}")
+            else:
+                svc_pages = [f"{lang_out}/guides/{svc_alias}/{d}" for d in existing]
+                pages.append(
+                    {
+                        "group": service_names.get(svc_alias, svc_alias),
+                        "pages": svc_pages,
+                    }
+                )
+        if pages:
+            guide_groups.append(
+                {
+                    "group": cat_name,
+                    "icon": cat_info["icon"],
+                    "pages": pages,
+                }
+            )
+
+    special_pages = []
+    if (lang_dir / "guides" / "x402.mdx").exists():
+        special_pages.append(f"{lang_out}/guides/x402")
+    if special_pages:
+        guide_groups.append({"group": _t(lang, "高级"), "pages": special_pages})
+
+    if guide_groups:
+        tabs.append({"tab": _t(lang, "指南"), "groups": guide_groups})
+
+    # --- API Reference tab ---
+    api_groups: list[dict] = []
+    api_intro = lang_dir / "api-reference" / "introduction.mdx"
+    if api_intro.exists():
+        api_groups.append(
+            {"group": _t(lang, "概览"), "pages": [f"{lang_out}/api-reference/introduction"]}
+        )
+    for cat_name, cat_info in categories.items():
+        for svc_alias in cat_info["services"]:
+            openapi_path = f"openapi/{svc_alias}.json"
+            if not (output_dir / openapi_path).exists():
+                continue
+            svc_name = service_names.get(svc_alias, svc_alias)
+            guide_docs = dev_docs_by_service.get(svc_alias, [])
+            existing_guides = [
+                d
+                for d in guide_docs
+                if (lang_dir / "guides" / svc_alias / f"{d}.mdx").exists()
+            ]
+            guide_pages = [f"{lang_out}/guides/{svc_alias}/{d}" for d in existing_guides]
+
+            if guide_pages:
+                api_groups.append(
+                    {
+                        "group": svc_name,
+                        "pages": [
+                            {
+                                "group": _t(lang, "API 端点"),
+                                "openapi": {
+                                    "source": f"/{openapi_path}",
+                                    "directory": f"{lang_out}/api-reference/{svc_alias}",
+                                },
+                            },
+                            {
+                                "group": _t(lang, "集成指南"),
+                                "pages": guide_pages,
+                            },
+                        ],
+                    }
+                )
+            else:
+                api_groups.append(
+                    {
+                        "group": svc_name,
+                        "openapi": {
+                            "source": f"/{openapi_path}",
+                            "directory": f"{lang_out}/api-reference/{svc_alias}",
+                        },
+                    }
+                )
+    if api_groups:
+        tabs.append({"tab": _t(lang, "API 参考"), "groups": api_groups})
+
+    # --- Tutorials tab (Chinese-only content may exist in translations) ---
+    tut_pages = _build_tutorials_nav_for(lang_dir / "tutorials", lang_out)
+    if tut_pages:
+        tabs.append(
+            {"tab": _t(lang, "教程"), "groups": [{"group": _t(lang, "教程"), "pages": tut_pages}]}
+        )
+
+    # --- Comparisons tab ---
+    cmp_dir = lang_dir / "comparisons"
+    if cmp_dir.is_dir():
+        cmp_pages = sorted(
+            f"{lang_out}/comparisons/{f.stem}" for f in cmp_dir.iterdir() if f.suffix == ".mdx"
+        )
+        if cmp_pages:
+            tabs.append(
+                {
+                    "tab": _t(lang, "对比"),
+                    "groups": [{"group": _t(lang, "服务对比"), "pages": cmp_pages}],
+                }
+            )
+
+    # --- Use Cases tab ---
+    uc_dir = lang_dir / "use-cases"
+    if uc_dir.is_dir():
+        uc_pages = sorted(
+            f"{lang_out}/use-cases/{f.stem}" for f in uc_dir.iterdir() if f.suffix == ".mdx"
+        )
+        if uc_pages:
+            tabs.append(
+                {
+                    "tab": _t(lang, "用例"),
+                    "groups": [{"group": _t(lang, "应用场景"), "pages": uc_pages}],
+                }
+            )
+
+    # --- Blog tab ---
+    blog_dir = lang_dir / "blog"
+    if blog_dir.is_dir():
+        blog_pages = sorted(
+            f"{lang_out}/blog/{f.stem}" for f in blog_dir.iterdir() if f.suffix == ".mdx"
+        )
+        if blog_pages:
+            tabs.append(
+                {"tab": _t(lang, "博客"), "groups": [{"group": _t(lang, "博客"), "pages": blog_pages}]}
+            )
+
+    # --- MCP Servers tab ---
+    mcp_dir = lang_dir / "mcp"
+    if mcp_dir.is_dir():
+        mcp_pages = sorted(
+            f"{lang_out}/mcp/{f.stem}" for f in mcp_dir.iterdir() if f.suffix == ".mdx"
+        )
+        if mcp_pages:
+            all_mcp = (
+                [f"{lang_out}/mcp/overview"] + mcp_pages
+                if (mcp_dir / "overview.mdx").exists()
+                else mcp_pages
+            )
+            tabs.append(
+                {
+                    "tab": _t(lang, "MCP 服务器"),
+                    "groups": [{"group": _t(lang, "MCP 服务器"), "pages": all_mcp}],
+                }
+            )
+
+    # --- Resources tab ---
+    resource_pages = []
+    for slug in ("privacy", "terms", "support"):
+        if (lang_dir / "resources" / f"{slug}.mdx").exists():
+            resource_pages.append(f"{lang_out}/resources/{slug}")
+    if resource_pages:
+        tabs.append(
+            {"tab": _t(lang, "资源"), "groups": [{"group": _t(lang, "资源"), "pages": resource_pages}]}
+        )
+
+    if not tabs:
+        return None
+
+    return tabs
+
+
+def _build_docs_json_navigation(
+    cn_navigation: dict,
+    categories: dict[str, dict],
+    service_names: dict[str, str],
+    dev_docs_by_service: dict,
+    output_dir: Path,
+) -> dict:
+    """Assemble the full navigation object for docs.json, including all languages."""
+    languages: list[dict] = [
+        {
+            "language": "cn",
+            "default": True,
+            "tabs": cn_navigation["tabs"],
+        }
+    ]
+
+    for lang in TARGET_LANGUAGES:
+        if lang in _UNSUPPORTED_MINTLIFY_LANGS:
+            continue
+        code = _mintlify_code(lang)
+        lang_tabs = build_language_navigation(
+            lang, categories, service_names, dev_docs_by_service, output_dir
+        )
+        if lang_tabs:
+            languages.append({"language": code, "tabs": lang_tabs})
+            log(f"  Language nav: {code} — {len(lang_tabs)} tabs")
+        else:
+            log(f"  Language nav: {code} — no content, skipping")
+
+    return {
+        "global": cn_navigation.get("global", {}),
+        "languages": languages,
+    }
 
 
 def _sync_translated_content(
@@ -1554,30 +2043,9 @@ Authorization: Bearer YOUR_API_TOKEN
                 "href": "https://platform.acedata.cloud",
             },
         },
-        "navigation": {
-            "global": navigation.get("global", {}),
-            "languages": [
-                {
-                    "language": "cn",
-                    "default": True,
-                    "tabs": navigation["tabs"],
-                },
-                {"language": "en", "href": "/en"},
-                {"language": "ja", "href": "/ja"},
-                {"language": "ko", "href": "/ko"},
-                {"language": "es", "href": "/es"},
-                {"language": "fr", "href": "/fr"},
-                {"language": "de", "href": "/de"},
-                {"language": "pt", "href": "/pt"},
-                {"language": "ru", "href": "/ru"},
-                {"language": "ar", "href": "/ar"},
-                {"language": "it", "href": "/it"},
-                {"language": "sv", "href": "/sv"},
-                {"language": "uk", "href": "/uk"},
-                {"language": "pl", "href": "/pl"},
-                {"language": "zh-Hant", "href": "/zh-TW"},
-            ],
-        },
+        "navigation": _build_docs_json_navigation(
+            navigation, categories, service_names, dev_docs_by_service, output_dir
+        ),
         "footer": {
             "socials": {
                 "github": "https://github.com/AceDataCloud",
