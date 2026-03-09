@@ -1200,7 +1200,9 @@ def _build_tutorials_nav_for(tut_dir: Path, lang_prefix: str) -> list:
         parts = rel.parts
         if len(parts) == 2:
             svc = parts[0]
-            groups.setdefault(svc, []).append(f"{lang_prefix}/tutorials/{svc}/{rel.stem}")
+            groups.setdefault(svc, []).append(
+                f"{lang_prefix}/tutorials/{svc}/{rel.stem}"
+            )
         elif len(parts) == 1:
             groups.setdefault("_root", []).append(f"{lang_prefix}/tutorials/{rel.stem}")
     nav = []
@@ -1258,7 +1260,9 @@ def build_language_navigation(
                 continue
             docs = dev_docs_by_service[svc_alias]
             existing = [
-                d for d in docs if (lang_dir / "guides" / svc_alias / f"{d}.mdx").exists()
+                d
+                for d in docs
+                if (lang_dir / "guides" / svc_alias / f"{d}.mdx").exists()
             ]
             if not existing:
                 continue
@@ -1295,7 +1299,10 @@ def build_language_navigation(
     api_intro = lang_dir / "api-reference" / "introduction.mdx"
     if api_intro.exists():
         api_groups.append(
-            {"group": _t(lang, "概览"), "pages": [f"{lang_out}/api-reference/introduction"]}
+            {
+                "group": _t(lang, "概览"),
+                "pages": [f"{lang_out}/api-reference/introduction"],
+            }
         )
     for cat_name, cat_info in categories.items():
         for svc_alias in cat_info["services"]:
@@ -1320,14 +1327,19 @@ def build_language_navigation(
     tut_pages = _build_tutorials_nav_for(lang_dir / "tutorials", lang_out)
     if tut_pages:
         tabs.append(
-            {"tab": _t(lang, "教程"), "groups": [{"group": _t(lang, "教程"), "pages": tut_pages}]}
+            {
+                "tab": _t(lang, "教程"),
+                "groups": [{"group": _t(lang, "教程"), "pages": tut_pages}],
+            }
         )
 
     # --- Comparisons tab ---
     cmp_dir = lang_dir / "comparisons"
     if cmp_dir.is_dir():
         cmp_pages = sorted(
-            f"{lang_out}/comparisons/{f.stem}" for f in cmp_dir.iterdir() if f.suffix == ".mdx"
+            f"{lang_out}/comparisons/{f.stem}"
+            for f in cmp_dir.iterdir()
+            if f.suffix == ".mdx"
         )
         if cmp_pages:
             tabs.append(
@@ -1341,7 +1353,9 @@ def build_language_navigation(
     uc_dir = lang_dir / "use-cases"
     if uc_dir.is_dir():
         uc_pages = sorted(
-            f"{lang_out}/use-cases/{f.stem}" for f in uc_dir.iterdir() if f.suffix == ".mdx"
+            f"{lang_out}/use-cases/{f.stem}"
+            for f in uc_dir.iterdir()
+            if f.suffix == ".mdx"
         )
         if uc_pages:
             tabs.append(
@@ -1355,18 +1369,25 @@ def build_language_navigation(
     blog_dir = lang_dir / "blog"
     if blog_dir.is_dir():
         blog_pages = sorted(
-            f"{lang_out}/blog/{f.stem}" for f in blog_dir.iterdir() if f.suffix == ".mdx"
+            f"{lang_out}/blog/{f.stem}"
+            for f in blog_dir.iterdir()
+            if f.suffix == ".mdx"
         )
         if blog_pages:
             tabs.append(
-                {"tab": _t(lang, "博客"), "groups": [{"group": _t(lang, "博客"), "pages": blog_pages}]}
+                {
+                    "tab": _t(lang, "博客"),
+                    "groups": [{"group": _t(lang, "博客"), "pages": blog_pages}],
+                }
             )
 
     # --- MCP Servers tab ---
     mcp_dir = lang_dir / "mcp"
     if mcp_dir.is_dir():
         mcp_pages = sorted(
-            f"{lang_out}/mcp/{f.stem}" for f in mcp_dir.iterdir() if f.suffix == ".mdx" and f.stem != "overview"
+            f"{lang_out}/mcp/{f.stem}"
+            for f in mcp_dir.iterdir()
+            if f.suffix == ".mdx" and f.stem != "overview"
         )
         if mcp_pages:
             all_mcp = (
@@ -1388,7 +1409,10 @@ def build_language_navigation(
             resource_pages.append(f"{lang_out}/resources/{slug}")
     if resource_pages:
         tabs.append(
-            {"tab": _t(lang, "资源"), "groups": [{"group": _t(lang, "资源"), "pages": resource_pages}]}
+            {
+                "tab": _t(lang, "资源"),
+                "groups": [{"group": _t(lang, "资源"), "pages": resource_pages}],
+            }
         )
 
     if not tabs:
