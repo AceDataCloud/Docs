@@ -1537,7 +1537,7 @@ Authorization: Bearer YOUR_API_TOKEN
             "light": "#818CF8",
             "dark": "#4F46E5",
         },
-        "favicon": "/favicon.svg",
+        "favicon": "/favicon.ico",
         "logo": {
             "light": "/logo/light.png",
             "dark": "/logo/dark.png",
