@@ -867,7 +867,9 @@ def _call_llm(api_key: str, system: str, user: str) -> str:
 
 
 def _translate_labels_for_lang(
-    api_key: str, labels: list[str], lang: str,
+    api_key: str,
+    labels: list[str],
+    lang: str,
 ) -> dict[str, str]:
     """Translate a list of English labels into the target language via GPT."""
     lang_name = _LANG_NAMES_ZH.get(lang, lang)
@@ -937,7 +939,9 @@ def translate_nav_labels(
             pass
 
     if not api_key:
-        log("  WARNING: ACEDATACLOUD_OPENAI_KEY not set, skipping nav label translation")
+        log(
+            "  WARNING: ACEDATACLOUD_OPENAI_KEY not set, skipping nav label translation"
+        )
         return {}
 
     log(f"  Translating {len(labels)} nav labels into {len(all_langs)} languages...")
@@ -963,7 +967,9 @@ def translate_nav_labels(
 
 
 def _get_translated_name(
-    label: str, lang: str, nav_translations: dict[str, dict[str, str]],
+    label: str,
+    lang: str,
+    nav_translations: dict[str, dict[str, str]],
 ) -> str:
     """Look up a translated label, falling back to the original."""
     tr = nav_translations.get(lang, {})
@@ -2332,6 +2338,16 @@ Authorization: Bearer YOUR_API_TOKEN
                 "github": "https://github.com/AceDataCloud",
                 "x": "https://x.com/AceDataCloud",
             },
+        },
+        "metadata": {
+            "og:site_name": "Ace Data Cloud",
+            "og:image": "https://cdn.acedata.cloud/ab84d87135.png",
+            "twitter:card": "summary_large_image",
+            "twitter:site": "@AceDataCloud",
+            "google-site-verification": "VHiOHkNYiy1eA1VnulXrqznnCC6N0sBI73DRVD5i0KI",
+        },
+        "seo": {
+            "indexHiddenPages": False,
         },
         "api": {
             "playground": {"display": "simple"},
