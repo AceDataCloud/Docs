@@ -211,14 +211,24 @@
   }
 
   // Re-run on SPA navigation (Mintlify uses client-side routing)
-  var debounceTimer = null;
-  var observer = new MutationObserver(function () {
-    if (debounceTimer) return;
-    debounceTimer = setTimeout(function () {
-      debounceTimer = null;
-      tryAutoFill();
-      patchNavButton();
-    }, 500);
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+  // Intercept pushState/replaceState to detect client-side navigation
+  var lastUrl = location.href;
+  function onNavigation() {
+    var currentUrl = location.href;
+    if (currentUrl === lastUrl) return;
+    lastUrl = currentUrl;
+    setTimeout(init, 300);
+  }
+
+  var origPushState = history.pushState;
+  history.pushState = function () {
+    origPushState.apply(this, arguments);
+    onNavigation();
+  };
+  var origReplaceState = history.replaceState;
+  history.replaceState = function () {
+    origReplaceState.apply(this, arguments);
+    onNavigation();
+  };
+  window.addEventListener('popstate', onNavigation);
 })();
