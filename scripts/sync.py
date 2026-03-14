@@ -670,7 +670,10 @@ title: "{title}"
 """
 
 
-def _build_tutorials_nav(output_dir: Path) -> list:
+def _build_tutorials_nav(
+    output_dir: Path,
+    name_fn: callable | None = None,
+) -> list:
     """Auto-discover tutorial pages and group by service."""
     tut_dir = output_dir / "tutorials"
     if not tut_dir.is_dir():
@@ -691,7 +694,8 @@ def _build_tutorials_nav(output_dir: Path) -> list:
         elif len(pages) == 1:
             nav.append(pages[0])
         else:
-            nav.append({"group": svc.replace("-", " ").title(), "pages": pages})
+            label = name_fn(svc) if name_fn else svc.replace("-", " ").title()
+            nav.append({"group": label, "pages": pages})
     return nav
 
 
@@ -871,8 +875,12 @@ def _translate_labels_for_lang(
         f"你是专业翻译员。将以下 JSON 中的值翻译为{lang_name}。\n"
         "规则：\n"
         "1. 输入是一个 JSON 对象，key 不变，只翻译 value\n"
-        "2. 品牌名/产品名保留原文（如 Midjourney, Suno, Claude, Gemini, DeepSeek, Grok, Kimi, Flux, OpenAI, Luma, Sora, Veo, Kling, Hailuo, TikTok, Fish, Producer, Nano Banana, ByteDance, Seedream, Seedance, ADSL, hCaptcha, Recaptcha）\n"
-        "3. 通用词翻译为目标语言（如 Image Generation → 图像生成, Video Generation → 视频生成, Music Generation → 音乐生成 等）\n"
+        "2. 品牌名/产品名保留原文（如 Midjourney, Suno, Claude, Gemini, DeepSeek, "
+        "Grok, Kimi, Flux, OpenAI, Luma, Sora, Veo, Kling, Hailuo, TikTok, "
+        "Fish, Producer, Nano Banana, ByteDance, Seedream, Seedance, ADSL, "
+        "hCaptcha, Recaptcha）\n"
+        "3. 通用词翻译为目标语言（如 Image Generation → 图像生成, "
+        "Video Generation → 视频生成, Music Generation → 音乐生成 等）\n"
         "4. 只输出 JSON，不加任何解释或代码块标记"
     )
     input_obj = {label: label for label in labels}
@@ -903,11 +911,16 @@ def translate_nav_labels(
     Returns ``{lang: {english_label: translated_label}}``.
     Results are cached in ``.cache/nav_translations.json``.
     """
-    api_key = os.environ.get("ACEDATACLOUD_OPENAI_KEY", "")
+    api_key = (
+        os.environ.get("ACEDATACLOUD_OPENAI_KEY", "")
+        or os.environ.get("ACEDATACLOUD_API_TOKEN", "")
+    )
 
     # Collect all labels that need translation
     labels: list[str] = sorted(set(service_names.values()) | set(categories.keys()))
-    content_hash = hashlib.sha256(json.dumps(labels, sort_keys=True).encode()).hexdigest()[:16]
+    content_hash = hashlib.sha256(
+        json.dumps(labels, sort_keys=True).encode()
+    ).hexdigest()[:16]
 
     # All languages including zh-cn
     all_langs = ["zh-cn"] + TARGET_LANGUAGES
@@ -941,7 +954,9 @@ def translate_nav_labels(
     # Save cache
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_data = {"hash": content_hash, "translations": translations}
-    cache_path.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    cache_path.write_text(
+        json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     log("  Nav label translations: saved to cache")
 
     return translations
@@ -962,13 +977,15 @@ def build_navigation(
     output_dir: Path,
     nav_translations: dict[str, dict[str, str]] | None = None,
 ) -> dict:
-    """Build the Mintlify navigation structure from dynamic data (CN locale)."""
-    if nav_translations is None:
-        nav_translations = {}
-    tabs = []
+    """Build the Mintlify navigation structure from dynamic data."""
 
     def _cn(label: str) -> str:
-        return _get_translated_name(label, "zh-cn", nav_translations)
+        """Translate a label for zh-cn using nav_translations."""
+        if nav_translations:
+            return _get_translated_name(label, "zh-cn", nav_translations)
+        return label
+
+    tabs = []
 
     # Tab 1: 指南 (入门 + 集成指南)
     guide_groups = [
@@ -996,7 +1013,7 @@ def build_navigation(
         if pages:
             guide_groups.append(
                 {
-                    "group": _cn(cat_name),
+                    "group": _cn(CATEGORY_NAMES_ZH.get(cat_name, cat_name)),
                     "icon": cat_info["icon"],
                     "pages": pages,
                 }
@@ -1023,7 +1040,7 @@ def build_navigation(
             openapi_path = f"openapi/{svc_alias}.json"
             if not (output_dir / openapi_path).exists():
                 continue
-            svc_name = service_names.get(svc_alias, svc_alias)
+            svc_name = _cn(service_names.get(svc_alias, svc_alias))
 
             cat_pages.append(
                 {
@@ -1040,7 +1057,10 @@ def build_navigation(
     tabs.append({"tab": "API 参考", "groups": api_groups})
 
     # Tab 3: 教程
-    tut_pages = _build_tutorials_nav(output_dir)
+    def _tut_name(svc: str) -> str:
+        return _cn(service_names.get(svc, svc.replace("-", " ").title()))
+
+    tut_pages = _build_tutorials_nav(output_dir, name_fn=_tut_name)
     if tut_pages:
         tabs.append({"tab": "教程", "groups": [{"group": "教程", "pages": tut_pages}]})
 
@@ -1452,7 +1472,9 @@ def _t(lang: str, label: str) -> str:
     return en.get(label, label)
 
 
-def _build_tutorials_nav_for(tut_dir: Path, lang_prefix: str) -> list:
+def _build_tutorials_nav_for(
+    tut_dir: Path, lang_prefix: str, name_fn: callable | None = None,
+) -> list:
     """Auto-discover tutorial pages for a language directory."""
     if not tut_dir.is_dir():
         return []
@@ -1474,7 +1496,8 @@ def _build_tutorials_nav_for(tut_dir: Path, lang_prefix: str) -> list:
         elif len(pages) == 1:
             nav.append(pages[0])
         else:
-            nav.append({"group": svc.replace("-", " ").title(), "pages": pages})
+            label = name_fn(svc) if name_fn else svc.replace("-", " ").title()
+            nav.append({"group": label, "pages": pages})
     return nav
 
 
@@ -1484,6 +1507,7 @@ def build_language_navigation(
     service_names: dict[str, str],
     dev_docs_by_service: dict,
     output_dir: Path,
+    nav_translations: dict[str, dict[str, str]] | None = None,
 ) -> list[dict] | None:
     """Build Mintlify tabs for a secondary language.
 
@@ -1492,8 +1516,17 @@ def build_language_navigation(
     with the Mintlify output directory (e.g. ``en/``, ``zh-TW/``) and uses
     translated labels.
     """
+    if nav_translations is None:
+        nav_translations = {}
     lang_out = _mintlify_lang(lang)  # output directory name
     lang_dir = output_dir / lang_out
+
+    def _tr(label: str) -> str:
+        """Translate label: try nav_translations first, then _NAV_TRANSLATIONS."""
+        nt = nav_translations.get(lang, {})
+        if label in nt:
+            return nt[label]
+        return _t(lang, label)
 
     if not lang_dir.is_dir():
         return None
@@ -1534,14 +1567,14 @@ def build_language_navigation(
                 svc_pages = [f"{lang_out}/guides/{svc_alias}/{d}" for d in existing]
                 pages.append(
                     {
-                        "group": service_names.get(svc_alias, svc_alias),
+                        "group": _tr(service_names.get(svc_alias, svc_alias)),
                         "pages": svc_pages,
                     }
                 )
         if pages:
             guide_groups.append(
                 {
-                    "group": _t(lang, cat_name),
+                    "group": _tr(cat_name),
                     "icon": cat_info["icon"],
                     "pages": pages,
                 }
@@ -1571,7 +1604,7 @@ def build_language_navigation(
             openapi_path = f"openapi/{svc_alias}.json"
             if not (output_dir / openapi_path).exists():
                 continue
-            svc_name = service_names.get(svc_alias, svc_alias)
+            svc_name = _tr(service_names.get(svc_alias, svc_alias))
 
             api_groups.append(
                 {
@@ -1586,7 +1619,10 @@ def build_language_navigation(
         tabs.append({"tab": _t(lang, "API 参考"), "groups": api_groups})
 
     # --- Tutorials tab (Chinese-only content may exist in translations) ---
-    tut_pages = _build_tutorials_nav_for(lang_dir / "tutorials", lang_out)
+    def _tut_name_lang(svc: str) -> str:
+        return _tr(service_names.get(svc, svc.replace("-", " ").title()))
+
+    tut_pages = _build_tutorials_nav_for(lang_dir / "tutorials", lang_out, name_fn=_tut_name_lang)
     if tut_pages:
         tabs.append(
             {
@@ -1689,8 +1725,11 @@ def _build_docs_json_navigation(
     service_names: dict[str, str],
     dev_docs_by_service: dict,
     output_dir: Path,
+    nav_translations: dict[str, dict[str, str]] | None = None,
 ) -> dict:
     """Assemble the full navigation object for docs.json, including all languages."""
+    if nav_translations is None:
+        nav_translations = {}
     languages: list[dict] = [
         {
             "language": "cn",
@@ -1704,7 +1743,8 @@ def _build_docs_json_navigation(
             continue
         code = _mintlify_code(lang)
         lang_tabs = build_language_navigation(
-            lang, categories, service_names, dev_docs_by_service, output_dir
+            lang, categories, service_names, dev_docs_by_service, output_dir,
+            nav_translations=nav_translations,
         )
         if lang_tabs:
             languages.append({"language": code, "tabs": lang_tabs})
@@ -2247,8 +2287,13 @@ Authorization: Bearer YOUR_API_TOKEN
     log("=" * 60)
     log("Step 7/8: Generate docs.json")
     log("=" * 60)
+
+    # Translate nav labels (service names + categories) for all languages
+    nav_translations = translate_nav_labels(service_names, categories, output_dir)
+
     navigation = build_navigation(
-        categories, service_names, dev_docs_by_service, output_dir
+        categories, service_names, dev_docs_by_service, output_dir,
+        nav_translations=nav_translations,
     )
 
     docs_json = {
@@ -2279,22 +2324,14 @@ Authorization: Bearer YOUR_API_TOKEN
             },
         },
         "navigation": _build_docs_json_navigation(
-            navigation, categories, service_names, dev_docs_by_service, output_dir
+            navigation, categories, service_names, dev_docs_by_service, output_dir,
+            nav_translations=nav_translations,
         ),
         "footer": {
             "socials": {
                 "github": "https://github.com/AceDataCloud",
                 "x": "https://x.com/AceDataCloud",
             },
-        },
-        "metadata": {
-            "og:site_name": "Ace Data Cloud",
-            "og:image": "https://cdn.acedata.cloud/acedatacloud-og.png",
-            "twitter:card": "summary_large_image",
-            "twitter:site": "@AceDataCloud",
-        },
-        "seo": {
-            "indexHiddenPages": False,
         },
         "api": {
             "playground": {"display": "simple"},
