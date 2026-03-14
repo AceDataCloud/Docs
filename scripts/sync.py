@@ -913,9 +913,8 @@ def translate_nav_labels(
     Returns ``{lang: {english_label: translated_label}}``.
     Results are cached in ``.cache/nav_translations.json``.
     """
-    api_key = (
-        os.environ.get("ACEDATACLOUD_OPENAI_KEY", "")
-        or os.environ.get("ACEDATACLOUD_API_TOKEN", "")
+    api_key = os.environ.get("ACEDATACLOUD_OPENAI_KEY", "") or os.environ.get(
+        "ACEDATACLOUD_API_TOKEN", ""
     )
 
     # Collect all labels that need translation
@@ -1479,7 +1478,9 @@ def _t(lang: str, label: str) -> str:
 
 
 def _build_tutorials_nav_for(
-    tut_dir: Path, lang_prefix: str, name_fn: callable | None = None,
+    tut_dir: Path,
+    lang_prefix: str,
+    name_fn: callable | None = None,
 ) -> list:
     """Auto-discover tutorial pages for a language directory."""
     if not tut_dir.is_dir():
@@ -1628,7 +1629,9 @@ def build_language_navigation(
     def _tut_name_lang(svc: str) -> str:
         return _tr(service_names.get(svc, svc.replace("-", " ").title()))
 
-    tut_pages = _build_tutorials_nav_for(lang_dir / "tutorials", lang_out, name_fn=_tut_name_lang)
+    tut_pages = _build_tutorials_nav_for(
+        lang_dir / "tutorials", lang_out, name_fn=_tut_name_lang
+    )
     if tut_pages:
         tabs.append(
             {
@@ -1749,7 +1752,11 @@ def _build_docs_json_navigation(
             continue
         code = _mintlify_code(lang)
         lang_tabs = build_language_navigation(
-            lang, categories, service_names, dev_docs_by_service, output_dir,
+            lang,
+            categories,
+            service_names,
+            dev_docs_by_service,
+            output_dir,
             nav_translations=nav_translations,
         )
         if lang_tabs:
@@ -1907,6 +1914,14 @@ def main():
             continue
         spec = merge_openapi_specs(backend_dir, svc)
         if spec:
+            # Add tags so Mintlify groups endpoints correctly instead of
+            # falling back to a default "API Reference" label.
+            tag_name = service_names.get(alias, alias)
+            spec.setdefault("tags", [{"name": tag_name}])
+            for path_methods in spec.get("paths", {}).values():
+                for op in path_methods.values():
+                    if isinstance(op, dict) and "operationId" in op:
+                        op.setdefault("tags", [tag_name])
             out_path = openapi_dir / f"{alias}.json"
             with open(out_path, "w") as f:
                 json.dump(spec, f, indent=2, ensure_ascii=False)
@@ -2298,7 +2313,10 @@ Authorization: Bearer YOUR_API_TOKEN
     nav_translations = translate_nav_labels(service_names, categories, output_dir)
 
     navigation = build_navigation(
-        categories, service_names, dev_docs_by_service, output_dir,
+        categories,
+        service_names,
+        dev_docs_by_service,
+        output_dir,
         nav_translations=nav_translations,
     )
 
@@ -2330,7 +2348,11 @@ Authorization: Bearer YOUR_API_TOKEN
             },
         },
         "navigation": _build_docs_json_navigation(
-            navigation, categories, service_names, dev_docs_by_service, output_dir,
+            navigation,
+            categories,
+            service_names,
+            dev_docs_by_service,
+            output_dir,
             nav_translations=nav_translations,
         ),
         "footer": {
@@ -2342,6 +2364,7 @@ Authorization: Bearer YOUR_API_TOKEN
         "metadata": {
             "og:site_name": "Ace Data Cloud",
             "og:image": "https://cdn.acedata.cloud/ab84d87135.png",
+            "og:description": "Unified AI API Platform — LLM chat, image generation, video generation, music, search and more.",
             "twitter:card": "summary_large_image",
             "twitter:site": "@AceDataCloud",
             "google-site-verification": "VHiOHkNYiy1eA1VnulXrqznnCC6N0sBI73DRVD5i0KI",
@@ -2350,18 +2373,15 @@ Authorization: Bearer YOUR_API_TOKEN
             "indexHiddenPages": False,
         },
         "api": {
-            "playground": {"display": "simple"},
-            "mdx": {
-                "auth": {
-                    "method": "bearer",
-                    "name": "Authorization",
-                },
+            "playground": {
+                "display": "interactive",
+                "proxy": False,
             },
-            "openapi": sorted(
-                f"/openapi/{f.name}"
-                for f in (output_dir / "openapi").iterdir()
-                if f.suffix == ".json"
-            ),
+            "examples": {
+                "languages": ["curl", "python", "javascript"],
+                "defaults": "required",
+                "prefill": True,
+            },
         },
         "variables": {
             "BASE_URL": "https://api.acedata.cloud",
