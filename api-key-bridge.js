@@ -172,12 +172,14 @@
     // Mintlify renders the primary navbar button as an <a> tag
     var links = document.querySelectorAll('a[href="https://platform.acedata.cloud"]');
     links.forEach(function (link) {
+      if (link._acedataPatched) return;
       // Only patch the primary CTA button, not the plain "平台" link
       var isButton =
         link.classList.contains('group') ||
         link.closest('button') ||
         /获取|Get|API Key/i.test(link.textContent || '');
       if (isButton) {
+        link._acedataPatched = true;
         // Check if already has a saved token
         var saved = loadToken();
         if (saved) {
@@ -209,9 +211,14 @@
   }
 
   // Re-run on SPA navigation (Mintlify uses client-side routing)
+  var debounceTimer = null;
   var observer = new MutationObserver(function () {
-    tryAutoFill();
-    patchNavButton();
+    if (debounceTimer) return;
+    debounceTimer = setTimeout(function () {
+      debounceTimer = null;
+      tryAutoFill();
+      patchNavButton();
+    }, 500);
   });
   observer.observe(document.body, { childList: true, subtree: true });
 })();
