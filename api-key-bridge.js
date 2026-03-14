@@ -1,234 +1,150 @@
 /**
  * API Key Bridge for Mintlify Docs
  *
- * Enables automatic API key injection from platform.acedata.cloud
- * into the Mintlify interactive playground's Bearer token field.
- *
  * Flow:
- * 1. User clicks "获取 API Key" button (or the injected "Connect" button)
- * 2. Opens popup to platform.acedata.cloud/auth/bridge
- * 3. User logs in (if needed), bridge page fetches their credential
- * 4. Bridge sends token back via postMessage
- * 5. This script fills the playground's auth input and saves to localStorage
+ * 1. User clicks nav button -> opens popup to platform auth bridge
+ * 2. User authenticates, bridge sends token back via postMessage
+ * 3. Token saved to localStorage, copied to clipboard for easy paste
+ * 4. On API pages, tries to auto-fill the playground Bearer token input
  */
 (function () {
   var PLATFORM_URL = 'https://platform.acedata.cloud';
   var STORAGE_KEY = 'acedata-api-key';
   var BRIDGE_PATH = '/auth/bridge';
 
-  // --- Storage ---
-  function saveToken(token) {
-    try {
-      localStorage.setItem(STORAGE_KEY, token);
-    } catch (e) {
-      // localStorage unavailable
-    }
+  function saveToken(t) {
+    try { localStorage.setItem(STORAGE_KEY, t); } catch (e) { /* noop */ }
   }
-
   function loadToken() {
-    try {
-      return localStorage.getItem(STORAGE_KEY);
-    } catch (e) {
-      return null;
-    }
+    try { return localStorage.getItem(STORAGE_KEY); } catch (e) { return null; }
   }
 
-  function clearToken() {
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  // --- Playground injection ---
-  function findAuthInput() {
-    // Mintlify's playground auth input — try common selectors
-    // The Bearer token input is typically in the API playground header area
-    var selectors = [
-      'input[placeholder*="Bearer"]',
-      'input[placeholder*="bearer"]',
-      'input[placeholder*="Token"]',
-      'input[placeholder*="token"]',
-      'input[placeholder*="Authorization"]',
-      'input[placeholder*="API"]',
-      'input[name="Authorization"]',
-      'input[aria-label*="Bearer"]',
-      'input[aria-label*="Authorization"]',
-      'input[aria-label*="Auth"]'
-    ];
-    for (var i = 0; i < selectors.length; i++) {
-      var el = document.querySelector(selectors[i]);
-      if (el) return el;
-    }
-
-    // Fallback: look for input near text that says "Bearer" or "Authorization"
-    var labels = document.querySelectorAll('label, span, p, div');
-    for (var j = 0; j < labels.length; j++) {
-      var text = labels[j].textContent || '';
-      if (/bearer|authorization/i.test(text)) {
-        var input = labels[j].closest('div')?.querySelector('input');
-        if (input) return input;
-      }
-    }
-
-    return null;
-  }
-
-  function setInputValue(input, value) {
-    // React/Vue controlled inputs need native setter + events
-    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      'value'
-    )?.set;
-    if (nativeInputValueSetter) {
-      nativeInputValueSetter.call(input, value);
-    } else {
-      input.value = value;
-    }
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  function fillToken(token) {
-    var input = findAuthInput();
-    if (input) {
-      setInputValue(input, token);
-      saveToken(token);
-      showNotification('API Key 已自动填充', 'success');
-      return true;
-    }
-    // If no input found now, save and retry on next page
-    saveToken(token);
-    showNotification('API Key 已保存，切换到 API 页面时自动填充', 'info');
-    return false;
-  }
-
-  // Auto-fill on page navigation (Mintlify is SPA)
-  function tryAutoFill() {
-    var token = loadToken();
-    if (!token) return;
-    // Small delay to let playground render
-    setTimeout(function () {
-      var input = findAuthInput();
-      if (input && !input.value) {
-        setInputValue(input, token);
-      }
-    }, 800);
-  }
-
-  // --- Notification ---
-  function showNotification(message, type) {
-    var colors = {
-      success: { bg: '#f0f9ff', border: '#6366f1', text: '#4338ca' },
-      info: { bg: '#f0f9ff', border: '#6366f1', text: '#4338ca' },
-      error: { bg: '#fef2f2', border: '#ef4444', text: '#dc2626' }
-    };
-    var c = colors[type] || colors.info;
-
+  function notify(msg, isError) {
     var el = document.createElement('div');
-    el.textContent = message;
+    el.textContent = msg;
     el.style.cssText =
       'position:fixed;top:20px;right:20px;z-index:99999;padding:12px 20px;' +
       'border-radius:8px;font-size:14px;font-weight:500;' +
       'box-shadow:0 4px 12px rgba(0,0,0,0.15);transition:opacity 0.3s;' +
-      'background:' + c.bg + ';border:1px solid ' + c.border + ';color:' + c.text;
+      'background:' + (isError ? '#fef2f2' : '#f0f9ff') + ';' +
+      'border:1px solid ' + (isError ? '#ef4444' : '#6366f1') + ';' +
+      'color:' + (isError ? '#dc2626' : '#4338ca');
     document.body.appendChild(el);
     setTimeout(function () {
       el.style.opacity = '0';
-      setTimeout(function () {
-        el.remove();
-      }, 300);
+      setTimeout(function () { el.remove(); }, 300);
     }, 3000);
   }
 
-  // --- Popup ---
-  function openBridgePopup() {
-    var w = 500;
-    var h = 600;
-    var left = (screen.width - w) / 2;
-    var top = (screen.height - h) / 2;
-    var popup = window.open(
-      PLATFORM_URL + BRIDGE_PATH,
-      'acedata-bridge',
-      'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top + ',menubar=no,toolbar=no,status=no'
-    );
-    if (!popup) {
-      showNotification('弹窗被浏览器拦截，请允许弹窗', 'error');
+  function tryFillPlayground(token) {
+    var selectors = [
+      'input[placeholder*="Bearer"]',
+      'input[placeholder*="bearer"]',
+      'input[placeholder*="<token>"]',
+      'input[placeholder*="Token"]',
+      'input[placeholder*="Authorization"]',
+      'input[name="Authorization"]',
+      'input[aria-label*="Bearer"]',
+      'input[aria-label*="Authorization"]'
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      var input = document.querySelector(selectors[i]);
+      if (input) {
+        var setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype, 'value'
+        );
+        if (setter && setter.set) {
+          setter.set.call(input, token);
+        } else {
+          input.value = token;
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
     }
+    return false;
   }
 
-  // --- Message listener ---
-  window.addEventListener('message', function (event) {
-    if (event.origin !== PLATFORM_URL) return;
-    var data = event.data;
-    if (data && data.type === 'acedata-api-key' && data.token) {
-      fillToken(data.token);
+  function openBridge() {
+    var w = 500, h = 600;
+    var popup = window.open(
+      PLATFORM_URL + BRIDGE_PATH, 'acedata-bridge',
+      'width=' + w + ',height=' + h + ',left=' + ((screen.width - w) / 2) +
+      ',top=' + ((screen.height - h) / 2) + ',menubar=no,toolbar=no,status=no'
+    );
+    if (!popup) notify('\u5f39\u7a97\u88ab\u62e6\u622a\uff0c\u8bf7\u5141\u8bb8\u5f39\u7a97', true);
+  }
+
+  window.addEventListener('message', function (e) {
+    if (e.origin !== PLATFORM_URL) return;
+    var d = e.data;
+    if (d && d.type === 'acedata-api-key' && d.token) {
+      saveToken(d.token);
+      var filled = tryFillPlayground(d.token);
+      if (filled) {
+        notify('API Key \u5df2\u81ea\u52a8\u586b\u5145');
+      } else {
+        navigator.clipboard.writeText(d.token).then(function () {
+          notify('API Key \u5df2\u4fdd\u5b58\u5e76\u590d\u5236\u5230\u526a\u8d34\u677f\uff0c\u53ef\u76f4\u63a5\u7c98\u8d34');
+        }).catch(function () {
+          notify('API Key \u5df2\u4fdd\u5b58\uff0c\u8bf7\u5230 Playground \u624b\u52a8\u8f93\u5165');
+        });
+      }
+      patchButtons();
     }
   });
 
-  // --- Override "获取 API Key" button ---
-  function patchNavButton() {
-    // Mintlify renders the primary navbar button as an <a> tag
-    var links = document.querySelectorAll('a[href="https://platform.acedata.cloud"]');
+  function patchButtons() {
+    var links = document.querySelectorAll(
+      'a[href="https://platform.acedata.cloud"]'
+    );
+    var saved = loadToken();
     links.forEach(function (link) {
-      if (link._acedataPatched) return;
-      // Only patch the primary CTA button, not the plain "平台" link
-      var isButton =
-        link.classList.contains('group') ||
-        link.closest('button') ||
-        /获取|Get|API Key/i.test(link.textContent || '');
-      if (isButton) {
-        link._acedataPatched = true;
-        // Check if already has a saved token
-        var saved = loadToken();
+      if (link._bridgePatched) return;
+      var text = (link.textContent || '').trim();
+      if (/\u83b7\u53d6|Get|API.?Key/i.test(text)) {
+        link._bridgePatched = true;
         if (saved) {
-          link.textContent = 'API Key ✓';
-          link.title = '点击重新获取 API Key';
+          link.textContent = 'API Key \u2713';
+          link.title = '\u70b9\u51fb\u91cd\u65b0\u83b7\u53d6 API Key';
         }
         link.addEventListener('click', function (e) {
           e.preventDefault();
           e.stopPropagation();
-          openBridgePopup();
+          openBridge();
         });
       }
     });
   }
 
-  // --- Init ---
-  function init() {
-    // Auto-fill if we have a saved token
-    tryAutoFill();
-    // Patch the nav button
-    patchNavButton();
+  function autoFill() {
+    var token = loadToken();
+    if (!token) return;
+    setTimeout(function () { tryFillPlayground(token); }, 1500);
   }
 
-  // Run on initial load
+  function init() {
+    patchButtons();
+    autoFill();
+  }
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
     init();
   }
 
-  // Re-run on SPA navigation (Mintlify uses client-side routing)
-  // Intercept pushState/replaceState to detect client-side navigation
-  var lastUrl = location.href;
-  function onNavigation() {
-    var currentUrl = location.href;
-    if (currentUrl === lastUrl) return;
-    lastUrl = currentUrl;
-    setTimeout(init, 300);
+  // SPA navigation: intercept history API (safe, no DOM watching)
+  var lastHref = location.href;
+  function onNav() {
+    if (location.href === lastHref) return;
+    lastHref = location.href;
+    setTimeout(init, 500);
   }
-
-  var origPushState = history.pushState;
-  history.pushState = function () {
-    origPushState.apply(this, arguments);
-    onNavigation();
-  };
-  var origReplaceState = history.replaceState;
-  history.replaceState = function () {
-    origReplaceState.apply(this, arguments);
-    onNavigation();
-  };
-  window.addEventListener('popstate', onNavigation);
+  var _push = history.pushState;
+  history.pushState = function () { _push.apply(this, arguments); onNav(); };
+  var _replace = history.replaceState;
+  history.replaceState = function () { _replace.apply(this, arguments); onNav(); };
+  window.addEventListener('popstate', onNav);
 })();
