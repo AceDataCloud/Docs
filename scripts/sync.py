@@ -115,19 +115,35 @@ def build_service_names(service_by_alias: dict[str, dict]) -> dict[str, str]:
     return names
 
 
+def build_service_names_cn(service_by_alias: dict[str, dict]) -> dict[str, str]:
+    """Build alias → Chinese display_name map from enriched mapping data."""
+    names: dict[str, str] = {}
+    for alias, svc in service_by_alias.items():
+        names[alias] = (
+            svc.get("display_name_cn")
+            or svc.get("display_name")
+            or alias.replace("-", " ").replace("_", " ").title()
+        )
+    return names
+
+
 def build_categories(
     service_by_alias: dict[str, dict],
 ) -> dict[str, dict]:
     """
-    Build category → {icon, services} from the mapping's ``category`` field.
+    Build category → {icon, services, name_cn} from the mapping's ``category`` field.
     Returns categories in CATEGORY_ORDER, with any extras appended.
     """
     cat_services: dict[str, list[str]] = {}  # category name → [alias, ...]
+    cat_cn_names: dict[str, str] = {}  # category name → Chinese name
     for alias, svc in service_by_alias.items():
         cat = svc.get("category")
         if not cat:
             continue
         cat_services.setdefault(cat, []).append(alias)
+        cat_cn = svc.get("category_cn")
+        if cat_cn:
+            cat_cn_names[cat] = cat_cn
 
     # Sort services within each category by rank (lower = first)
     for cat, aliases in cat_services.items():
@@ -139,12 +155,14 @@ def build_categories(
             ordered[cat_name] = {
                 "icon": CATEGORY_ICONS.get(cat_name, "circle"),
                 "services": cat_services.pop(cat_name),
+                "name_cn": cat_cn_names.get(cat_name, cat_name),
             }
     # Append any new categories not yet in CATEGORY_ORDER
     for cat_name, aliases in sorted(cat_services.items()):
         ordered[cat_name] = {
             "icon": CATEGORY_ICONS.get(cat_name, "circle"),
             "services": aliases,
+            "name_cn": cat_cn_names.get(cat_name, cat_name),
         }
     return ordered
 
@@ -666,11 +684,13 @@ title: "{title}"
 """
 
 
-def _build_tutorials_nav(output_dir: Path) -> list:
+def _build_tutorials_nav(output_dir: Path, service_names: dict[str, str] | None = None) -> list:
     """Auto-discover tutorial pages and group by service."""
     tut_dir = output_dir / "tutorials"
     if not tut_dir.is_dir():
         return []
+    if service_names is None:
+        service_names = {}
     groups: dict[str, list[str]] = {}
     for f in sorted(tut_dir.rglob("*.mdx")):
         rel = f.relative_to(tut_dir)
@@ -687,7 +707,8 @@ def _build_tutorials_nav(output_dir: Path) -> list:
         elif len(pages) == 1:
             nav.append(pages[0])
         else:
-            nav.append({"group": svc.replace("-", " ").title(), "pages": pages})
+            label = service_names.get(svc, svc.replace("-", " ").title())
+            nav.append({"group": label, "pages": pages})
     return nav
 
 
@@ -802,10 +823,11 @@ def _build_simple_nav(directory: str, output_dir: Path) -> list[str]:
 def build_navigation(
     categories: dict[str, dict],
     service_names: dict[str, str],
+    service_names_cn: dict[str, str],
     dev_docs_by_service: dict,
     output_dir: Path,
 ) -> dict:
-    """Build the Mintlify navigation structure from dynamic data."""
+    """Build the Mintlify navigation structure from dynamic data (CN locale)."""
     tabs = []
 
     # Tab 1: 指南 (入门 + 集成指南)
@@ -827,14 +849,14 @@ def build_navigation(
                     svc_pages = [f"guides/{svc_alias}/{d}" for d in docs]
                     pages.append(
                         {
-                            "group": service_names.get(svc_alias, svc_alias),
+                            "group": service_names_cn.get(svc_alias, service_names.get(svc_alias, svc_alias)),
                             "pages": svc_pages,
                         }
                     )
         if pages:
             guide_groups.append(
                 {
-                    "group": CATEGORY_NAMES_ZH.get(cat_name, cat_name),
+                    "group": cat_info.get("name_cn") or CATEGORY_NAMES_ZH.get(cat_name, cat_name),
                     "icon": cat_info["icon"],
                     "pages": pages,
                 }
@@ -861,7 +883,7 @@ def build_navigation(
             openapi_path = f"openapi/{svc_alias}.json"
             if not (output_dir / openapi_path).exists():
                 continue
-            svc_name = service_names.get(svc_alias, svc_alias)
+            svc_name = service_names_cn.get(svc_alias, service_names.get(svc_alias, svc_alias))
 
             cat_pages.append(
                 {
@@ -878,7 +900,7 @@ def build_navigation(
     tabs.append({"tab": "API 参考", "groups": api_groups})
 
     # Tab 3: 教程
-    tut_pages = _build_tutorials_nav(output_dir)
+    tut_pages = _build_tutorials_nav(output_dir, service_names=service_names_cn)
     if tut_pages:
         tabs.append({"tab": "教程", "groups": [{"group": "教程", "pages": tut_pages}]})
 
@@ -1290,10 +1312,12 @@ def _t(lang: str, label: str) -> str:
     return en.get(label, label)
 
 
-def _build_tutorials_nav_for(tut_dir: Path, lang_prefix: str) -> list:
+def _build_tutorials_nav_for(tut_dir: Path, lang_prefix: str, service_names: dict[str, str] | None = None) -> list:
     """Auto-discover tutorial pages for a language directory."""
     if not tut_dir.is_dir():
         return []
+    if service_names is None:
+        service_names = {}
     groups: dict[str, list[str]] = {}
     for f in sorted(tut_dir.rglob("*.mdx")):
         rel = f.relative_to(tut_dir)
@@ -1312,7 +1336,8 @@ def _build_tutorials_nav_for(tut_dir: Path, lang_prefix: str) -> list:
         elif len(pages) == 1:
             nav.append(pages[0])
         else:
-            nav.append({"group": svc.replace("-", " ").title(), "pages": pages})
+            label = service_names.get(svc, svc.replace("-", " ").title())
+            nav.append({"group": label, "pages": pages})
     return nav
 
 
@@ -1424,7 +1449,7 @@ def build_language_navigation(
         tabs.append({"tab": _t(lang, "API 参考"), "groups": api_groups})
 
     # --- Tutorials tab (Chinese-only content may exist in translations) ---
-    tut_pages = _build_tutorials_nav_for(lang_dir / "tutorials", lang_out)
+    tut_pages = _build_tutorials_nav_for(lang_dir / "tutorials", lang_out, service_names=service_names)
     if tut_pages:
         tabs.append(
             {
@@ -1684,6 +1709,7 @@ def main():
 
     # Build dynamic lookup tables
     service_names = build_service_names(service_by_alias)
+    service_names_cn = build_service_names_cn(service_by_alias)
     categories = build_categories(service_by_alias)
     doc_service_map = build_doc_service_map(service_by_alias, backend_dir)
 
@@ -2086,7 +2112,7 @@ Authorization: Bearer YOUR_API_TOKEN
     log("Step 7/8: Generate docs.json")
     log("=" * 60)
     navigation = build_navigation(
-        categories, service_names, dev_docs_by_service, output_dir
+        categories, service_names, service_names_cn, dev_docs_by_service, output_dir
     )
 
     docs_json = {
