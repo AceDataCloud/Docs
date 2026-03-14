@@ -2339,6 +2339,16 @@ Authorization: Bearer YOUR_API_TOKEN
                 "x": "https://x.com/AceDataCloud",
             },
         },
+        "metadata": {
+            "og:site_name": "Ace Data Cloud",
+            "og:image": "https://cdn.acedata.cloud/ab84d87135.png",
+            "twitter:card": "summary_large_image",
+            "twitter:site": "@AceDataCloud",
+            "google-site-verification": "VHiOHkNYiy1eA1VnulXrqznnCC6N0sBI73DRVD5i0KI",
+        },
+        "seo": {
+            "indexHiddenPages": False,
+        },
         "api": {
             "playground": {"display": "simple"},
             "mdx": {
