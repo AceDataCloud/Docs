@@ -646,14 +646,8 @@ def main():
         if ok:
             stats["blog"] += 1
 
-<<<<<<< Updated upstream
     elapsed = time.time() - t0
     print(f"\nSEO generation complete in {elapsed:.1f}s: tutorials={stats['tutorials']} comparisons={stats['comparisons']} use-cases={stats['use_cases']} blog={stats['blog']}", flush=True)
-=======
-    print(
-        f"\nSEO generation complete: tutorials={stats['tutorials']} comparisons={stats['comparisons']} use-cases={stats['use_cases']} blog={stats['blog']}"
-    )
->>>>>>> Stashed changes
 
 
 if __name__ == "__main__":

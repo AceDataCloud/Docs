@@ -12,11 +12,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import sys
 import time as _time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -799,14 +803,172 @@ def _build_simple_nav(directory: str, output_dir: Path) -> list[str]:
     return sorted(f"{directory}/{f.stem}" for f in d.iterdir() if f.suffix == ".mdx")
 
 
+# ---------------------------------------------------------------------------
+# Navigation label translation via GPT
+# ---------------------------------------------------------------------------
+_NAV_LABEL_API_BASE = "https://api.acedata.cloud/v1"
+_NAV_LABEL_MODEL = "gpt-4.1-mini"
+_NAV_LABEL_CACHE_DIR = Path(__file__).parent.parent / ".cache"
+
+_LANG_NAMES_ZH: dict[str, str] = {
+    "zh-cn": "简体中文",
+    "en": "英文",
+    "zh-tw": "繁体中文",
+    "ja": "日语",
+    "ko": "韩语",
+    "es": "西班牙语",
+    "fr": "法语",
+    "de": "德语",
+    "pt": "葡萄牙语",
+    "ru": "俄语",
+    "ar": "阿拉伯语",
+    "it": "意大利语",
+    "fi": "芬兰语",
+    "sv": "瑞典语",
+    "el": "希腊语",
+    "uk": "乌克兰语",
+    "pl": "波兰语",
+    "sr": "塞尔维亚语",
+}
+
+
+def _call_llm(api_key: str, system: str, user: str) -> str:
+    """Call GPT API for navigation label translation."""
+    body = json.dumps(
+        {
+            "model": _NAV_LABEL_MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": 4096,
+            "temperature": 0.3,
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{_NAV_LABEL_API_BASE}/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+            return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        log(f"  LLM ERROR: {e}")
+        return ""
+
+
+def _translate_labels_for_lang(
+    api_key: str, labels: list[str], lang: str,
+) -> dict[str, str]:
+    """Translate a list of English labels into the target language via GPT."""
+    lang_name = _LANG_NAMES_ZH.get(lang, lang)
+    system = (
+        f"你是专业翻译员。将以下 JSON 中的值翻译为{lang_name}。\n"
+        "规则：\n"
+        "1. 输入是一个 JSON 对象，key 不变，只翻译 value\n"
+        "2. 品牌名/产品名保留原文（如 Midjourney, Suno, Claude, Gemini, DeepSeek, Grok, Kimi, Flux, OpenAI, Luma, Sora, Veo, Kling, Hailuo, TikTok, Fish, Producer, Nano Banana, ByteDance, Seedream, Seedance, ADSL, hCaptcha, Recaptcha）\n"
+        "3. 通用词翻译为目标语言（如 Image Generation → 图像生成, Video Generation → 视频生成, Music Generation → 音乐生成 等）\n"
+        "4. 只输出 JSON，不加任何解释或代码块标记"
+    )
+    input_obj = {label: label for label in labels}
+    user = json.dumps(input_obj, ensure_ascii=False)
+
+    raw = _call_llm(api_key, system, user)
+    if not raw:
+        return {}
+    # Strip markdown code fences if present
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        log(f"  WARNING: Failed to parse LLM response for {lang}")
+        return {}
+
+
+def translate_nav_labels(
+    service_names: dict[str, str],
+    categories: dict[str, dict],
+    output_dir: Path,
+) -> dict[str, dict[str, str]]:
+    """Translate service display names and category names for all languages.
+
+    Returns ``{lang: {english_label: translated_label}}``.
+    Results are cached in ``.cache/nav_translations.json``.
+    """
+    api_key = os.environ.get("ACEDATACLOUD_OPENAI_KEY", "")
+
+    # Collect all labels that need translation
+    labels: list[str] = sorted(set(service_names.values()) | set(categories.keys()))
+    content_hash = hashlib.sha256(json.dumps(labels, sort_keys=True).encode()).hexdigest()[:16]
+
+    # All languages including zh-cn
+    all_langs = ["zh-cn"] + TARGET_LANGUAGES
+
+    # Try loading from cache
+    cache_path = _NAV_LABEL_CACHE_DIR / "nav_translations.json"
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached.get("hash") == content_hash:
+                log("  Nav label translations: loaded from cache")
+                return cached.get("translations", {})
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    if not api_key:
+        log("  WARNING: ACEDATACLOUD_OPENAI_KEY not set, skipping nav label translation")
+        return {}
+
+    log(f"  Translating {len(labels)} nav labels into {len(all_langs)} languages...")
+    translations: dict[str, dict[str, str]] = {}
+
+    for lang in all_langs:
+        result = _translate_labels_for_lang(api_key, labels, lang)
+        if result:
+            translations[lang] = result
+            log(f"    {lang}: {len(result)} labels translated")
+        else:
+            log(f"    {lang}: translation failed, will use fallback")
+
+    # Save cache
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_data = {"hash": content_hash, "translations": translations}
+    cache_path.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    log("  Nav label translations: saved to cache")
+
+    return translations
+
+
+def _get_translated_name(
+    label: str, lang: str, nav_translations: dict[str, dict[str, str]],
+) -> str:
+    """Look up a translated label, falling back to the original."""
+    tr = nav_translations.get(lang, {})
+    return tr.get(label, label)
+
+
 def build_navigation(
     categories: dict[str, dict],
     service_names: dict[str, str],
     dev_docs_by_service: dict,
     output_dir: Path,
+    nav_translations: dict[str, dict[str, str]] | None = None,
 ) -> dict:
-    """Build the Mintlify navigation structure from dynamic data."""
+    """Build the Mintlify navigation structure from dynamic data (CN locale)."""
+    if nav_translations is None:
+        nav_translations = {}
     tabs = []
+
+    def _cn(label: str) -> str:
+        return _get_translated_name(label, "zh-cn", nav_translations)
 
     # Tab 1: 指南 (入门 + 集成指南)
     guide_groups = [
@@ -827,14 +989,14 @@ def build_navigation(
                     svc_pages = [f"guides/{svc_alias}/{d}" for d in docs]
                     pages.append(
                         {
-                            "group": service_names.get(svc_alias, svc_alias),
+                            "group": _cn(service_names.get(svc_alias, svc_alias)),
                             "pages": svc_pages,
                         }
                     )
         if pages:
             guide_groups.append(
                 {
-                    "group": CATEGORY_NAMES_ZH.get(cat_name, cat_name),
+                    "group": _cn(cat_name),
                     "icon": cat_info["icon"],
                     "pages": pages,
                 }
@@ -2124,6 +2286,15 @@ Authorization: Bearer YOUR_API_TOKEN
                 "github": "https://github.com/AceDataCloud",
                 "x": "https://x.com/AceDataCloud",
             },
+        },
+        "metadata": {
+            "og:site_name": "Ace Data Cloud",
+            "og:image": "https://cdn.acedata.cloud/acedatacloud-og.png",
+            "twitter:card": "summary_large_image",
+            "twitter:site": "@AceDataCloud",
+        },
+        "seo": {
+            "indexHiddenPages": False,
         },
         "api": {
             "playground": {"display": "simple"},
