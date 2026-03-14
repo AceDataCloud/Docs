@@ -55,6 +55,18 @@ CATEGORY_ICONS: dict[str, str] = {
     "Proxy": "network-wired",
 }
 
+# Chinese translations for category names (used in default zh-cn navigation)
+CATEGORY_NAMES_ZH: dict[str, str] = {
+    "AI Chat": "AI 聊天",
+    "AI Image": "AI 图像",
+    "AI Video": "AI 视频",
+    "AI Audio": "AI 音频",
+    "Web & Data": "网络与数据",
+    "CAPTCHA": "验证码",
+    "Identity": "身份验证",
+    "Proxy": "代理",
+}
+
 # Doc keys that should never appear in the docs site.
 SKIP_DOC_KEYS = {
     "acedataext",
@@ -822,7 +834,7 @@ def build_navigation(
         if pages:
             guide_groups.append(
                 {
-                    "group": cat_name,
+                    "group": CATEGORY_NAMES_ZH.get(cat_name, cat_name),
                     "icon": cat_info["icon"],
                     "pages": pages,
                 }
@@ -1007,6 +1019,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "Blog",
         "MCP 服务器": "MCP Servers",
         "资源": "Resources",
+        "AI Chat": "AI Chat",
+        "AI Image": "AI Image",
+        "AI Video": "AI Video",
+        "AI Audio": "AI Audio",
+        "Web & Data": "Web & Data",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "Identity",
+        "Proxy": "Proxy",
     },
     "ja": {
         "指南": "ガイド",
@@ -1024,6 +1044,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "ブログ",
         "MCP 服务器": "MCP サーバー",
         "资源": "リソース",
+        "AI Chat": "AI チャット",
+        "AI Image": "AI 画像",
+        "AI Video": "AI 動画",
+        "AI Audio": "AI 音声",
+        "Web & Data": "Web & データ",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "認証",
+        "Proxy": "プロキシ",
     },
     "ko": {
         "指南": "가이드",
@@ -1041,6 +1069,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "블로그",
         "MCP 服务器": "MCP 서버",
         "资源": "리소스",
+        "AI Chat": "AI 채팅",
+        "AI Image": "AI 이미지",
+        "AI Video": "AI 비디오",
+        "AI Audio": "AI 오디오",
+        "Web & Data": "웹 & 데이터",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "신원 인증",
+        "Proxy": "프록시",
     },
     "es": {
         "指南": "Guías",
@@ -1058,6 +1094,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "Blog",
         "MCP 服务器": "Servidores MCP",
         "资源": "Recursos",
+        "AI Chat": "Chat IA",
+        "AI Image": "Imagen IA",
+        "AI Video": "Vídeo IA",
+        "AI Audio": "Audio IA",
+        "Web & Data": "Web y datos",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "Identidad",
+        "Proxy": "Proxy",
     },
     "fr": {
         "指南": "Guides",
@@ -1075,6 +1119,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "Blog",
         "MCP 服务器": "Serveurs MCP",
         "资源": "Ressources",
+        "AI Chat": "Chat IA",
+        "AI Image": "Image IA",
+        "AI Video": "Vidéo IA",
+        "AI Audio": "Audio IA",
+        "Web & Data": "Web et données",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "Identité",
+        "Proxy": "Proxy",
     },
     "de": {
         "指南": "Anleitungen",
@@ -1092,6 +1144,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "Blog",
         "MCP 服务器": "MCP-Server",
         "资源": "Ressourcen",
+        "AI Chat": "KI-Chat",
+        "AI Image": "KI-Bild",
+        "AI Video": "KI-Video",
+        "AI Audio": "KI-Audio",
+        "Web & Data": "Web & Daten",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "Identität",
+        "Proxy": "Proxy",
     },
     "pt": {
         "指南": "Guias",
@@ -1109,6 +1169,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "Blog",
         "MCP 服务器": "Servidores MCP",
         "资源": "Recursos",
+        "AI Chat": "Chat IA",
+        "AI Image": "Imagem IA",
+        "AI Video": "Vídeo IA",
+        "AI Audio": "Áudio IA",
+        "Web & Data": "Web e dados",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "Identidade",
+        "Proxy": "Proxy",
     },
     "ru": {
         "指南": "Руководства",
@@ -1126,6 +1194,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "Блог",
         "MCP 服务器": "MCP-серверы",
         "资源": "Ресурсы",
+        "AI Chat": "ИИ-чат",
+        "AI Image": "ИИ-изображения",
+        "AI Video": "ИИ-видео",
+        "AI Audio": "ИИ-аудио",
+        "Web & Data": "Веб и данные",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "Идентификация",
+        "Proxy": "Прокси",
     },
     "ar": {
         "指南": "الأدلة",
@@ -1143,6 +1219,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "مدونة",
         "MCP 服务器": "خوادم MCP",
         "资源": "الموارد",
+        "AI Chat": "دردشة ذكاء اصطناعي",
+        "AI Image": "صور ذكاء اصطناعي",
+        "AI Video": "فيديو ذكاء اصطناعي",
+        "AI Audio": "صوت ذكاء اصطناعي",
+        "Web & Data": "ويب وبيانات",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "الهوية",
+        "Proxy": "بروكسي",
     },
     "it": {
         "指南": "Guide",
@@ -1160,6 +1244,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "Blog",
         "MCP 服务器": "Server MCP",
         "资源": "Risorse",
+        "AI Chat": "Chat IA",
+        "AI Image": "Immagine IA",
+        "AI Video": "Video IA",
+        "AI Audio": "Audio IA",
+        "Web & Data": "Web e dati",
+        "CAPTCHA": "CAPTCHA",
+        "Identity": "Identità",
+        "Proxy": "Proxy",
     },
     "zh-tw": {
         "指南": "指南",
@@ -1177,6 +1269,14 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "博客": "部落格",
         "MCP 服务器": "MCP 伺服器",
         "资源": "資源",
+        "AI Chat": "AI 聊天",
+        "AI Image": "AI 圖像",
+        "AI Video": "AI 影片",
+        "AI Audio": "AI 音訊",
+        "Web & Data": "網路與資料",
+        "CAPTCHA": "驗證碼",
+        "Identity": "身分驗證",
+        "Proxy": "代理",
     },
 }
 
@@ -1279,7 +1379,7 @@ def build_language_navigation(
         if pages:
             guide_groups.append(
                 {
-                    "group": cat_name,
+                    "group": _t(lang, cat_name),
                     "icon": cat_info["icon"],
                     "pages": pages,
                 }
