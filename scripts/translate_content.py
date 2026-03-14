@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Translate Docs content from Chinese (zh-CN) to all target languages.
+Translate Docs content to all target languages (including zh-CN).
 
-Source of truth: root MDX files (Chinese / zh-CN)
-Targets: en, zh-TW, ja, ko, es, fr, de, pt, ru, ar, it, fi, sv, el, uk, pl, sr
+Source of truth: root MDX files (any language)
+Targets: zh-CN (overwrites root), en, zh-TW, ja, ko, es, fr, de, pt, ru, ar, it, fi, sv, el, uk, pl, sr
+
+The zh-CN translation writes back to the root directory (Mintlify default language).
+All other translations write to their respective language subdirectories.
 
 Uses api.acedata.cloud with ACEDATACLOUD_OPENAI_KEY.
 
@@ -31,6 +34,7 @@ MODEL = "gpt-4.1-mini"
 CACHE_DIR = DOCS_DIR / ".cache" / "translate"
 
 ALL_TARGET_LANGUAGES = [
+    "zh-CN",
     "en",
     "zh-TW",
     "ja",
@@ -51,6 +55,7 @@ ALL_TARGET_LANGUAGES = [
 ]
 
 LANGUAGE_NAMES_ZH = {
+    "zh-CN": "简体中文",
     "en": "英文",
     "zh-TW": "繁体中文",
     "ja": "日语",
@@ -99,7 +104,7 @@ def get_api_key() -> str:
     return os.environ.get("ACEDATACLOUD_OPENAI_KEY", "")
 
 
-def call_llm(api_key: str, system: str, user: str, max_tokens: int = 4096) -> str:
+def call_llm(api_key: str, system: str, user: str, max_tokens: int = 16384) -> str:
     body = json.dumps(
         {
             "model": MODEL,
@@ -120,7 +125,7 @@ def call_llm(api_key: str, system: str, user: str, max_tokens: int = 4096) -> st
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=180) as resp:
             data = json.loads(resp.read())
             return data["choices"][0]["message"]["content"].strip()
     except urllib.error.URLError as e:
@@ -156,12 +161,30 @@ def save_cache(lang: str, rel_path: str, content_hash: str, content: str):
     )
 
 
+def _is_mostly_chinese(text: str, threshold: float = 0.15) -> bool:
+    """Check if text has significant Chinese character density (CJK Unified)."""
+    # Strip code blocks and frontmatter to check prose only
+    import re
+
+    stripped = re.sub(r"```[\s\S]*?```", "", text)
+    stripped = re.sub(r"^---[\s\S]*?---", "", stripped, count=1)
+    stripped = re.sub(r"<[^>]+>", "", stripped)
+    stripped = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", stripped)
+    stripped = re.sub(r"[`#*_\-=|>\[\](){}]", "", stripped)
+    chars = [c for c in stripped if not c.isspace()]
+    if not chars:
+        return False
+    cjk = sum(1 for c in chars if "\u4e00" <= c <= "\u9fff")
+    return cjk / len(chars) > threshold
+
+
 # ===========================================================================
 # Translation
 # ===========================================================================
 
 SYSTEM_PROMPT = """\
-你是专业技术文档翻译员。将以下中文 MDX/Markdown 文档翻译为{lang_name}。
+你是专业技术文档翻译员。将以下 MDX/Markdown 文档翻译为{lang_name}。
+源文档可能是任何语言，请准确翻译为目标语言。
 规则：
 1. 保留完整的 YAML frontmatter（翻译 title/description/sidebarTitle，不翻译 openapi/字段名）
 2. 保留所有 MDX 组件标签（<Note>, <Steps>, <CodeGroup> 等）不变
@@ -177,7 +200,7 @@ def translate_file(
     lang: str,
     output_dir: Path,
 ) -> bool:
-    """Translate a single file from Chinese to target language."""
+    """Translate a single file to target language. Source can be any language."""
     content = src_file.read_text(encoding="utf-8")
     if not content.strip():
         return False
@@ -193,15 +216,25 @@ def translate_file(
     ch = _content_hash(content)
     cached = get_cached(lang, rel_str, ch)
     if cached:
-        dst = output_dir / lang / rel
+        # zh-CN writes to root (overwrites source), others to lang subdir
+        if lang == "zh-CN":
+            dst = output_dir / rel
+        else:
+            dst = output_dir / lang / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(cached, encoding="utf-8")
         return True
 
-    # Call LLM
+    # For zh-CN: skip LLM if source is already Chinese (use as-is)
+    if lang == "zh-CN" and _is_mostly_chinese(content):
+        save_cache(lang, rel_str, ch, content)
+        return True
+
+    # Call LLM — scale max_tokens to content length (rough ~4 chars/token)
     lang_name = LANGUAGE_NAMES_ZH.get(lang, lang)
     sys_prompt = SYSTEM_PROMPT.format(lang_name=lang_name)
-    result = call_llm(api_key, sys_prompt, content, max_tokens=4096)
+    estimated_tokens = max(4096, len(content) // 2)
+    result = call_llm(api_key, sys_prompt, content, max_tokens=estimated_tokens)
     if not result:
         return False
 
@@ -214,11 +247,21 @@ def translate_file(
             lines = lines[:-1]
         result = "\n".join(lines)
 
-    # Save
-    dst = output_dir / lang / rel
+    # zh-CN writes to root (overwrites source), others to lang subdir
+    if lang == "zh-CN":
+        dst = output_dir / rel
+    else:
+        dst = output_dir / lang / rel
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(result, encoding="utf-8")
     save_cache(lang, rel_str, ch, result)
+
+    # For zh-CN: also cache with the NEW root hash so subsequent runs skip it
+    if lang == "zh-CN":
+        new_hash = _content_hash(result)
+        if new_hash != ch:
+            save_cache(lang, rel_str, new_hash, result)
+
     return True
 
 
@@ -302,8 +345,10 @@ def main():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     langs = args.languages or ALL_TARGET_LANGUAGES
-    print(f"Source: zh-CN (root)", flush=True)
+    print(f"Source: root MDX files (any language)", flush=True)
     print(f"Targets: {', '.join(langs)}", flush=True)
+    if "zh-CN" in langs:
+        print(f"Note: zh-CN output overwrites root files (default language)", flush=True)
 
     if args.root_only:
         src_files = collect_root_files(args.output_dir)
@@ -348,11 +393,22 @@ def main():
             content = src.read_text(encoding="utf-8")
             ch = _content_hash(content)
             if get_cached(lang, str(rel), ch):
-                dst = args.output_dir / lang / rel
+                # zh-CN writes to root, others to lang subdir
+                if lang == "zh-CN":
+                    dst = args.output_dir / rel
+                else:
+                    dst = args.output_dir / lang / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 cached = get_cached(lang, str(rel), ch)
                 if cached:
                     dst.write_text(cached, encoding="utf-8")
+                stats["cached"] += 1
+                lang_cached += 1
+                continue
+
+            # For zh-CN: skip if source is already Chinese
+            if lang == "zh-CN" and _is_mostly_chinese(content):
+                save_cache(lang, str(rel), ch, content)
                 stats["cached"] += 1
                 lang_cached += 1
                 continue
