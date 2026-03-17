@@ -670,143 +670,6 @@ title: "{title}"
 """
 
 
-def _build_tutorials_nav(
-    output_dir: Path,
-    name_fn: callable | None = None,
-) -> list:
-    """Auto-discover tutorial pages and group by service."""
-    tut_dir = output_dir / "tutorials"
-    if not tut_dir.is_dir():
-        return []
-    groups: dict[str, list[str]] = {}
-    for f in sorted(tut_dir.rglob("*.mdx")):
-        rel = f.relative_to(tut_dir)
-        parts = rel.parts
-        if len(parts) == 2:
-            svc = parts[0]
-            groups.setdefault(svc, []).append(f"tutorials/{svc}/{rel.stem}")
-        elif len(parts) == 1:
-            groups.setdefault("_root", []).append(f"tutorials/{rel.stem}")
-    nav = []
-    for svc, pages in groups.items():
-        if svc == "_root":
-            nav.extend(pages)
-        elif len(pages) == 1:
-            nav.append(pages[0])
-        else:
-            label = name_fn(svc) if name_fn else svc.replace("-", " ").title()
-            nav.append({"group": label, "pages": pages})
-    return nav
-
-
-def _copy_seo_pages(docs_dir: Path, output_dir: Path):
-    """Copy pre-generated SEO content from PlatformBackend/docs to Mintlify output.
-
-    Source files:  tutorial_{service}_{lang}.md, comparison_{slug}.md,
-                   use_case_{slug}.md, blog_{slug}.md
-    Destination:   tutorials/{service}/{lang}.mdx, comparisons/{slug}.mdx,
-                   use-cases/{slug}.mdx, blog/{slug}.mdx
-    """
-    if not docs_dir.is_dir():
-        log(f"  WARNING: {docs_dir} not found, skipping SEO pages")
-        return
-
-    counts: dict[str, int] = {
-        "tutorials": 0,
-        "comparisons": 0,
-        "use-cases": 0,
-        "blog": 0,
-    }
-
-    for src in sorted(docs_dir.glob("*.md")):
-        name = src.stem  # e.g. tutorial_claude_python
-
-        if name.startswith("tutorial_"):
-            # tutorial_{service}_{lang}.md → tutorials/{service}/{lang}.mdx
-            rest = name[len("tutorial_") :]  # e.g. claude_python or nano-banana_curl
-            # Find the last _ that separates service from lang
-            for lang in ("python", "javascript", "curl"):
-                suffix = f"_{lang}"
-                if rest.endswith(suffix):
-                    service = rest[: -len(suffix)]
-                    dst = output_dir / "tutorials" / service / f"{lang}.mdx"
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    _write_seo_mdx(src, dst)
-                    counts["tutorials"] += 1
-                    break
-
-        elif name.startswith("comparison_"):
-            slug = name[len("comparison_") :]
-            dst = output_dir / "comparisons" / f"{slug}.mdx"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            _write_seo_mdx(src, dst)
-            counts["comparisons"] += 1
-
-        elif name.startswith("use_case_"):
-            slug = name[len("use_case_") :]
-            dst = output_dir / "use-cases" / f"{slug}.mdx"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            _write_seo_mdx(src, dst)
-            counts["use-cases"] += 1
-
-        elif name.startswith("blog_"):
-            slug = name[len("blog_") :]
-            dst = output_dir / "blog" / f"{slug}.mdx"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            _write_seo_mdx(src, dst)
-            counts["blog"] += 1
-
-    for cat, n in counts.items():
-        log(f"  {cat}: {n} files")
-    log(f"  Total: {sum(counts.values())} SEO pages copied")
-
-
-def _write_seo_mdx(src: Path, dst: Path):
-    """Read a Markdown source and write as MDX with frontmatter.
-
-    If the source already has frontmatter (---), keep it.
-    Otherwise, extract the first H1 as the title and generate frontmatter.
-    """
-    content = src.read_text(encoding="utf-8")
-
-    if content.startswith("---"):
-        # Already has frontmatter — still sanitize HTML for MDX
-        content = _sanitize_html_for_mdx(content)
-        dst.write_text(content, encoding="utf-8")
-        return
-
-    # Extract title from first H1
-    title = ""
-    lines = content.split("\n")
-    body_start = 0
-    for i, line in enumerate(lines):
-        if line.startswith("# "):
-            title = line[2:].strip()
-            body_start = i + 1
-            break
-
-    if not title:
-        title = src.stem.replace("_", " ").replace("-", " ").title()
-
-    body = "\n".join(lines[body_start:]).strip()
-    body = _sanitize_html_for_mdx(body)
-    mdx = f"""---
-title: "{title}"
----
-
-{body}
-"""
-    dst.write_text(mdx, encoding="utf-8")
-
-
-def _build_simple_nav(directory: str, output_dir: Path) -> list[str]:
-    """Auto-discover MDX pages in a flat directory."""
-    d = output_dir / directory
-    if not d.is_dir():
-        return []
-    return sorted(f"{directory}/{f.stem}" for f in d.iterdir() if f.suffix == ".mdx")
-
-
 # ---------------------------------------------------------------------------
 # Navigation label translation via GPT
 # ---------------------------------------------------------------------------
@@ -1056,34 +919,7 @@ def build_navigation(
 
     tabs.append({"tab": "API 参考", "groups": api_groups})
 
-    # Tab 3: 教程
-    def _tut_name(svc: str) -> str:
-        return _cn(service_names.get(svc, svc.replace("-", " ").title()))
-
-    tut_pages = _build_tutorials_nav(output_dir, name_fn=_tut_name)
-    if tut_pages:
-        tabs.append({"tab": "教程", "groups": [{"group": "教程", "pages": tut_pages}]})
-
-    # Tab 4: 对比
-    cmp_pages = _build_simple_nav("comparisons", output_dir)
-    if cmp_pages:
-        tabs.append(
-            {"tab": "对比", "groups": [{"group": "服务对比", "pages": cmp_pages}]}
-        )
-
-    # Tab 5: 用例
-    uc_pages = _build_simple_nav("use-cases", output_dir)
-    if uc_pages:
-        tabs.append(
-            {"tab": "用例", "groups": [{"group": "应用场景", "pages": uc_pages}]}
-        )
-
-    # Tab 6: 博客
-    blog_pages = _build_simple_nav("blog", output_dir)
-    if blog_pages:
-        tabs.append({"tab": "博客", "groups": [{"group": "博客", "pages": blog_pages}]})
-
-    # Tab 7: MCP 服务器
+    # Tab 3: MCP 服务器
     mcp_pages = []
     mcp_dir = output_dir / "mcp"
     if mcp_dir.exists():
@@ -1100,7 +936,7 @@ def build_navigation(
             {"tab": "MCP 服务器", "groups": [{"group": "MCP 服务器", "pages": all_mcp}]}
         )
 
-    # Tab 8: 资源
+    # Tab 4: 资源
     resource_pages = []
     if (output_dir / "resources" / "privacy.mdx").exists():
         resource_pages.append("resources/privacy")
@@ -1193,12 +1029,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "Overview",
         "API 端点": "API Endpoints",
         "集成指南": "Integration Guides",
-        "教程": "Tutorials",
-        "对比": "Comparisons",
-        "服务对比": "Service Comparisons",
-        "用例": "Use Cases",
-        "应用场景": "Use Cases",
-        "博客": "Blog",
         "MCP 服务器": "MCP Servers",
         "资源": "Resources",
         "AI Chat": "AI Chat",
@@ -1218,12 +1048,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "概要",
         "API 端点": "API エンドポイント",
         "集成指南": "統合ガイド",
-        "教程": "チュートリアル",
-        "对比": "比較",
-        "服务对比": "サービス比較",
-        "用例": "ユースケース",
-        "应用场景": "ユースケース",
-        "博客": "ブログ",
         "MCP 服务器": "MCP サーバー",
         "资源": "リソース",
         "AI Chat": "AI チャット",
@@ -1243,12 +1067,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "개요",
         "API 端点": "API 엔드포인트",
         "集成指南": "통합 가이드",
-        "教程": "튜토리얼",
-        "对比": "비교",
-        "服务对比": "서비스 비교",
-        "用例": "사용 사례",
-        "应用场景": "사용 사례",
-        "博客": "블로그",
         "MCP 服务器": "MCP 서버",
         "资源": "리소스",
         "AI Chat": "AI 채팅",
@@ -1268,12 +1086,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "Descripción general",
         "API 端点": "Endpoints API",
         "集成指南": "Guías de integración",
-        "教程": "Tutoriales",
-        "对比": "Comparaciones",
-        "服务对比": "Comparación de servicios",
-        "用例": "Casos de uso",
-        "应用场景": "Casos de uso",
-        "博客": "Blog",
         "MCP 服务器": "Servidores MCP",
         "资源": "Recursos",
         "AI Chat": "Chat IA",
@@ -1293,12 +1105,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "Aperçu",
         "API 端点": "Points d'accès API",
         "集成指南": "Guides d'intégration",
-        "教程": "Tutoriels",
-        "对比": "Comparaisons",
-        "服务对比": "Comparaison de services",
-        "用例": "Cas d'utilisation",
-        "应用场景": "Cas d'utilisation",
-        "博客": "Blog",
         "MCP 服务器": "Serveurs MCP",
         "资源": "Ressources",
         "AI Chat": "Chat IA",
@@ -1318,12 +1124,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "Übersicht",
         "API 端点": "API-Endpunkte",
         "集成指南": "Integrationsleitfäden",
-        "教程": "Tutorials",
-        "对比": "Vergleiche",
-        "服务对比": "Servicevergleiche",
-        "用例": "Anwendungsfälle",
-        "应用场景": "Anwendungsfälle",
-        "博客": "Blog",
         "MCP 服务器": "MCP-Server",
         "资源": "Ressourcen",
         "AI Chat": "KI-Chat",
@@ -1343,12 +1143,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "Visão geral",
         "API 端点": "Endpoints API",
         "集成指南": "Guias de integração",
-        "教程": "Tutoriais",
-        "对比": "Comparações",
-        "服务对比": "Comparação de serviços",
-        "用例": "Casos de uso",
-        "应用场景": "Casos de uso",
-        "博客": "Blog",
         "MCP 服务器": "Servidores MCP",
         "资源": "Recursos",
         "AI Chat": "Chat IA",
@@ -1368,12 +1162,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "Обзор",
         "API 端点": "Конечные точки API",
         "集成指南": "Руководства по интеграции",
-        "教程": "Учебники",
-        "对比": "Сравнения",
-        "服务对比": "Сравнение сервисов",
-        "用例": "Примеры использования",
-        "应用场景": "Примеры использования",
-        "博客": "Блог",
         "MCP 服务器": "MCP-серверы",
         "资源": "Ресурсы",
         "AI Chat": "ИИ-чат",
@@ -1393,12 +1181,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "نظرة عامة",
         "API 端点": "نقاط نهاية API",
         "集成指南": "أدلة التكامل",
-        "教程": "دروس",
-        "对比": "مقارنات",
-        "服务对比": "مقارنة الخدمات",
-        "用例": "حالات الاستخدام",
-        "应用场景": "حالات الاستخدام",
-        "博客": "مدونة",
         "MCP 服务器": "خوادم MCP",
         "资源": "الموارد",
         "AI Chat": "دردشة ذكاء اصطناعي",
@@ -1418,12 +1200,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "Panoramica",
         "API 端点": "Endpoint API",
         "集成指南": "Guide all'integrazione",
-        "教程": "Tutorial",
-        "对比": "Confronti",
-        "服务对比": "Confronto servizi",
-        "用例": "Casi d'uso",
-        "应用场景": "Casi d'uso",
-        "博客": "Blog",
         "MCP 服务器": "Server MCP",
         "资源": "Risorse",
         "AI Chat": "Chat IA",
@@ -1443,12 +1219,6 @@ _NAV_TRANSLATIONS: dict[str, dict[str, str]] = {
         "概览": "概覽",
         "API 端点": "API 端點",
         "集成指南": "整合指南",
-        "教程": "教學",
-        "对比": "比較",
-        "服务对比": "服務比較",
-        "用例": "應用案例",
-        "应用场景": "應用案例",
-        "博客": "部落格",
         "MCP 服务器": "MCP 伺服器",
         "资源": "資源",
         "AI Chat": "AI 聊天",
@@ -1470,37 +1240,6 @@ def _t(lang: str, label: str) -> str:
         return tr[label]
     en = _NAV_TRANSLATIONS.get("en", {})
     return en.get(label, label)
-
-
-def _build_tutorials_nav_for(
-    tut_dir: Path,
-    lang_prefix: str,
-    name_fn: callable | None = None,
-) -> list:
-    """Auto-discover tutorial pages for a language directory."""
-    if not tut_dir.is_dir():
-        return []
-    groups: dict[str, list[str]] = {}
-    for f in sorted(tut_dir.rglob("*.mdx")):
-        rel = f.relative_to(tut_dir)
-        parts = rel.parts
-        if len(parts) == 2:
-            svc = parts[0]
-            groups.setdefault(svc, []).append(
-                f"{lang_prefix}/tutorials/{svc}/{rel.stem}"
-            )
-        elif len(parts) == 1:
-            groups.setdefault("_root", []).append(f"{lang_prefix}/tutorials/{rel.stem}")
-    nav = []
-    for svc, pages in groups.items():
-        if svc == "_root":
-            nav.extend(pages)
-        elif len(pages) == 1:
-            nav.append(pages[0])
-        else:
-            label = name_fn(svc) if name_fn else svc.replace("-", " ").title()
-            nav.append({"group": label, "pages": pages})
-    return nav
 
 
 def build_language_navigation(
@@ -1612,69 +1351,6 @@ def build_language_navigation(
     if api_groups:
         tabs.append({"tab": _t(lang, "API 参考"), "groups": api_groups})
 
-    # --- Tutorials tab (Chinese-only content may exist in translations) ---
-    def _tut_name_lang(svc: str) -> str:
-        return _tr(service_names.get(svc, svc.replace("-", " ").title()))
-
-    tut_pages = _build_tutorials_nav_for(
-        lang_dir / "tutorials", lang_out, name_fn=_tut_name_lang
-    )
-    if tut_pages:
-        tabs.append(
-            {
-                "tab": _t(lang, "教程"),
-                "groups": [{"group": _t(lang, "教程"), "pages": tut_pages}],
-            }
-        )
-
-    # --- Comparisons tab ---
-    cmp_dir = lang_dir / "comparisons"
-    if cmp_dir.is_dir():
-        cmp_pages = sorted(
-            f"{lang_out}/comparisons/{f.stem}"
-            for f in cmp_dir.iterdir()
-            if f.suffix == ".mdx"
-        )
-        if cmp_pages:
-            tabs.append(
-                {
-                    "tab": _t(lang, "对比"),
-                    "groups": [{"group": _t(lang, "服务对比"), "pages": cmp_pages}],
-                }
-            )
-
-    # --- Use Cases tab ---
-    uc_dir = lang_dir / "use-cases"
-    if uc_dir.is_dir():
-        uc_pages = sorted(
-            f"{lang_out}/use-cases/{f.stem}"
-            for f in uc_dir.iterdir()
-            if f.suffix == ".mdx"
-        )
-        if uc_pages:
-            tabs.append(
-                {
-                    "tab": _t(lang, "用例"),
-                    "groups": [{"group": _t(lang, "应用场景"), "pages": uc_pages}],
-                }
-            )
-
-    # --- Blog tab ---
-    blog_dir = lang_dir / "blog"
-    if blog_dir.is_dir():
-        blog_pages = sorted(
-            f"{lang_out}/blog/{f.stem}"
-            for f in blog_dir.iterdir()
-            if f.suffix == ".mdx"
-        )
-        if blog_pages:
-            tabs.append(
-                {
-                    "tab": _t(lang, "博客"),
-                    "groups": [{"group": _t(lang, "博客"), "pages": blog_pages}],
-                }
-            )
-
     # --- MCP Servers tab ---
     mcp_dir = lang_dir / "mcp"
     if mcp_dir.is_dir():
@@ -1771,7 +1447,7 @@ def _sync_translated_content(
 
     For each target language that has a directory in PlatformBackend/docs/,
     apply the same MD→MDX conversion as the zh-CN base, placing output into
-    {output_dir}/{mintlify_lang}/guides/..., tutorials/..., etc.
+    {output_dir}/{mintlify_lang}/guides/..., mcp/..., etc.
     """
     total_files = 0
 
@@ -1835,12 +1511,9 @@ def _sync_translated_content(
             (guides_out / "x402.mdx").write_text(mdx, encoding="utf-8")
             lang_count += 1
 
-        # --- SEO pages (tutorials, comparisons, use-cases, blog) ---
-        _copy_seo_pages(lang_docs, lang_out)
-
         total_files += lang_count
         if lang_count > 0:
-            log(f"  {mlang}: {lang_count} guide/mcp/resource pages (+ SEO pages)")
+            log(f"  {mlang}: {lang_count} guide/mcp/resource pages")
 
     log(
         f"  Total translated pages: {total_files} (across {len(TARGET_LANGUAGES)} languages)"
@@ -2213,21 +1886,11 @@ Authorization: Bearer YOUR_API_TOKEN
     log("Step 5 done")
 
     # ---------------------------------------------------------------------------
-    # 6. Copy pre-generated SEO pages (tutorials, comparisons, use-cases, blog)
+    # 6. Copy pre-translated content from PlatformBackend/docs/{lang}/
     # ---------------------------------------------------------------------------
     log()
     log("=" * 60)
-    log("Step 6/8: Copy pre-generated SEO pages from PlatformBackend/docs")
-    log("=" * 60)
-    _copy_seo_pages(backend_dir / "docs" / "zh-CN", output_dir)
-    log("Step 6 done")
-
-    # ---------------------------------------------------------------------------
-    # 6b. Copy pre-translated content from PlatformBackend/docs/{lang}/
-    # ---------------------------------------------------------------------------
-    log()
-    log("=" * 60)
-    log("Step 6b: Copy pre-translated content from PlatformBackend")
+    log("Step 6/8: Copy pre-translated content from PlatformBackend")
     log("=" * 60)
     _sync_translated_content(
         backend_dir,
@@ -2237,7 +1900,7 @@ Authorization: Bearer YOUR_API_TOKEN
         categories,
         dev_docs_by_service,
     )
-    log("Step 6b done")
+    log("Step 6 done")
 
     # ---------------------------------------------------------------------------
     # 7. Generate docs.json
