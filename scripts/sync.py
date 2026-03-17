@@ -1033,12 +1033,7 @@ def build_navigation(
     tabs.append({"tab": "指南", "groups": guide_groups})
 
     # Tab 2: API 参考 (paired with integration guides per service)
-    api_groups = [
-        {
-            "group": "概览",
-            "pages": ["api-reference/introduction"],
-        }
-    ]
+    api_groups: list[dict] = []
     for cat_name, cat_info in categories.items():
         cat_pages = []
         for svc_alias in cat_info["services"]:
@@ -1598,14 +1593,6 @@ def build_language_navigation(
 
     # --- API Reference tab ---
     api_groups: list[dict] = []
-    api_intro = lang_dir / "api-reference" / "introduction.mdx"
-    if api_intro.exists():
-        api_groups.append(
-            {
-                "group": _t(lang, "概览"),
-                "pages": [f"{lang_out}/api-reference/introduction"],
-            }
-        )
     for cat_name, cat_info in categories.items():
         for svc_alias in cat_info["services"]:
             openapi_path = f"openapi/{svc_alias}.json"
@@ -2087,7 +2074,7 @@ Ace Data Cloud 是一个统一 AI API 平台，通过一个 API Key 和一致的
   <Card title="获取 API Key" icon="key" href="https://platform.acedata.cloud">
     注册并获取 API Token
   </Card>
-  <Card title="API 参考" icon="code" href="/api-reference/introduction">
+  <Card title="API 参考" icon="code" href="/authentication">
     交互式 API 文档
   </Card>
   <Card title="MCP 服务器" icon="plug" href="/mcp/overview">
@@ -2170,7 +2157,7 @@ console.log(data);
 ## 3. 探索更多 API
 
 <CardGroup cols={2}>
-  <Card title="API 参考" icon="code" href="/api-reference/introduction">
+  <Card title="API 参考" icon="code" href="/authentication">
     浏览并交互式测试所有 API 端点
   </Card>
   <Card title="集成指南" icon="book" href="/guides/claude/claude_chat_completions">
@@ -2219,58 +2206,9 @@ Authorization: Bearer YOUR_API_TOKEN
 """
     (output_dir / "authentication.mdx").write_text(auth_page, encoding="utf-8")
 
-    # API Reference introduction
+    # Ensure api-reference directory exists for OpenAPI auto-rendered pages
     api_ref_dir = output_dir / "api-reference"
     api_ref_dir.mkdir(parents=True, exist_ok=True)
-    api_intro = """---
-title: "API 参考"
-description: "Ace Data Cloud 所有服务的交互式 API 参考文档"
----
-
-## 基础 URL
-
-所有 API 端点的基础地址：
-
-```
-https://api.acedata.cloud
-```
-
-## 认证
-
-所有端点需要 Bearer Token 认证：
-
-```
-Authorization: Bearer YOUR_API_TOKEN
-```
-
-## 在线测试
-
-本参考文档中的每个端点都包含交互式沙盒。输入 API Token 即可直接在浏览器中测试请求。
-
-<Note>
-  在 [platform.acedata.cloud](https://platform.acedata.cloud) 获取 API Token。
-</Note>
-
-## 服务分类
-
-按类别浏览 API：
-
-<CardGroup cols={2}>
-  <Card title="AI 聊天" icon="comments">
-    Claude、OpenAI、Gemini、DeepSeek、Grok、Kimi — OpenAI 兼容聊天补全接口
-  </Card>
-  <Card title="AI 图像" icon="image">
-    Midjourney、Flux、Seedream、DALL·E、QR Art、人脸工具
-  </Card>
-  <Card title="AI 视频" icon="video">
-    Sora、Veo、Luma、Kling、Hailuo、Seedance、Wan
-  </Card>
-  <Card title="AI 音频" icon="music">
-    Suno、Fish Audio、Producer
-  </Card>
-</CardGroup>
-"""
-    (api_ref_dir / "introduction.mdx").write_text(api_intro, encoding="utf-8")
 
     log("Step 5 done")
 
