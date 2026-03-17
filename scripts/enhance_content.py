@@ -28,7 +28,7 @@ API_BASE = "https://api.acedata.cloud/v1"
 MODEL = "gpt-4.1-mini"
 CACHE_DIR = DOCS_DIR / ".cache" / "enhance"
 
-ENHANCEABLE_DIRS = ["guides", "tutorials", "comparisons", "use-cases", "blog"]
+ENHANCEABLE_DIRS = ["guides"]
 
 SYSTEM_PROMPT = """\
 你是 Ace Data Cloud 高级技术文档编辑。优化以下中文 MDX 文档。
