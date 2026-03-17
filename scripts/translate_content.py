@@ -78,10 +78,6 @@ LANGUAGE_NAMES_ZH = {
 # Directories to translate (relative to DOCS_DIR)
 TRANSLATABLE_DIRS = [
     "guides",
-    "tutorials",
-    "comparisons",
-    "use-cases",
-    "blog",
     "api-reference",
     "mcp",
     "resources",
