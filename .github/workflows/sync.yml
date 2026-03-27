@@ -102,8 +102,15 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            # Capture changed files
+            changed_files=$(git diff --cached --name-only | head -200)
             echo "Files changed:"
-            git diff --cached --name-only | head -100
+            echo "$changed_files"
+            # Extract changed services from file paths (guides/suno/*, openapi/suno.json, mcp/suno.mdx)
+            changed_services=$(echo "$changed_files" | grep -oP '(?:guides|openapi|mcp)/\K[^/.]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+            echo "changed_services=$changed_services" >> "$GITHUB_OUTPUT"
+            # Store changed files list for dispatch
+            echo "$changed_files" > /tmp/changed_files.txt
           fi
 
       - name: Commit and push
@@ -114,3 +121,123 @@ jobs:
           git config user.email "dev@acedata.cloud"
           git commit -m "docs: sync from PlatformBackend (zh-CN base + translations) [automated]"
           git push
+
+      - name: Generate diff summary
+        if: steps.changes.outputs.changed == 'true'
+        id: diff
+        working-directory: Docs
+        run: |
+          # Get the diff of the just-pushed commit (only zh-CN base, no translated files)
+          diff_summary=$(git diff HEAD~1 HEAD --stat -- \
+            'openapi/*.json' 'guides/**' 'mcp/*.mdx' \
+            'introduction.mdx' 'quickstart.mdx' 'authentication.mdx' \
+            | head -50)
+          # Get detailed diff for zh-CN content only (not translations)
+          diff_detail=$(git diff HEAD~1 HEAD -- \
+            'openapi/*.json' 'guides/**' 'mcp/*.mdx' \
+            | head -500)
+          # Save to files (to avoid shell escaping issues in outputs)
+          echo "$diff_summary" > /tmp/diff_summary.txt
+          echo "$diff_detail" > /tmp/diff_detail.txt
+          # Get commit SHA
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      changed: ${{ steps.changes.outputs.changed }}
+      changed_services: ${{ steps.changes.outputs.changed_services }}
+      commit_sha: ${{ steps.diff.outputs.commit_sha }}
+
+  dispatch:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        include:
+          # Suno ecosystem
+          - repo: AceDataCloud/MCPSuno
+            services: suno
+          - repo: AceDataCloud/SunoCli
+            services: suno
+          - repo: AceDataCloud/SunoAPI
+            services: suno
+          # Luma ecosystem
+          - repo: AceDataCloud/MCPLuma
+            services: luma
+          - repo: AceDataCloud/LumaCli
+            services: luma
+          - repo: AceDataCloud/LumaAPI
+            services: luma
+          # Midjourney ecosystem
+          - repo: AceDataCloud/MCPMidjourney
+            services: midjourney
+          - repo: AceDataCloud/MidjourneyAPI
+            services: midjourney
+          # Sora ecosystem
+          - repo: AceDataCloud/MCPSora
+            services: sora
+          - repo: AceDataCloud/SoraCli
+            services: sora
+          - repo: AceDataCloud/SoraAPI
+            services: sora
+          # Veo ecosystem
+          - repo: AceDataCloud/MCPVeo
+            services: veo
+          - repo: AceDataCloud/VeoCli
+            services: veo
+          - repo: AceDataCloud/VeoAPI
+            services: veo
+          # Serp ecosystem
+          - repo: AceDataCloud/MCPSerp
+            services: serp
+          - repo: AceDataCloud/SerpAPI
+            services: serp
+          # Other MCP/CLI/API repos
+          - repo: AceDataCloud/MCPFlux
+            services: flux
+          - repo: AceDataCloud/FluxAPI
+            services: flux
+          - repo: AceDataCloud/MCPNanoBanana
+            services: nano-banana
+          - repo: AceDataCloud/NanoBananaAPI
+            services: nano-banana
+          - repo: AceDataCloud/NanoBananaCli
+            services: nano-banana
+          - repo: AceDataCloud/MCPSeedream
+            services: seedream
+          - repo: AceDataCloud/MCPSeedance
+            services: seedance
+          - repo: AceDataCloud/MCPShortURL
+            services: shorturl
+          # Skills repo gets all changes
+          - repo: AceDataCloud/Skills
+            services: all
+    steps:
+      - name: Check if service is relevant
+        id: check
+        run: |
+          changed="${{ needs.sync.outputs.changed_services }}"
+          target="${{ matrix.services }}"
+          if [ "$target" = "all" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          elif echo "$changed" | grep -qw "$target"; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping ${{ matrix.repo }} — service '$target' not in changed: '$changed'"
+          fi
+
+      - name: Dispatch to downstream repo
+        if: steps.check.outputs.relevant == 'true'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.BOT_TOKEN }}
+          repository: ${{ matrix.repo }}
+          event-type: docs-updated
+          client-payload: |
+            {
+              "commit_sha": "${{ needs.sync.outputs.commit_sha }}",
+              "changed_services": "${{ needs.sync.outputs.changed_services }}",
+              "source": "Docs"
+            }
