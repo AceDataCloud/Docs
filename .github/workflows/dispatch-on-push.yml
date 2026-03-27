@@ -1,0 +1,82 @@
+name: Dispatch on Push
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "openapi/**"
+      - "guides/**"
+      - "mcp/**"
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      changed_services: ${{ steps.detect.outputs.changed_services }}
+      commit_sha: ${{ steps.detect.outputs.commit_sha }}
+      skip: ${{ steps.detect.outputs.skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed services
+        id: detect
+        run: |
+          changed_files=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          echo "Changed files:"
+          echo "$changed_files"
+
+          changed_services=$(echo "$changed_files" | grep -oP '(?:guides|openapi|mcp)/\K[^/.]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "changed_services=$changed_services" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$changed_services" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  dispatch:
+    needs: detect
+    if: needs.detect.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: AceDataCloud/MCPSuno
+            services: suno
+    steps:
+      - name: Check if service is relevant
+        id: check
+        run: |
+          changed="${{ needs.detect.outputs.changed_services }}"
+          target="${{ matrix.services }}"
+          if [ "$target" = "all" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          elif echo ",$changed," | grep -q ",$target,"; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping ${{ matrix.repo }} — '$target' not in '$changed'"
+          fi
+
+      - name: Dispatch to downstream repo
+        if: steps.check.outputs.relevant == 'true'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.BOT_TOKEN }}
+          repository: ${{ matrix.repo }}
+          event-type: docs-updated
+          client-payload: |
+            {
+              "commit_sha": "${{ needs.detect.outputs.commit_sha }}",
+              "changed_services": "${{ needs.detect.outputs.changed_services }}",
+              "source": "Docs-push"
+            }
