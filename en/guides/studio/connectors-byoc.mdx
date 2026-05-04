@@ -1,0 +1,139 @@
+---
+title: "BYOC Connectors: Run Skills with Your Own Cloud Keys"
+description: "AceDataCloud Studio's BYOC (Bring Your Own Credentials) connectors: drive Studio skills with your own SecretId / SecretKey for Tencent Cloud (COS / CLS / TKE / DNSPod / EdgeOne) and other vendors."
+---
+
+> **Audience:** Studio users who want to manage Tencent Cloud (and future AWS / Aliyun) resources directly in chat; or implementers / reviewers who want to understand the BYOC security model.
+
+## What is it
+
+Standard Studio connectors (GitHub, Notion, Slack, …) speak **OAuth**: you click Connect → you get redirected to the vendor's authorization page → we exchange for an access token → all subsequent API calls use that token.
+
+But many cloud vendors and SaaS don't offer OAuth APIs (only console SSO) — their APIs are signed with **user-held SecretId / SecretKey pairs**: Tencent Cloud, Alibaba Cloud, AWS. These services couldn't be used in Studio before.
+
+**BYOC (Bring Your Own Credentials)** is the connector type designed for these:
+
+- You enter SecretId / SecretKey into a form in your browser.
+- We encrypt the payload with AES-256-GCM and store the ciphertext only — plaintext is never written to the database, logs, or API responses.
+- When a Studio skill you've installed needs the credentials (e.g. `acedata/tencentcloud-cos`), the runtime briefly decrypts in-memory and injects them as sandbox environment variables for the duration of one tool call.
+
+## One-to-many: one connector, many skills
+
+By design **a connector ≠ a skill**:
+
+```
+tencentcloud/tencentcloud   (one BYOC connector — holds SecretId/SecretKey)
+       │
+       ├── acedata/tencentcloud-cos        (object storage)
+       ├── acedata/tencentcloud-cls        (log search)
+       ├── acedata/tencentcloud-cls-alarm  (alarm policies)
+       ├── acedata/tencentcloud-tke        (Kubernetes)
+       ├── acedata/tencentcloud-dns        (DNSPod)
+       └── acedata/tencentcloud-edgeone    (CDN / WAF)
+```
+
+Install **only the sub-skills you need**. The connector is installed once and shared across all sub-skills.
+
+## Security model
+
+| Stage | Credential state |
+|---|---|
+| User enters in browser | Plaintext, only in browser memory + HTTPS in transit |
+| Submitted to AuthBackend | Plaintext validated → AES-256-GCM encrypted (fresh 12-byte nonce per write) → written to DB |
+| At rest in DB | Ciphertext (with GCM auth tag — tamper-evident) |
+| User triggers a skill in chat | Decrypted in AuthBackend memory → returned to chat worker over HTTPS with internal-token auth |
+| Chat sandbox | Injected as env vars (`TENCENTCLOUD_SECRET_ID`, etc.); destroyed after the tool call |
+| Sandbox stdout / stderr | `redactSecrets` defense in depth: any output containing the credential value (e.g. `env \| grep TC`) is replaced with `[REDACTED]` |
+
+What explicitly **does not** happen:
+
+- Plaintext is never written to a DB column.
+- Plaintext is never written to CLS / API access logs.
+- Plaintext does not appear in API error responses (validation errors only say which field is missing — they never echo what you submitted).
+- Plaintext does not appear in chat history / model prompts. The model only sees env-var **names** like `$TENCENTCLOUD_SECRET_ID`, never the values.
+
+The encryption key (`CONNECTION_CRYPT_KEY`) is injected via K8s Secret in production — same security tier as OAuth client secrets.
+
+## User flow
+
+### 1. Install the connector
+
+Open [https://auth.acedata.cloud/user/connections](https://auth.acedata.cloud/user/connections) → Browse Connectors → find Tencent Cloud → Add.
+
+The dialog renders a form per the connector's declared **credential_schema**. Tencent Cloud's fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| **SecretId** | text, required | Tencent Cloud access key ID, starts with `AKID` |
+| **SecretKey** | password (auto-masked), required | Paired with SecretId, shown only once at creation |
+| **Default region** | select, optional | Default region for API calls; per-call overrides allowed |
+
+> ⚠️ **Strongly use a [CAM sub-account](https://console.cloud.tencent.com/cam/user)** rather than your root account. Bind only the **read-only** / **least-privilege** policies needed (`QcloudCOSReadOnlyAccess`, `QcloudCLSReadOnlyAccess`, etc.) — limits blast radius if the credentials leak.
+
+### 2. Install one or more skills
+
+Open [https://auth.acedata.cloud/user/skills](https://auth.acedata.cloud/user/skills) → Browse Skills → Publisher = AceDataCloud → find the `tencentcloud-*` series. Install each independently:
+
+- `tencentcloud-cos` — COS object storage
+- `tencentcloud-cls` — CLS log search
+- `tencentcloud-cls-alarm` — CLS alarm policies / notice groups / shields
+- `tencentcloud-tke` — TKE Kubernetes clusters and workloads
+- `tencentcloud-dns` — DNSPod records
+- `tencentcloud-edgeone` — EdgeOne CDN cache / DNS / WAF
+
+### 3. Use them in Studio
+
+Open any tool-capable chat group ([Claude](https://studio.acedata.cloud/claude/conversations), [GPT](https://studio.acedata.cloud/chatgpt/conversations), [Grok](https://studio.acedata.cloud/grok/conversations)) and ask in natural language:
+
+- *"List all my Tencent Cloud COS buckets, sorted by object count and total size"*
+- *"Pull all 5xx error logs from platform-backend in the last hour, deduped by trace_id"*
+- *"Scale the platform-backend deployment in the acedatacloud namespace of cluster tke-prod-hk to 4 replicas"*
+- *"Add a CNAME record for mcp-tencentcloud.acedata.cloud pointing at platform.acedata.cloud"*
+- *"Purge the /logos/* path on cdn.acedata.cloud"*
+
+The agent will:
+
+1. Match the request to the right skill (via the skill's `description` keywords).
+2. Auto-load the skill (with code examples).
+3. Receive the injected `TENCENTCLOUD_SECRET_ID` / `_SECRET_KEY` / `_REGION` env vars.
+4. Call the official `tencentcloud-sdk-python` in the sandbox and return the result.
+
+You don't have to write code, switch to the console, or remember API paths.
+
+### 4. Revoke
+
+Back at [https://auth.acedata.cloud/user/connections](https://auth.acedata.cloud/user/connections), find the Tencent Cloud card → Disconnect. All skills using this connector immediately lose access (next tool call returns 410).
+
+For complete revocation, also disable / delete the SecretId in the [Tencent Cloud CAM console](https://console.cloud.tencent.com/cam/capi).
+
+## FAQ
+
+**Q: Can I install two Tencent Cloud credential sets (e.g. prod + staging)?**
+A: Today, one credential set per BYOC connector per user. Disconnect the current one, then install the new. Multi-account support is on the roadmap.
+
+**Q: What if my SecretKey gets rotated or deleted in the Tencent Cloud console?**
+A: The next tool call gets an authentication error from Tencent Cloud, which the agent surfaces back to you. Disconnect and re-add with the new key.
+
+**Q: Does the encryption key (`CONNECTION_CRYPT_KEY`) get rotated? What happens then?**
+A: Currently a single Fernet-style key. If we rotate in production, old ciphertext can't be decrypted; the next tool call triggers `CredentialDecryptError` → AuthBackend auto-marks that Connection `REVOKED`, and you'll be prompted to reconnect. Rotations will be announced in advance. Future work: envelope encryption + KMS for graceful rotation.
+
+**Q: Are there audit logs? Can I see which skill used my credentials and how often?**
+A: Each decrypt + injection is logged structurally (trace_id + skill identifier + timestamp, **never** the credential values), retained 30 days. Self-service export / query UI is on the roadmap.
+
+**Q: I want to add my own BYOC connector (Aliyun / AWS / Cloudflare). How?**
+A: See [`AuthBackend/app/seeds/connectors.yaml`](https://github.com/AceDataCloud/AuthBackend/blob/main/app/seeds/connectors.yaml) — add a row with `auth_mode: byoc` and a `credential_schema`. Drop accompanying skills in [`AceDataCloud/Skills`](https://github.com/AceDataCloud/Skills) under `skills/<vendor>-<service>/` with `connections: [<vendor>]` in the frontmatter.
+
+**Q: Are the skills open source?**
+A: Yes. [https://github.com/AceDataCloud/Skills](https://github.com/AceDataCloud/Skills) under Apache-2.0 / MIT. PRs welcome.
+
+## Design references
+
+Technical details, PR links, model changes, migration plan — see the GitHub PR thread:
+
+- AuthBackend [#102](https://github.com/AceDataCloud/AuthBackend/pull/102) — `byoc` auth_mode + AES-256-GCM credential storage
+- AuthBackend [#104](https://github.com/AceDataCloud/AuthBackend/pull/104) — seed `tencentcloud/tencentcloud` connector
+- AuthFrontend [#87](https://github.com/AceDataCloud/AuthFrontend/pull/87) — credential dialog UI
+- Skills [#170](https://github.com/AceDataCloud/Skills/pull/170) — 6 `acedata/tencentcloud-*` skills
+- AuthBackend [#106](https://github.com/AceDataCloud/AuthBackend/pull/106) — register `AceDataCloud/Skills` as catalog source
+- AuthBackend [#107](https://github.com/AceDataCloud/AuthBackend/pull/107) — `/internal/v1/connections/byoc-credentials` internal endpoint
+- PlatformService [#830](https://github.com/AceDataCloud/PlatformService/pull/830) — aichat2 worker injects credentials into the sandbox env
