@@ -3,23 +3,272 @@ title: "OpenAI Images Edits API Ansökan och Användning"
 description: "OpenAI generation 集成指南 - Ace Data Cloud"
 ---
 
-OpenAI bildredigeringstjänst kan ta emot valfritt antal bilder och instruktioner och returnera de modifierade bilderna.
+OpenAI bildredigeringstjänst låter dig skicka in valfritt antal bilder och instruktioner för att få redigerade bilder som resultat. För närvarande stöder API:et samtidigt `dall-e-2`, `gpt-image-1`, den senaste **`gpt-image-2`**, samt modellerna i **`nano-banana` / `nano-banana-2` / `nano-banana-pro`** serien som är anslutna via samma gränssnitt.
 
-Detta dokument beskriver huvudsakligen användningsflödet för OpenAI Images Edits API, vilket gör att vi enkelt kan använda den officiella OpenAI bildredigeringsfunktionen.
+Det här dokumentet beskriver huvudsakligen användningsflödet för OpenAI Images Edits API, med vilket du enkelt kan använda den officiella OpenAI bildredigeringsfunktionen.
 
 ## Ansökningsprocess
 
-För att använda OpenAI Images Edits API kan du först gå till [OpenAI Images Edits API](https://platform.acedata.cloud/documents/251f1efa-aaa6-462e-8af4-66854b1bc94d) sidan och klicka på "Acquire"-knappen för att få de nödvändiga autentiseringsuppgifterna:
+För att använda OpenAI Images Edits API kan du först gå till [OpenAI Images Edits API](https://platform.acedata.cloud/documents/251f1efa-aaa6-462e-8af4-66854b1bc94d) sidan och klicka på knappen "Acquire" för att få de autentiseringsuppgifter som krävs för förfrågningar:
 
 ![](https://cdn.acedata.cloud/nyq0xz.png)
 
-Om du inte har loggat in eller registrerat dig kommer du automatiskt att omdirigeras till inloggningssidan för att registrera dig och logga in. Efter inloggning eller registrering kommer du automatiskt att återvända till den aktuella sidan.
+Om du inte är inloggad eller registrerad kommer du automatiskt att omdirigeras till inloggningssidan för att registrera och logga in, och efter inloggning återvänder du automatiskt till den aktuella sidan.
 
-Vid första ansökan kommer det att finnas en gratis kvot som gör att du kan använda API:et gratis.
+Vid första ansökan får du en gratis kvot som gör att du kan använda API:et kostnadsfritt.
 
-## Grundläggande Användning
+## GPT-Image-2 modellen
 
-Därefter kan du använda kod för att anropa API:et. Nedan är ett exempel på hur man gör det med CURL:
+`gpt-image-2` har en mycket tydlig förbättring jämfört med `gpt-image-1` i bildredigeringsscenarier:
+
+- **Mer stabil struktur**: Vid byte av skinn, färgschema eller bakgrund förstörs nästan aldrig originalbildens layout och komposition.
+- **Mer exakt textbevarande**: Text i informationsgrafik, affischer, menyer etc. förblir tydlig och läsbar efter redigering.
+- **Stöd för direkt URL-inmatning**: Utöver traditionell filuppladdning med `multipart/form-data` stöder `gpt-image-2` även **inmatning av bild-URL i JSON-format**, vilket eliminerar behovet av att ladda ner bilder lokalt och är mycket lämpligt för server-side pipelines.
+- **Stöd för högupplöst omritning**: Du kan skicka in en 1K originalbild och via `size`-parametern begära 2K / 4K-utdata, modellen förstorar samtidigt som den redigerar.
+
+### Stödda `size`-värden och prisnivåer
+
+Redigeringsgränssnittet har samma begränsningar för `size` som genereringsgränssnittet — `gpt-image-2` accepterar endast `size` som `auto`, tomt, eller i formatet `WIDTHxHEIGHT`. Andra format ger 400-fel. Prissättningen delas in i två nivåer och baseras endast på det begärda `size`-värdet, oberoende av originalbildens upplösning:
+
+- **1K standardpris**: Någon av de rekommenderade 1K-storlekarna i tabellen nedan, eller vanliga 1K-alias från upstream (`1254x1254`, `1672x941`, `941x1672`).
+- **Andra nivåer (1,5×)**: Inkluderar rekommenderade 2K / 4K förinställningar i tabellen samt valfri egen `WIDTHxHEIGHT`.
+
+Upstream har samma hårda begränsningar för anpassade storlekar: bredd och höjd måste vara multipler av 16, längsta sidan ≤ 3840, och totalt antal pixlar ≤ 8 294 400.
+
+| Proportion | 1K (standardpris) | 2K rekommenderat (×1.5) | 4K rekommenderat (×1.5) |
+| --- | --- | --- | --- |
+| 1:1 | `1024x1024` | `2048x2048` | `2880x2880` |
+| 4:3 | `1536x1024` | `2048x1536` | `3264x2448` |
+| 3:4 | `1024x1536` | `1536x2048` | `2448x3264` |
+| 16:9 | `1792x1024` | `2048x1152` | `3840x2160` |
+| 9:16 | `1024x1792` | `1152x2048` | `2160x3840` |
+
+> Exempel: Om originalbilden är `1024x1024` och `size` sätts till `2048x2048`, kommer modellen att rita om bilden enligt redigeringsinstruktionen och ge ut en 2K-bild med "andra" prisnivån; om `size` sätts till `3840x2160` blir utdata en 4K liggande bild, också med "andra" prisnivån; om `auto` eller tomt skickas används 1K standardpris.
+
+> **Om `n`-parametern**
+>
+> `gpt-image-2` redigerings-API stöder för närvarande **inte `n > 1`**: parametern ignoreras tyst, oavsett om du skickar `n=1` eller `n=10` returneras endast en bild per förfrågan och endast en bild debiteras. Om du behöver flera redigeringsförslag samtidigt, skicka flera parallella förfrågningar. Denna begränsning gäller även för `gpt-image-1` / `gpt-image-1.5` samt `nano-banana` / `nano-banana-2` / `nano-banana-pro` serierna. `dall-e-2` är för närvarande den enda redigeringsmodellen som stödjer `n > 1` nativt.
+
+Nedan följer två verkliga exempel som visar `gpt-image-2` redigeringsförmåga från olika perspektiv.
+
+### Anropsmetod 1: JSON + bild-URL (rekommenderat)
+
+Skicka direkt en förfrågan med `application/json` där `image`-fältet innehåller en bild-URL. Modellen hämtar bilden och redigerar enligt `prompt`.
+
+Till exempel, originalbilden nedan är en vetenskaplig illustration genererad med `gpt-image-2`:
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/5c9fa635-8794-4c6d-88f8-584d7f4716c6_0.png" width="500" className="m-auto" /></p>
+
+Vi vill ändra den till ett "nattläge"-färgtema. Så här anropar du:
+
+```shell
+curl -X POST "https://api.acedata.cloud/openai/images/edits" \
+  -H "Authorization: Bearer {token}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-2",
+    "image": "https://platform.cdn.acedata.cloud/gpt-image/5c9fa635-8794-4c6d-88f8-584d7f4716c6_0.png",
+    "prompt": "Convert this infographic to dark mode: dark navy background, light cream text, deep gray rounded module cards with soft shadows. Keep all layout, structure, and module arrangement identical — only invert the color scheme.",
+    "size": "1024x1536"
+  }'
+```
+
+Eller med Python:
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/openai/images/edits"
+
+headers = {
+    "accept": "application/json",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json"
+}
+
+payload = {
+    "model": "gpt-image-2",
+    "image": "https://platform.cdn.acedata.cloud/gpt-image/5c9fa635-8794-4c6d-88f8-584d7f4716c6_0.png",
+    "prompt": "Convert this infographic to dark mode: dark navy background, light cream text, deep gray rounded module cards with soft shadows. Keep all layout, structure, and module arrangement identical — only invert the color scheme.",
+    "size": "1024x1536"
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.text)
+```
+
+Svarsexempel:
+
+```json
+{
+  "success": true,
+  "task_id": "cb104e35-af1f-45be-9fac-b62e2b256753",
+  "trace_id": "3e5c77c6-6c2e-4bba-a42d-98ea049b58a8",
+  "created": 1777048863,
+  "data": [
+    {
+      "revised_prompt": "Convert this infographic to dark mode: dark navy background, light cream text, deep gray rounded module cards with soft shadows. Keep all layout, structure, and module arrangement identical — only invert the color scheme.",
+      "url": "https://platform.cdn.acedata.cloud/gpt-image/cb104e35-af1f-45be-9fac-b62e2b256753_0.png"
+    }
+  ],
+  "elapsed": 83.859
+}
+```
+
+Den redigerade bilden ser ut så här:
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/cb104e35-af1f-45be-9fac-b62e2b256753_0.png" width="500" className="m-auto" /></p>
+
+Du kan se att modulstrukturen, informationsavdelningarna och typografin har bevarats strikt, endast färgschemat har inverterats till ett mörkt tema.
+
+> **Tips**: `image`-fältet kan också vara en lista, t.ex. `"image": ["url1", "url2", "url3"]`, upp till 16 bilder samtidigt, så att modellen kan referera till flera bilder för redigering.
+
+### Anropsmetod 2: JSON + flera referensbilder
+
+`gpt-image-2` stöder att referera till flera bilder samtidigt för att generera slutresultatet, till exempel att kombinera flera produktbilder till en presentkorg:
+
+```python
+payload = {
+    "model": "gpt-image-2",
+    "image": [
+        "https://example.com/item1.png",
+        "https://example.com/item2.png",
+        "https://example.com/item3.png"
+    ],
+    "prompt": "Combine all the items above into a single 'Relax & Unwind' gift basket on a clean white background, photorealistic, soft natural lighting.",
+    "size": "1024x1024"
+}
+```
+
+### Scenarieexempel: Byt stil + behåll struktur
+
+Här är ett annat exempel där en träbokhylla byts ut mot en modern flytande hylla, men där antalet och arrangemanget av böcker på varje hyllplan bevaras exakt.
+
+Originalbild (träbokhylla genererad med `gpt-image-2`):
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/141970f0-65fb-4ec8-ab7d-9be173641350_0.png" width="500" className="m-auto" /></p>
+
+Anrop:
+
+```python
+payload = {
+    "model": "gpt-image-2",
+    "image": "https://platform.cdn.acedata.cloud/gpt-image/141970f0-65fb-4ec8-ab7d-9be173641350_0.png",
+    "prompt": "Replace the wooden bookshelf with a sleek modern white floating shelf mounted on a pastel blue wall. Keep the exact same arrangement of books (1 book on top, 3 in middle, 7 on bottom). Add a small potted succulent on the top shelf next to the book. Bright airy daylight from the left.",
+    "size": "1024x1024"
+}
+```
+
+Redigeringsresultat (`task_id`: `e9544dba-727e-44a2-81e1-223d49869380`):
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/e9544dba-727e-44a2-81e1-223d49869380_0.png" width="500" className="m-auto" /></p>
+
+Du kan se att stil och miljö har bytts ut enligt prompten, men antalet böcker på varje hyllplan (1 / 3 / 7) är strikt bevarat, och en liten suckulent har lagts till enligt instruktion.
+
+### Anropsmetod 3: multipart/form-data (kompatibel med OpenAI SDK)
+
+Om du redan använder den officiella OpenAI Python SDK fungerar den traditionella `multipart/form-data`-uppladdningen också, bara byt `model` till `gpt-image-2`:
+
+```python
+import base64
+from openai import OpenAI
+client = OpenAI()
+
+result = client.images.edit(
+    model="gpt-image-2",
+    image=[open("test.png", "rb")],
+    prompt="Convert this image to dark mode while keeping the layout intact."
+)
+
+image_base64 = result.data[0].b64_json
+image_bytes = base64.b64decode(image_base64)
+with open("edited.png", "wb") as f:
+    f.write(image_bytes)
+```
+
+Vid användning av SDK måste du först exportera två miljövariabler, `OPENAI_BASE_URL` sätts till `https://api.acedata.cloud/openai` och `OPENAI_API_KEY` till den token du fått:
+
+```shell
+export OPENAI_BASE_URL=https://api.acedata.cloud/openai
+export OPENAI_API_KEY={token}
+```
+
+## Nano Banana serien
+
+`nano-banana` serien är också ansluten till `/openai/images/edits` för redigeringsscenarier, byt bara `model` till någon av nedanstående:
+
+| Modell | Kostnad (Credits / gång) | Användningsområde |
+| --- | --- | --- |
+| `nano-banana` | 0.14 | Vanlig bildredigering, snabbast och billigast |
+| `nano-banana-2` | 0.28 | Märkbart bättre kvalitet och detaljer |
+| `nano-banana-pro` | 0.35 | Flaggskeppet i serien, bäst bevarande av struktur, text och stil |
+
+> **Viktigt: stödda parametrar**
+>
+> Nano Banana är ansluten via en adapter till OpenAI-protokollet och stöder endast följande parametrar: `model`, `prompt`, `image`.
+>
+> - `image` kan skickas som fil via `multipart/form-data` (omvandlas internt till `data:<mime>;base64,...` för upstream) eller som en URL-sträng i formulärfältet.
+> - Parametrar som `mask`, `n`, `size`, `response_format` stöds inte och ignoreras.
+> - Svar följer OpenAI-formatet (`data[].url`), men `created` är alltid `0`, och `b64_json` returneras inte; `revised_prompt` är alltid samma som original `prompt`.
+
+### Anrop via formulär + bild-URL
+
+```shell
+curl -X POST "https://api.acedata.cloud/openai/images/edits" \
+  -H "Authorization: Bearer {token}" \
+  -F "model=nano-banana" \
+  -F "prompt=add a green leaf on top of the apple" \
+  -F "image=https://platform.cdn.acedata.cloud/nanobanana/6870b330-65c4-436c-bb80-819fdae7a7a4.png"
+```
+
+Svarsexempel:
+
+```json
+{
+  "created": 0,
+  "data": [
+    {
+      "url": "https://platform.cdn.acedata.cloud/nanobanana/311e95b6-5eb1-4c4a-8ee6-0cb03ee44f61.jpeg",
+      "revised_prompt": "add a green leaf on top of the apple"
+    }
+  ]
+}
+```
+
+Redigerad bild:
+
+<p><img src="https://platform.cdn.acedata.cloud/nanobanana/311e95b6-5eb1-4c4a-8ee6-0cb03ee44f61.jpeg" width="500" className="m-auto" /></p>
+
+### Anrop via formulär + lokal fil
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/openai/images/edits"
+
+headers = {
+    "authorization": "Bearer {token}"
+}
+
+files = {
+    "image": open("apple.png", "rb"),
+}
+data = {
+    "model": "nano-banana-pro",
+    "prompt": "add a green leaf on top of the apple"
+}
+
+response = requests.post(url, headers=headers, files=files, data=data)
+print(response.text)
+```
+
+### Asynkron callback
+
+`callback_url`-asynkron callback-mekanism fungerar även för nano-banana, anropsflödet är identiskt med andra modeller, se avsnittet [Asynkron callback](#asynkron-callback) nedan.
+
+## Grundläggande användning
+
+Härnäst kan du använda kod för att anropa API:et, nedan är ett exempel med CURL:
 
 ```curl
 curl -s -D >(grep -i x-request-id >&2) \
@@ -31,11 +280,11 @@ curl -s -D >(grep -i x-request-id >&2) \
   -F 'prompt=Create a lovely gift basket with these this items in it'
 ```
 
-Vid första användning av detta gränssnitt behöver vi fylla i minst fyra fält. Ett är `authorization`, som du kan välja direkt från rullgardinsmenyn. En annan parameter är `model`, där `model` är den OpenAI-modell vi väljer att använda. Här har vi huvudsakligen 1 typ av modell, detaljer kan ses i de modeller vi tillhandahåller. En annan parameter är `prompt`, där `prompt` är den text vi anger för att generera bilden. Den sista parametern är `image`, som är sökvägen till den bild som ska redigeras, som visas nedan:
+Vid första användningen av detta gränssnitt behöver vi fylla i fyra saker: en `authorization` som väljs direkt i dropdown-menyn; en `model` som är den modellkategori vi vill använda från OpenAI:s officiella modeller (här finns huvudsakligen en modell, se vår modellöversikt); en `prompt` som är textinstruktionen för bildgenerering; och slutligen `image` som är sökvägen till den bild som ska redigeras, exempelbilden visas nedan:
 
 <p><img src="https://cdn.acedata.cloud/jw9iwu.png" width="500" className="m-auto" /></p>
 
-Ett motsvarande exempel på Python-anrop:
+Samma anrop i Python:
 
 ```python
 import base64
@@ -59,39 +308,39 @@ result = client.images.edit(
 image_base64 = result.data[0].b64_json
 image_bytes = base64.b64decode(image_base64)
 
-# Save the image to a file
+# Spara bilden till fil
 with open("gift-basket.png", "wb") as f:
     f.write(image_bytes)
 ```
 
-För att använda Python-anropet behöver vi först importera två miljövariabler, en `OPENAI_BASE_URL`, som kan sättas till `https://api.acedata.cloud/openai`, och en annan för autentisering `OPENAI_API_KEY`, vars värde hämtas från `authorization`. På Mac OS kan du ställa in miljövariablerna med följande kommando:
+Vid Python-anrop behöver vi först exportera två miljövariabler: `OPENAI_BASE_URL` som kan sättas till `https://api.acedata.cloud/openai` och `OPENAI_API_KEY` som är den token vi fått från `authorization`. På Mac OS kan du sätta miljövariablerna så här:
 
 ```shell
 export OPENAI_BASE_URL=https://api.acedata.cloud/openai
 export OPENAI_API_KEY={token} 
 ```
 
-Efter anropet kommer vi att se att en bild `gift-basket.png` genereras i den aktuella katalogen, med följande resultat:
+Efter anropet genereras en bildfil `gift-basket.png` i aktuell katalog, resultatet ser ut så här:
 
 <p><img src="https://cdn.acedata.cloud/574s8h.png" width="500" className="m-auto" /></p>
 
-Så här har vi slutfört redigeringsoperationen av bilden. För närvarande stöder den officiella Edits-uppgiften endast två modeller, nämligen: `dall-e-2`, `gpt-image-1`.
+Så här har vi slutfört bildredigeringsoperationen. För närvarande stöder Edits API tre modeller: `dall-e-2`, `gpt-image-1` och `gpt-image-2`, där `gpt-image-2` är den rekommenderade modellen, se avsnittet [GPT-Image-2 modellen](#gpt-image-2-modellen) ovan.
 
-## Asynkron Återkoppling
+## Asynkron callback
 
-Eftersom OpenAI Images Edits API:s bildredigering kan ta relativt lång tid, om API:et inte svarar under en längre tid, kommer HTTP-förfrågan att hålla anslutningen öppen, vilket leder till extra systemresursförbrukning. Därför erbjuder detta API också stöd för asynkron återkoppling.
+Eftersom OpenAI Images Edits API kan ta relativt lång tid att redigera bilder, och om API:et inte svarar under lång tid hålls HTTP-anslutningen öppen vilket kan orsaka extra systemresursförbrukning, erbjuder detta API även stöd för asynkron callback.
 
-Det övergripande flödet är: när klienten initierar en begäran, specificerar den ett extra fält `callback_url`. Efter att klienten har initierat API-begäran kommer API:et omedelbart att returnera ett resultat som innehåller ett `task_id`-fält, vilket representerar det aktuella uppgifts-ID:t. När uppgiften är slutförd kommer resultatet av bildredigeringen att skickas till klientens angivna `callback_url` i POST JSON-format, vilket också inkluderar `task_id`-fältet, så att uppgiftsresultatet kan kopplas samman med ID:t.
+Flödet är: klienten skickar med ett extra fält `callback_url` vid förfrågan. API:et svarar omedelbart med ett svar som innehåller ett `task_id` som identifierar uppgiften. När redigeringen är klar skickas resultatet som en POST med JSON till klientens angivna `callback_url`, där även `task_id` finns med så att resultatet kan kopplas till uppgiften.
 
-Låt oss förstå hur man gör detta genom ett exempel.
+Nedan följer ett exempel på hur detta fungerar.
 
-Först är Webhook-återkopplingen en tjänst som kan ta emot HTTP-förfrågningar. Utvecklare bör ersätta detta med URL:en till sin egen HTTP-server. För att underlätta demonstration använder vi en offentlig Webhook-exempelsida https://webhook.site/, där du kan öppna sidan för att få en Webhook-URL, som visas nedan:
+Först är webhook-callback en tjänst som kan ta emot HTTP-förfrågningar. Utvecklare bör ersätta med sin egen HTTP-server-URL. För demonstration används en offentlig webhook-tjänst https://webhook.site/, där du kan få en webhook-URL, som visas nedan:
 
 ![](https://cdn.acedata.cloud/cjjfly.png)
 
-Kopiera denna URL så kan den användas som Webhook. Exemplet här är `https://webhook.site/3d32690d-6780-4187-a65c-870061e8c8ab`.
+Kopiera denna URL och använd som webhook, i exemplet är det `https://webhook.site/3d32690d-6780-4187-a65c-870061e8c8ab`.
 
-Därefter kan vi ställa in fältet `callback_url` till ovanstående Webhook-URL och fylla i motsvarande parametrar, som i följande kod:
+Sedan kan vi ange fältet `callback_url` till ovanstående webhook-URL och fylla i övriga parametrar, som i följande kod:
 
 ```shell
 curl -X POST "https://api.acedata.cloud/v1/images/edits" \
@@ -102,7 +351,7 @@ curl -X POST "https://api.acedata.cloud/v1/images/edits" \
   -F "callback_url=https://webhook.site/3d32690d-6780-4187-a65c-870061e8c8ab"
 ```
 
-Efter anropet kan vi omedelbart få ett resultat, som följer:
+Efter anropet får du omedelbart ett svar som detta:
 
 ```json
 {
@@ -110,7 +359,7 @@ Efter anropet kan vi omedelbart få ett resultat, som följer:
 }
 ```
 
-Vänta en stund, så kan vi observera resultatet av bildredigeringen på Webhook-URL:en, som innehåller följande:
+Efter en stund kan du se resultatet på webhook-URL:en, innehållet ser ut så här:
 
 ```json
 {
@@ -128,19 +377,19 @@ Vänta en stund, så kan vi observera resultatet av bildredigeringen på Webhook
 }
 ```
 
-Vi kan se att resultatet innehåller ett `task_id`-fält, och `data`-fältet innehåller samma bildredigeringsresultat som vid synkront anrop. Genom `task_id`-fältet kan vi koppla uppgiften.
+Du kan se att svaret innehåller ett `task_id` och `data` med samma bildredigeringsresultat som vid synkront anrop, så att du kan koppla ihop uppgiften via `task_id`.
 
 ## Felhantering
 
-Vid anrop av API:et, om det uppstår fel, kommer API:et att returnera motsvarande felkod och meddelande. Till exempel:
+Vid anrop av API:et, om ett fel uppstår, returnerar API:et motsvarande felkod och meddelande, till exempel:
 
-- `400 token_mismatched`: Felaktig begäran, troligen på grund av saknade eller ogiltiga parametrar.
-- `400 api_not_implemented`: Felaktig begäran, troligen på grund av saknade eller ogiltiga parametrar.
-- `401 invalid_token`: Obefogad, ogiltig eller saknad autentiseringstoken.
-- `429 too_many_requests`: För många förfrågningar, du har överskridit hastighetsgränsen.
+- `400 token_mismatched`: Felaktig förfrågan, troligen saknade eller ogiltiga parametrar.
+- `400 api_not_implemented`: Felaktig förfrågan, troligen saknade eller ogiltiga parametrar.
+- `401 invalid_token`: Obefogad, ogiltig eller saknad auktoriseringstoken.
+- `429 too_many_requests`: För många förfrågningar, du har överskridit hastighetsbegränsningen.
 - `500 api_error`: Intern serverfel, något gick fel på servern.
 
-### Exempel på felrespons
+### Felrespons exempel
 
 ```json
 {
@@ -154,4 +403,5 @@ Vid anrop av API:et, om det uppstår fel, kommer API:et att returnera motsvarand
 ```
 
 ## Slutsats
-Genom detta dokument har du fått en förståelse för hur du enkelt kan använda den officiella OpenAI:s bildredigeringsfunktioner via OpenAI Images Edits API. Vi hoppas att detta dokument kan hjälpa dig att bättre integrera och använda API:et. Om du har några frågor, tveka inte att kontakta vårt tekniska supportteam.
+
+Med detta dokument har du fått en förståelse för hur du använder OpenAI Images Edits API för att enkelt använda den officiella OpenAI bildredigeringsfunktionen. Vi hoppas att dokumentet hjälper dig att bättre integrera och använda API:et. Vid frågor, vänligen kontakta vårt tekniska supportteam när som helst.
