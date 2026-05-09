@@ -1,9 +1,9 @@
 ---
-title: "OpenAI 圖片編輯 API 申請及使用"
+title: "OpenAI Images Edits API 申請及使用"
 description: "OpenAI generation 集成指南 - Ace Data Cloud"
 ---
 
-OpenAI 圖片編輯服務，可以傳入任意多張圖片和指令，輸出修改之後的圖片。
+OpenAI 圖片編輯服務，可以傳入任意多張圖片和指令，輸出修改之後的圖片。目前介面同時支援 `dall-e-2`、`gpt-image-1`、最新的 **`gpt-image-2`**，以及透過同一介面接入的 **`nano-banana` / `nano-banana-2` / `nano-banana-pro`** 系列模型。
 
 本文檔主要介紹 OpenAI Images Edits API 操作的使用流程，利用它我們可以輕鬆使用官方 OpenAI 圖像編輯功能。
 
@@ -17,9 +17,258 @@ OpenAI 圖片編輯服務，可以傳入任意多張圖片和指令，輸出修�
 
 在首次申請時會有免費額度贈送，可以免費使用該 API。
 
+## GPT-Image-2 模型
+
+`gpt-image-2` 在圖像編輯場景下相比 `gpt-image-1` 有非常明顯的提升：
+
+- **結構保持更穩定**：換皮膚、換配色、換背景時幾乎不會破壞原圖的版式與構圖。
+- **文字保留更準確**：資訊圖、海報、菜單等含文字的圖片在編輯後文字仍然清晰可讀。
+- **支援 URL 直傳**：除了傳統的 `multipart/form-data` 檔案上傳，`gpt-image-2` 還**額外支援以 JSON 方式傳入圖片 URL**，無需先把圖片下載到本地，非常適合服務端流水線接入。
+- **支援高解析度重繪**：可以傳入一張 1K 原圖，透過 `size` 參數請求 2K / 4K 輸出，模型會在編輯過程中同時完成放大。
+
+### 支援的 `size` 取值與計費檔位
+
+編輯介面對 `size` 的約束與生成介面完全一致——`gpt-image-2` 只需要 `size` 為 `auto`、空，或者符合 `WIDTHxHEIGHT` 格式，任何其他形態會返回 400。計費只分兩個檔位，與原圖解析度無關，只看 `size` 請求值：
+
+- **1K 標準價**：下表中任一 1K 推薦尺寸，或上游 1K 常見輸出別名（`1254x1254`、`1672x941`、`941x1672`）。
+- **其他檔位（1.5×）**：包括下表推薦的 2K / 4K 預設，以及你自定義傳入的任意 `WIDTHxHEIGHT`。
+
+上游對自定義尺寸的硬約束同樣適用：寬高均為 16 的倍數、長邊 ≤ 3840、總像素數 ≤ 8,294,400。
+
+| 比例 | 1K（標準價） | 2K推薦（×1.5） | 4K推薦（×1.5） |
+| --- | --- | --- | --- |
+| 1:1 | `1024x1024` | `2048x2048` | `2880x2880` |
+| 4:3 | `1536x1024` | `2048x1536` | `3264x2448` |
+| 3:4 | `1024x1536` | `1536x2048` | `2448x3264` |
+| 16:9 | `1792x1024` | `2048x1152` | `3840x2160` |
+| 9:16 | `1024x1792` | `1152x2048` | `2160x3840` |
+
+> 例如：原圖是 `1024x1024`，`size` 傳 `2048x2048` 時，模型會按編輯指令重繪並輸出 2K 圖，按「其他」檔位計費；`size` 傳 `3840x2160` 時輸出 4K 橫屏圖，同樣按「其他」計費；傳 `auto` 或省略則按 1K 標準價計費。
+
+> **關於 `n` 參數**
+>
+> `gpt-image-2` 編輯介面目前**不支援 `n > 1`**：該參數會被靜默忽略，無論傳 `n=1` 還是 `n=10`，單次請求都只會返回 1 張圖，並且只按 1 張計費。如果你需要一次拿到多張候選編輯結果，請**自行並發發起多次請求**。該限制同樣適用於 `gpt-image-1` / `gpt-image-1.5`，以及 `nano-banana` / `nano-banana-2` / `nano-banana-pro` 系列。`dall-e-2` 是目前唯一原生支援 `n > 1` 的編輯模型。
+
+下面透過兩個不同方位的真實範例感受 `gpt-image-2` 的編輯能力。
+
+### 呼叫方式一：JSON + 圖片 URL（推薦）
+
+直接以 `application/json` 方式發送請求，`image` 欄位填入一張圖片的 URL，模型會去抓取該圖片並按 `prompt` 進行編輯。
+
+例如，下面這張原圖是用 `gpt-image-2` 生成的科普圖鑑：
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/5c9fa635-8794-4c6d-88f8-584d7f4716c6_0.png" width="500" className="m-auto" /></p>
+
+我們希望把它改成「夜間模式」配色。可以這樣呼叫：
+
+```shell
+curl -X POST "https://api.acedata.cloud/openai/images/edits" \
+  -H "Authorization: Bearer {token}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-2",
+    "image": "https://platform.cdn.acedata.cloud/gpt-image/5c9fa635-8794-4c6d-88f8-584d7f4716c6_0.png",
+    "prompt": "Convert this infographic to dark mode: dark navy background, light cream text, deep gray rounded module cards with soft shadows. Keep all layout, structure, and module arrangement identical — only invert the color scheme.",
+    "size": "1024x1536"
+  }'
+```
+
+或者用 Python：
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/openai/images/edits"
+
+headers = {
+    "accept": "application/json",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json"
+}
+
+payload = {
+    "model": "gpt-image-2",
+    "image": "https://platform.cdn.acedata.cloud/gpt-image/5c9fa635-8794-4c6d-88f8-584d7f4716c6_0.png",
+    "prompt": "Convert this infographic to dark mode: dark navy background, light cream text, deep gray rounded module cards with soft shadows. Keep all layout, structure, and module arrangement identical — only invert the color scheme.",
+    "size": "1024x1536"
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.text)
+```
+
+返回結果如下：
+
+```json
+{
+  "success": true,
+  "task_id": "cb104e35-af1f-45be-9fac-b62e2b256753",
+  "trace_id": "3e5c77c6-6c2e-4bba-a42d-98ea049b58a8",
+  "created": 1777048863,
+  "data": [
+    {
+      "revised_prompt": "Convert this infographic to dark mode: dark navy background, light cream text, deep gray rounded module cards with soft shadows. Keep all layout, structure, and module arrangement identical — only invert the color scheme.",
+      "url": "https://platform.cdn.acedata.cloud/gpt-image/cb104e35-af1f-45be-9fac-b62e2b256753_0.png"
+    }
+  ],
+  "elapsed": 83.859
+}
+```
+
+編輯之後的圖片如下：
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/cb104e35-af1f-45be-9fac-b62e2b256753_0.png" width="500" className="m-auto" /></p>
+
+可以看到模組結構、資訊分區、字體排版都被嚴格保留，只有配色被反轉為深色主題。
+
+> **提示**：`image` 欄位也支援傳入一個陣列，例如 `"image": ["url1", "url2", "url3"]`，最多可同時傳入 16 張參考圖，讓模型綜合參考多張圖片進行編輯。
+
+### 呼叫方式二：JSON + 多張參考圖
+
+`gpt-image-2` 支援同時參考多張圖片來生成最終結果，例如把多張產品照合成到一張禮物籃中：
+
+```python
+payload = {
+    "model": "gpt-image-2",
+    "image": [
+        "https://example.com/item1.png",
+        "https://example.com/item2.png",
+        "https://example.com/item3.png"
+    ],
+    "prompt": "Combine all the items above into a single 'Relax & Unwind' gift basket on a clean white background, photorealistic, soft natural lighting.",
+    "size": "1024x1024"
+}
+```
+
+### 場景示例：換風格 + 保持結構
+
+下面是另一個例子，把一張木質書架替換為現代浮架，但嚴格保留每層書本的數量和排列。
+
+原圖（用 `gpt-image-2` 生成的木質書架）：
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/141970f0-65fb-4ec8-ab7d-9be173641350_0.png" width="500" className="m-auto" /></p>
+
+呼叫：
+
+```python
+payload = {
+    "model": "gpt-image-2",
+    "image": "https://platform.cdn.acedata.cloud/gpt-image/141970f0-65fb-4ec8-ab7d-9be173641350_0.png",
+    "prompt": "Replace the wooden bookshelf with a sleek modern white floating shelf mounted on a pastel blue wall. Keep the exact same arrangement of books (1 book on top, 3 in middle, 7 on bottom). Add a small potted succulent on the top shelf next to the book. Bright airy daylight from the left.",
+    "size": "1024x1024"
+}
+```
+
+編輯結果（`task_id`: `e9544dba-727e-44a2-81e1-223d49869380`）：
+
+<p><img src="https://platform.cdn.acedata.cloud/gpt-image/e9544dba-727e-44a2-81e1-223d49869380_0.png" width="500" className="m-auto" /></p>
+
+可以看到風格和環境都按提示詞進行了完整替換，但每層書本的數量（1 / 3 / 7）依舊嚴格保留，並且按要求增加了一盆多肉植物。
+
+### 呼叫方式三：multipart/form-data（相容 OpenAI SDK）
+
+如果你已經在使用官方 OpenAI Python SDK，原有的 `multipart/form-data` 上傳方式同樣適用，只需把 `model` 改為 `gpt-image-2`：
+
+```python
+import base64
+from openai import OpenAI
+client = OpenAI()
+
+result = client.images.edit(
+    model="gpt-image-2",
+    image=[open("test.png", "rb")],
+    prompt="Convert this image to dark mode while keeping the layout intact."
+)
+
+image_base64 = result.data[0].b64_json
+image_bytes = base64.b64decode(image_base64)
+with open("edited.png", "wb") as f:
+    f.write(image_bytes)
+```
+
+使用 SDK 時需要先導入兩個環境變數，`OPENAI_BASE_URL` 設為 `https://api.acedata.cloud/openai`，`OPENAI_API_KEY` 設為申請到的 token：
+
+```shell
+export OPENAI_BASE_URL=https://api.acedata.cloud/openai
+export OPENAI_API_KEY={token}
+```
+
+## Nano Banana 系列模型
+
+`nano-banana` 系列在編輯場景下同樣接入了 `/openai/images/edits`，把 `model` 改為下表中的任意一個即可。
+
+| 模型 | 計費（Credits / 次） | 適用場景 |
+| --- | --- | --- |
+| `nano-banana` | 0.14 | 普通圖像編輯，速度最快、成本最低 |
+| `nano-banana-2` | 0.28 | 品質與細節明顯提升 |
+| `nano-banana-pro` | 0.35 | 系列中的旗艦，結構、文字、風格保留最佳 |
+
+> **重要：參數支援範圍**
+>
+> Nano Banana 透過適配層接入 OpenAI 協議，僅支援以下參數：`model`、`prompt`、`image`。
+>
+> - `image` 既可以透過 `multipart/form-data` 上傳檔案（worker 內部會轉成 `data:<mime>;base64,...` 傳給上游），也可以透過表單欄位直接傳圖片 URL 字串。
+> - 不支援 `mask`、`n`、`size`、`response_format` 等參數；填了也會被忽略。
+> - 返回結構遵循 OpenAI 格式（`data[].url`），但 `created` 固定為 `0`，且不會返回 `b64_json`，`revised_prompt` 始終等於原始 `prompt`。
+
+### 透過表單 + 圖片 URL 呼叫
+
+```shell
+curl -X POST "https://api.acedata.cloud/openai/images/edits" \
+  -H "Authorization: Bearer {token}" \
+  -F "model=nano-banana" \
+  -F "prompt=add a green leaf on top of the apple" \
+  -F "image=https://platform.cdn.acedata.cloud/nanobanana/6870b330-65c4-436c-bb80-819fdae7a7a4.png"
+```
+
+返回結果如下：
+
+```json
+{
+  "created": 0,
+  "data": [
+    {
+      "url": "https://platform.cdn.acedata.cloud/nanobanana/311e95b6-5eb1-4c4a-8ee6-0cb03ee44f61.jpeg",
+      "revised_prompt": "add a green leaf on top of the apple"
+    }
+  ]
+}
+```
+
+編輯後的圖片：
+
+<p><img src="https://platform.cdn.acedata.cloud/nanobanana/311e95b6-5eb1-4c4a-8ee6-0cb03ee44f61.jpeg" width="500" className="m-auto" /></p>
+
+### 透過表單 + 本地檔案呼叫
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/openai/images/edits"
+
+headers = {
+    "authorization": "Bearer {token}"
+}
+
+files = {
+    "image": open("apple.png", "rb"),
+}
+data = {
+    "model": "nano-banana-pro",
+    "prompt": "add a green leaf on top of the apple"
+}
+
+response = requests.post(url, headers=headers, files=files, data=data)
+print(response.text)
+```
+
+### 非同步回調
+
+`callback_url` 非同步回調機制對 nano-banana 同樣有效，呼叫流程與其它模型完全一致，詳見下文 [非同步回調](#非同步回調) 一節。
+
 ## 基本使用
 
-接下來就可以使用代碼進行調用，下方是通過CURL進行調用：
+接下來就可以使用程式碼進行呼叫，下方是透過 CURL 進行呼叫：
 
 ```curl
 curl -s -D >(grep -i x-request-id >&2) \
@@ -31,11 +280,11 @@ curl -s -D >(grep -i x-request-id >&2) \
   -F 'prompt=Create a lovely gift basket with these this items in it'
 ```
 
-在第一次使用該接口時，我們至少需要填寫四個內容，一個是 `authorization`，直接在下拉列表裡面選擇即可。另一個參數是 `model`， `model` 就是我們選擇使用 OpenAI 官網模型類別，這裡我們主要有 1 種模型，詳情可以看我們提供的模型。還有一個參數是`prompt`，`prompt` 是我們輸入要生成圖像的提示詞。最後一個參數是`image`，這個參數需要編輯的圖片路徑，需要編輯的圖片如下圖所示：
+在第一次使用該介面時，我們至少需要填寫四個內容，一個是 `authorization`，直接在下拉列表裡面選擇即可。另一個參數是 `model`， `model` 就是我們選擇使用 OpenAI 官網模型類別，這裡我們主要有 1 種模型，詳情可以看我們提供的模型。還有一個參數是`prompt`，`prompt` 是我們輸入要生成圖像的提示詞。最後一個參數是`image`，這個參數需要編輯的圖片路徑，需要編輯的圖片如下圖所示：
 
 <p><img src="https://cdn.acedata.cloud/jw9iwu.png" width="500" className="m-auto" /></p>
 
-相同調用效果的Python 範例調用代碼：
+相同呼叫效果的 Python 範例呼叫程式碼：
 
 ```python
 import base64
@@ -64,34 +313,34 @@ with open("gift-basket.png", "wb") as f:
     f.write(image_bytes)
 ```
 
-使用Python調用全我們需要先導入兩個環境變量，一個`OPENAI_BASE_URL`，可以設置為`https://api.acedata.cloud/openai`，還有一個使用憑證變量`OPENAI_API_KEY`，這個值是從`authorization`獲取到的，在Mac OS可以通過以下命令設置環境變量：
+使用 Python 呼叫時我們需要先導入兩個環境變數，一個 `OPENAI_BASE_URL`，可以設定為 `https://api.acedata.cloud/openai`，還有一個使用憑證變數 `OPENAI_API_KEY`，這個值是從 `authorization` 獲取到的，在 Mac OS 可以透過以下指令設定環境變數：
 
 ```shell
 export OPENAI_BASE_URL=https://api.acedata.cloud/openai
 export OPENAI_API_KEY={token} 
 ```
 
-調用之後，我們發現會在當前目錄下生成一張圖片`gift-basket.png`，具體的結果如下：
+呼叫之後，我們發現會在當前目錄下生成一張圖片 `gift-basket.png`，具體的結果如下：
 
 <p><img src="https://cdn.acedata.cloud/574s8h.png" width="500" className="m-auto" /></p>
 
-這樣我們就完成了對圖片的編輯操作，目前官方Edits任務只支持兩種模型，分別為：`dall-e-2`，`gpt-image-1`。
+這樣我們就完成了對圖片的編輯操作，目前 Edits 介面共支援三種模型：`dall-e-2`、`gpt-image-1` 和 `gpt-image-2`，其中 `gpt-image-2` 是當前推薦使用的模型，詳見上文 [GPT-Image-2 模型](#gpt-image-2-模型) 一節。
 
 ## 非同步回調
 
-由於 OpenAI Images Edits API 編輯圖片的時間可能相對較長，如果 API 長時間無響應，HTTP 請求會一直保持連接，導致額外的系統資源消耗，所以本 API 也提供了非同步回調的支持。
+由於 OpenAI Images Edits API 編輯圖片的時間可能相對較長，如果 API 長時間無回應，HTTP 請求會一直保持連線，導致額外的系統資源消耗，所以本 API 也提供了非同步回調的支援。
 
-整體流程是：客戶端發起請求的時候，額外指定一個 `callback_url` 欄位，客戶端發起 API 請求之後，API 會立馬返回一個結果，包含一個 `task_id` 的欄位信息，代表當前的任務 ID。當任務完成之後，編輯圖片的結果會通過 POST JSON 的形式發送到客戶端指定的 `callback_url`，其中也包括了 `task_id` 欄位，這樣任務結果就可以通過 ID 關聯起來了。
+整體流程是：用戶端發起請求的時候，額外指定一個 `callback_url` 欄位，用戶端發起 API 請求之後，API 會立刻返回一個結果，包含一個 `task_id` 的欄位資訊，代表當前的任務 ID。當任務完成之後，編輯圖片的結果會透過 POST JSON 的形式發送到用戶端指定的 `callback_url`，其中也包括了 `task_id` 欄位，這樣任務結果就可以透過 ID 關聯起來了。
 
-下面我們通過示例來了解下具體怎樣操作。
+下面我們透過範例來了解下具體怎麼操作。
 
-首先，Webhook 回調是一個可以接收 HTTP 請求的服務，開發者應該替換為自己搭建的 HTTP 伺服器的 URL。此處為了方便演示，使用一個公開的 Webhook 樣例網站 https://webhook.site/，打開該網站即可得到一個 Webhook URL，如圖所示：
+首先，Webhook 回調是一個可以接收 HTTP 請求的服務，開發者應該替換為自己搭建的 HTTP 伺服器的 URL。此處為了方便演示，使用一個公開的 Webhook 範例網站 https://webhook.site/，打開該網站即可得到一個 Webhook URL，如圖所示：
 
 ![](https://cdn.acedata.cloud/cjjfly.png)
 
-將此 URL 複製下來，就可以作為 Webhook 來使用，此處的樣例為 `https://webhook.site/3d32690d-6780-4187-a65c-870061e8c8ab`。
+將此 URL 複製下來，就可以作為 Webhook 來使用，此處的範例為 `https://webhook.site/3d32690d-6780-4187-a65c-870061e8c8ab`。
 
-接下來，我們可以設置欄位 `callback_url` 為上述 Webhook URL，同時填入相應的參數，如以下代碼所示：
+接下來，我們可以設定欄位 `callback_url` 為上述 Webhook URL，同時填入相應的參數，如以下程式碼所示：
 
 ```shell
 curl -X POST "https://api.acedata.cloud/v1/images/edits" \
@@ -102,7 +351,7 @@ curl -X POST "https://api.acedata.cloud/v1/images/edits" \
   -F "callback_url=https://webhook.site/3d32690d-6780-4187-a65c-870061e8c8ab"
 ```
 
-調用之後，可以發現會立即得到一個結果，如下：
+呼叫之後，可以發現會立即得到一個結果，如下：
 
 ```json
 {
@@ -128,19 +377,19 @@ curl -X POST "https://api.acedata.cloud/v1/images/edits" \
 }
 ```
 
-可以看到結果中有一個 `task_id` 欄位，`data` 欄位包含了和同步調用一樣的圖片編輯結果，通過 `task_id` 欄位即可實現任務的關聯。
+可以看到結果中有一個 `task_id` 欄位，`data` 欄位包含了和同步呼叫一樣的圖片編輯結果，透過 `task_id` 欄位即可實現任務的關聯。
 
 ## 錯誤處理
 
-在調用 API 時，如果遇到錯誤，API 會返回相應的錯誤代碼和信息。例如：
+在呼叫 API 時，如果遇到錯誤，API 會返回相應的錯誤代碼和資訊。例如：
 
-- `400 token_mismatched`：Bad request, possibly due to missing or invalid parameters.
-- `400 api_not_implemented`：Bad request, possibly due to missing or invalid parameters.
-- `401 invalid_token`：Unauthorized, invalid or missing authorization token.
-- `429 too_many_requests`：Too many requests, you have exceeded the rate limit.
-- `500 api_error`：Internal server error, something went wrong on the server.
+- `400 token_mismatched`：Bad request，可能由於缺少或無效參數。
+- `400 api_not_implemented`：Bad request，可能由於缺少或無效參數。
+- `401 invalid_token`：Unauthorized，無效或缺少授權憑證。
+- `429 too_many_requests`：請求過多，您已超過速率限制。
+- `500 api_error`：內部伺服器錯誤，伺服器端出現問題。
 
-### 錯誤響應示例
+### 錯誤回應範例
 
 ```json
 {
@@ -154,4 +403,5 @@ curl -X POST "https://api.acedata.cloud/v1/images/edits" \
 ```
 
 ## 結論
-通過本文檔，您已經了解了如何使用 OpenAI Images Edits API 輕鬆使用官方 OpenAI 的圖像編輯功能。希望本文檔能幫助您更好地對接和使用該 API。如有任何問題，請隨時聯繫我們的技術支持團隊。
+
+透過本文檔，您已經了解了如何使用 OpenAI Images Edits API 輕鬆使用官方 OpenAI 的圖像編輯功能。希望本文檔能幫助您更好地對接和使用該 API。如有任何問題，請隨時聯繫我們的技術支援團隊。
