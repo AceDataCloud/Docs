@@ -1,0 +1,136 @@
+---
+title: "Instrucciones para la integración de Fish TTS API"
+description: "Fish music generation 集成指南 - Ace Data Cloud"
+---
+
+Este documento presenta las instrucciones para la integración de Fish TTS API. Esta interfaz es completamente compatible con la [OpenAPI oficial de Fish Audio](https://docs.fish.audio/text-to-speech/text-to-speech), por lo que se puede migrar directamente el código que originalmente llamaba a `https://api.fish.audio/v1/tts` a `https://api.acedata.cloud/fish/tts`, solo reemplazando la información de autenticación sin necesidad de modificar la estructura del cuerpo de la solicitud.
+
+## Proceso de solicitud
+
+Para usar la API, primero debe solicitar el servicio correspondiente en la página de [Fish TTS API](https://platform.acedata.cloud/services/caf99abc-ddcf-4714-b2a5-862d9b469509). Al ingresar a la página, haga clic en el botón «Acquire».
+
+Si aún no ha iniciado sesión o registrado, será redirigido automáticamente a la página de inicio de sesión para registrarse e iniciar sesión. Después de iniciar sesión o registrarse, volverá automáticamente a la página actual.
+
+Al solicitar por primera vez, se otorgará un crédito gratuito para usar la API sin costo.
+
+## Diferencias con la API oficial
+
+Esta API mantiene los campos de solicitud y respuesta oficiales de Fish Audio, con algunas mejoras menores para facilitar una mejor integración en nuestra plataforma:
+
+- **Método de autenticación**: se utiliza `Authorization: Bearer {token}`, donde `{token}` es la clave solicitada en nuestra plataforma, no la clave oficial de Fish.
+- **Selección del modelo TTS**: se especifica mediante el encabezado HTTP `model`, con opciones `s1` o `s2-pro`, siendo `s2-pro` el valor predeterminado. Esto es consistente con Fish oficial.
+- **Valor predeterminado de `latency`**: la API upstream `/fish/v1/tts` devuelve error si no se envía `latency`; esta interfaz automáticamente asigna `latency=normal` cuando no se especifica, manteniendo el comportamiento predeterminado oficial.
+- **Callback asíncrono (extensión de la plataforma)**: al enviar un campo adicional `callback_url` en el cuerpo de la solicitud, la API devuelve inmediatamente `{task_id, started_at}` y, una vez completado el procesamiento upstream, realiza un callback POST JSON con el resultado completo `{audio_url, ...}` a esa URL. La API oficial de Fish no soporta este campo; incluirlo solo activará nuestro proceso asíncrono.
+
+Exceptuando estas diferencias, todos los campos del cuerpo de la solicitud TTS (`text`, `reference_id`, `references`, `prosody`, `format`, `sample_rate`, `mp3_bitrate`, `chunk_length`, `temperature`, `top_p`, etc.) se transmiten directamente al upstream, con un comportamiento idéntico a la documentación oficial.
+
+## Uso básico
+
+La solicitud mínima solo requiere enviar el campo `text`. Ejemplo en CURL:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。"
+  }'
+```
+
+Ejemplo de respuesta:
+
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/8a72ff9840234006a9f74cb2fa04f978.mp3"
+}
+```
+
+La respuesta contiene directamente los campos oficiales de Fish, incluyendo:
+
+- `audio_url`: URL del audio generado, que se puede descargar o reproducir directamente.
+- `latency_ms` (opcional): tiempo de procesamiento upstream en milisegundos.
+
+Si desea usar una voz clonada, puede incluir `reference_id` en el cuerpo de la solicitud:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "reference_id": "d7900c21663f485ab63ebdb7e5905036",
+    "format": "mp3",
+    "sample_rate": 44100
+  }'
+```
+
+## Callback asíncrono
+
+Dado que la generación de texto largo en Fish TTS puede tardar, mantener conexiones largas consume recursos del sistema. Esta API ofrece capacidad de callback asíncrono (una extensión respecto a la API oficial de Fish).
+
+El flujo es: el cliente envía la solicitud incluyendo el campo `callback_url` en el cuerpo; la API responde inmediatamente con un `task_id`; cuando el procesamiento upstream finaliza, se envía un POST JSON con los campos finales como `audio_url` a la URL indicada en `callback_url`, incluyendo el mismo `task_id` para correlacionar el resultado con la tarea original.
+
+Ejemplo de solicitud:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "callback_url": "https://webhook.site/4815f79f-a40f-4078-ac85-1cc126b6bb34"
+  }'
+```
+
+Respuesta inmediata:
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "started_at": "2025-05-09T12:34:56.789Z"
+}
+```
+
+Después de un momento, el `callback_url` recibirá el resultado completo:
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "audio_url": "https://platform.r2.fish.audio/task/b627c2f7d38a4083a837570ba6d0962f.mp3"
+}
+```
+
+También puede usar la [Fish Tasks API](https://platform.acedata.cloud/documents/fc541fac-a941-47fd-b6f7-48d6cb9da523) para consultar el estado de la tarea mediante `task_id`.
+
+## Manejo de errores
+
+Esta interfaz conserva los códigos de estado HTTP oficiales de Fish, pero el cuerpo de la respuesta utiliza un formato unificado de la plataforma para mantener consistencia con las series `/fish/audios` y `/fish/voices`:
+
+- `400 token_mismatched`: Solicitud incorrecta, posiblemente por parámetros faltantes o inválidos.
+- `400 api_not_implemented`: Solicitud incorrecta, posiblemente por parámetros faltantes o inválidos.
+- `401 invalid_token`: No autorizado, token de autorización inválido o ausente.
+- `429 too_many_requests`: Demasiadas solicitudes, ha excedido el límite de tasa.
+- `500 api_error`: Error interno del servidor, ocurrió un problema en el servidor.
+
+### Ejemplo de respuesta de error
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "api_error",
+    "message": "fetch failed"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+## Conclusión
+
+Fish TTS API es completamente compatible con la OpenAPI oficial de Fish Audio, permitiendo migrar proyectos existentes sin cambios en el código, y al mismo tiempo disfrutar de la autenticación unificada, facturación de uso y capacidad de callback asíncrono que ofrece la plataforma. Se recomienda usar el callback asíncrono para la generación de textos largos para evitar el consumo de recursos por conexiones prolongadas.

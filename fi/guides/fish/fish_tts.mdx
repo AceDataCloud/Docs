@@ -1,0 +1,136 @@
+---
+title: "Fish TTS API -liitännän ohjeet"
+description: "Fish music generation 集成指南 - Ace Data Cloud"
+---
+
+Tässä dokumentissa esitellään Fish TTS API:n liitäntäohjeet. Tämä rajapinta on täysin yhteensopiva [Fish Audio virallisen OpenAPI:n](https://docs.fish.audio/text-to-speech/text-to-speech) kanssa, ja voit siirtää koodisi, joka aiemmin kutsui `https://api.fish.audio/v1/tts`, suoraan osoitteeseen `https://api.acedata.cloud/fish/tts` vaihtamalla vain tunnistautumistiedot ilman, että pyyntökehon rakennetta tarvitsee muuttaa.
+
+## Hakuprosessi
+
+API:n käyttämiseksi sinun tulee ensin hakea palvelua vastaavalta sivulta [Fish TTS API](https://platform.acedata.cloud/services/caf99abc-ddcf-4714-b2a5-862d9b469509). Sivulle siirryttyäsi klikkaa "Acquire"-painiketta.
+
+Jos et ole vielä kirjautunut sisään tai rekisteröitynyt, sinut ohjataan automaattisesti kirjautumissivulle rekisteröitymään tai kirjautumaan sisään. Kirjautumisen jälkeen palaat automaattisesti tälle sivulle.
+
+Ensimmäisellä hakukerralla saat ilmaisen käyttökiintiön, joten API:a voi käyttää ilmaiseksi.
+
+## Erot viralliseen API:in verrattuna
+
+Tämä API säilyttää Fish Audio virallisen pyynnön ja vastauksen kentät, mutta tarjoaa seuraavia pieniä parannuksia, jotka helpottavat integraatiota alustallamme:
+
+- **Tunnistautumistapa**: Käytetään `Authorization: Bearer {token}`, jossa `{token}` on tämän alustan kautta haettu avain, ei Fishin virallinen avain.
+- **TTS-mallin valinta**: Määritetään HTTP-pyynnön otsikossa `model`, vaihtoehtoina `s1` tai `s2-pro`, oletuksena `s2-pro`. Tämä on sama kuin Fishin virallisessa API:ssa.
+- **`latency` oletusarvo**: Ylävirran `/fish/v1/tts` palauttaa virheen, jos `latency`-kenttää ei lähetetä. Tämä rajapinta lisää automaattisesti `latency=normal`, mikä vastaa Fishin virallista oletuskäyttäytymistä.
+- **Asynkroninen callback (alustan laajennus)**: Jos pyyntökehoon lisätään ylimääräinen `callback_url`-kenttä, rajapinta palauttaa välittömästi `{task_id, started_at}` ja kun ylävirta on valmis, se kutsuu annettua URL:ia POST-muotoisella JSON-vastauksella, joka sisältää täydelliset tiedot kuten `{audio_url, ...}`. Fishin virallinen rajapinta ei tue tätä kenttää, sen lisääminen käynnistää vain meidän asynkronisen työnkulun.
+
+Muiden kenttien (`text`, `reference_id`, `references`, `prosody`, `format`, `sample_rate`, `mp3_bitrate`, `chunk_length`, `temperature`, `top_p` jne.) sisältö välitetään suoraan ylävirtaan, ja niiden toiminta on täysin yhtenevä virallisen dokumentaation kanssa.
+
+## Peruskäyttö
+
+Vähimmäispyyntö sisältää vain `text`-kentän. Esimerkki CURL-komennosta:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。"
+  }'
+```
+
+Palautettu vastaus näyttää tältä:
+
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/8a72ff9840234006a9f74cb2fa04f978.mp3"
+}
+```
+
+Vastaus sisältää suoraan Fishin viralliset kentät, kuten:
+
+- `audio_url`: Luodun äänen URL, jonka voi ladata tai toistaa suoraan.
+- `latency_ms` (valinnainen): Ylävirran käsittelyaika millisekunteina.
+
+Jos haluat käyttää kloonattua ääntä, voit lisätä pyyntöön `reference_id`-kentän:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "reference_id": "d7900c21663f485ab63ebdb7e5905036",
+    "format": "mp3",
+    "sample_rate": 44100
+  }'
+```
+
+## Asynkroninen callback
+
+Koska Fish TTS:n äänen generointi pitkille teksteille voi kestää kauan ja pitkäaikaiset yhteydet kuluttavat järjestelmäresursseja, tämä API tarjoaa asynkronisen callback-mahdollisuuden (laajennus Fishin viralliseen rajapintaan nähden).
+
+Käyttöprosessi on seuraava: asiakas lisää pyyntöön `callback_url`-kentän, jolloin API palauttaa välittömästi vastauksen, joka sisältää `task_id`-tunnuksen. Kun ylävirta on valmis, lopullinen `audio_url` ja muut tiedot lähetetään POST-muodossa JSONina annettuun `callback_url`-osoitteeseen, mukana on sama `task_id`, jotta tulos voidaan yhdistää alkuperäiseen tehtävään.
+
+Esimerkkipyyntö:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "callback_url": "https://webhook.site/4815f79f-a40f-4078-ac85-1cc126b6bb34"
+  }'
+```
+
+Välitön vastaus:
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "started_at": "2025-05-09T12:34:56.789Z"
+}
+```
+
+Hetken kuluttua `callback_url` saa täydellisen tuloksen:
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "audio_url": "https://platform.r2.fish.audio/task/b627c2f7d38a4083a837570ba6d0962f.mp3"
+}
+```
+
+Voit myös käyttää [Fish Tasks API:a](https://platform.acedata.cloud/documents/fc541fac-a941-47fd-b6f7-48d6cb9da523) tarkistaaksesi tehtävän tilan aktiivisesti `task_id`:llä.
+
+## Virheenkäsittely
+
+Tämä rajapinta säilyttää Fishin viralliset HTTP-tilakoodit, mutta vastaukset ovat alustamme yhtenäisessä muodossa, jotta ne ovat yhdenmukaisia `/fish/audios` ja `/fish/voices` -sarjan kanssa:
+
+- `400 token_mismatched`: Virheellinen pyyntö, mahdollisesti puuttuvia tai virheellisiä parametreja.
+- `400 api_not_implemented`: Virheellinen pyyntö, mahdollisesti puuttuvia tai virheellisiä parametreja.
+- `401 invalid_token`: Valtuuttamaton, virheellinen tai puuttuva tunnistautumistunnus.
+- `429 too_many_requests`: Liian monta pyyntöä, olet ylittänyt rajoituksen.
+- `500 api_error`: Sisäinen palvelinvirhe, jokin meni pieleen palvelimella.
+
+### Virhevastauksen esimerkki
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "api_error",
+    "message": "fetch failed"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+## Yhteenveto
+
+Fish TTS API on täysin yhteensopiva Fish Audio virallisen OpenAPI:n kanssa, joten voit siirtää olemassa olevat projektisi ilman koodimuutoksia ja hyödyntää samalla alustan tarjoamaa yhtenäistä tunnistautumista, käyttötilastointia sekä asynkronista callback-toiminnallisuutta. Pitkien tekstien generoinnissa suosittelemme käyttämään asynkronista callbackia, jotta vältetään pitkäaikaisten yhteyksien resurssikuormitus.
