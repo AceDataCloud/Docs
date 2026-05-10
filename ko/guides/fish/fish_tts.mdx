@@ -1,0 +1,136 @@
+---
+title: "Fish TTS API 연동 안내"
+description: "Fish music generation 集成指南 - Ace Data Cloud"
+---
+
+이 문서에서는 Fish TTS API 연동 방법을 소개합니다. 해당 인터페이스는 [Fish Audio 공식 OpenAPI](https://docs.fish.audio/text-to-speech/text-to-speech)와 완전히 호환되며, 기존에 `https://api.fish.audio/v1/tts`를 호출하던 코드를 `https://api.acedata.cloud/fish/tts`로 바로 이전할 수 있습니다. 인증 정보만 교체하면 되며, 요청 본문 구조는 수정할 필요가 없습니다.
+
+## 신청 절차
+
+API를 사용하려면 먼저 [Fish TTS API](https://platform.acedata.cloud/services/caf99abc-ddcf-4714-b2a5-862d9b469509) 해당 페이지에서 서비스를 신청해야 합니다. 페이지에 접속한 후 「Acquire」 버튼을 클릭하세요.
+
+로그인 또는 회원가입이 되어 있지 않은 경우 로그인 페이지로 자동 이동하며, 로그인 및 회원가입 후에는 자동으로 현재 페이지로 돌아옵니다.
+
+최초 신청 시 무료 사용 한도가 제공되어 해당 API를 무료로 이용할 수 있습니다.
+
+## 공식 API와의 차이점
+
+본 API는 Fish Audio 공식 요청 및 응답 필드를 유지하면서 다음과 같은 소폭 확장을 통해 당사 플랫폼에서 더 나은 통합을 지원합니다:
+
+- **인증 방식**: `Authorization: Bearer {token}` 사용, 여기서 `{token}`은 당사 플랫폼에서 발급받은 키이며 Fish 공식 키가 아닙니다.
+- **TTS 모델 선택**: HTTP 요청 헤더 `model`로 지정하며, 선택지는 `s1` 또는 `s2-pro`이고 기본값은 `s2-pro`입니다. 이는 Fish 공식과 동일합니다.
+- **`latency` 기본값**: 상위 `/fish/v1/tts`는 `latency` 미전달 시 오류를 반환하지만, 본 인터페이스는 기본값으로 `latency=normal`을 자동으로 보완하여 Fish 공식 기본 동작과 일치시켰습니다.
+- **비동기 콜백(플랫폼 확장)**: 요청 본문에 추가 필드 `callback_url`을 전달하면, 인터페이스는 즉시 `{task_id, started_at}`을 반환하고, 상위에서 실제 처리가 완료되면 완전한 `{audio_url, ...}` 결과를 POST JSON 형태로 해당 URL에 콜백합니다. Fish 공식 인터페이스는 이 필드를 지원하지 않으며, 전달 시 당사 비동기 프로세스가 작동합니다.
+
+위 차이점을 제외하고, TTS 요청 본문의 모든 필드(`text`, `reference_id`, `references`, `prosody`, `format`, `sample_rate`, `mp3_bitrate`, `chunk_length`, `temperature`, `top_p` 등)는 상위로 그대로 전달되며, 동작은 공식 문서와 완벽히 일치합니다.
+
+## 기본 사용법
+
+최소 요청은 `text` 필드 하나만 전달하면 되며, CURL 예시는 다음과 같습니다:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。"
+  }'
+```
+
+응답 예시는 다음과 같습니다:
+
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/8a72ff9840234006a9f74cb2fa04f978.mp3"
+}
+```
+
+응답 결과는 Fish 공식 필드를 그대로 포함하며, 주요 내용은 다음과 같습니다:
+
+- `audio_url`: 생성된 오디오 URL로, 직접 다운로드하거나 재생할 수 있습니다.
+- `latency_ms`(선택적): 상위 처리 소요 시간(밀리초).
+
+클론 음색을 사용하려면 요청 본문에 `reference_id`를 추가할 수 있습니다:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "reference_id": "d7900c21663f485ab63ebdb7e5905036",
+    "format": "mp3",
+    "sample_rate": 44100
+  }'
+```
+
+## 비동기 콜백
+
+Fish TTS는 긴 텍스트 생성 시 시간이 오래 걸릴 수 있으며, 장시간 연결 유지가 시스템 자원을 소모합니다. 본 API는 이와 관련해 비동기 콜백 기능을 제공합니다(이는 Fish 공식 인터페이스 대비 확장 기능입니다).
+
+전체 흐름은 클라이언트가 요청 시 요청 본문에 `callback_url` 필드를 추가하면, API는 즉시 `task_id`를 포함한 응답을 반환합니다. 상위에서 실제 생성이 완료되면 최종 `audio_url` 등 결과를 POST JSON 형식으로 `callback_url`에 전송하며, 요청 본문에 동일한 `task_id`를 포함하여 비동기 결과와 원본 작업을 연동할 수 있습니다.
+
+요청 예시:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "callback_url": "https://webhook.site/4815f79f-a40f-4078-ac85-1cc126b6bb34"
+  }'
+```
+
+즉시 반환되는 응답은 다음과 같습니다:
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "started_at": "2025-05-09T12:34:56.789Z"
+}
+```
+
+잠시 후 `callback_url`로 완전한 결과가 도착합니다:
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "audio_url": "https://platform.r2.fish.audio/task/b627c2f7d38a4083a837570ba6d0962f.mp3"
+}
+```
+
+또한 [Fish Tasks API](https://platform.acedata.cloud/documents/fc541fac-a941-47fd-b6f7-48d6cb9da523)를 사용해 `task_id`로 작업 상태를 능동적으로 폴링할 수 있습니다.
+
+## 오류 처리
+
+본 인터페이스의 오류 응답은 Fish 공식 HTTP 상태 코드를 유지하나, 응답 본문은 `/fish/audios`, `/fish/voices` 시리즈와 일관된 플랫폼 통합 형식을 사용합니다:
+
+- `400 token_mismatched`: 잘못된 요청, 누락되었거나 유효하지 않은 매개변수 가능성.
+- `400 api_not_implemented`: 잘못된 요청, 누락되었거나 유효하지 않은 매개변수 가능성.
+- `401 invalid_token`: 인증 실패, 유효하지 않거나 누락된 인증 토큰.
+- `429 too_many_requests`: 요청 과다, 속도 제한 초과.
+- `500 api_error`: 내부 서버 오류, 서버 측 문제 발생.
+
+### 오류 응답 예시
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "api_error",
+    "message": "fetch failed"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+## 결론
+
+Fish TTS API는 Fish Audio 공식 OpenAPI와 완벽히 호환되며, 기존 프로젝트를 코드 변경 없이 이전할 수 있습니다. 동시에 플랫폼이 제공하는 통합 인증, 사용량 청구 및 비동기 콜백 기능을 누릴 수 있습니다. 긴 텍스트 생성 시에는 장시간 연결 자원 점유를 피하기 위해 비동기 콜백 사용을 권장합니다.
