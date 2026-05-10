@@ -1,0 +1,136 @@
+---
+title: "Fish TTS API 对接说明"
+description: "Fish music generation 集成指南 - Ace Data Cloud"
+---
+
+本文将介绍 Fish TTS API 的对接说明，该接口与 [Fish Audio 官方 OpenAPI](https://docs.fish.audio/text-to-speech/text-to-speech) 完全兼容，可直接将原本调用 `https://api.fish.audio/v1/tts` 的代码迁移到 `https://api.acedata.cloud/fish/tts`，仅需要替换鉴权信息即可，无需修改请求体结构。
+
+## 申请流程
+
+要使用 API，需要先到 [Fish TTS API](https://platform.acedata.cloud/services/caf99abc-ddcf-4714-b2a5-862d9b469509) 对应页面申请对应的服务，进入页面之后，点击「Acquire」按钮。
+
+如果你尚未登录或注册，会自动跳转到登录页面邀请您来注册和登录，登录注册之后会自动返回当前页面。
+
+在首次申请时会有免费额度赠送，可以免费使用该 API。
+
+## 与官方 API 的差异
+
+本 API 在保留 Fish Audio 官方请求和响应字段的基础上做了如下少量增强，便于在我们的平台上更好地集成：
+
+- **鉴权方式**：使用 `Authorization: Bearer {token}`，其中 `{token}` 是在本平台申请的密钥，而非 Fish 官方密钥。
+- **TTS 模型选择**：通过 HTTP 请求头 `model` 指定，可选 `s1` 或 `s2-pro`，默认值为 `s2-pro`。这与 Fish 官方一致。
+- **`latency` 默认值**：上游 `/fish/v1/tts` 在不传 `latency` 时会返回错误，本接口在缺省时会自动补 `latency=normal`，与 Fish 官方默认行为保持一致。
+- **异步回调（平台扩展）**：在请求体中传入额外的 `callback_url` 字段时，接口会立即返回 `{task_id, started_at}`，待上游真正完成后将完整的 `{audio_url, ...}` 结果以 POST JSON 形式回调到该 URL。Fish 官方接口不支持此字段，传入它仅会触发我方的异步流程。
+
+除上述差异外，TTS 请求体中的所有字段（`text`、`reference_id`、`references`、`prosody`、`format`、`sample_rate`、`mp3_bitrate`、`chunk_length`、`temperature`、`top_p` 等）均直接透传给上游，行为与官方文档完全一致。
+
+## 基本使用
+
+最小的请求只需要传 `text` 一个字段，示例 CURL 如下：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。"
+  }'
+```
+
+返回结果示例如下：
+
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/8a72ff9840234006a9f74cb2fa04f978.mp3"
+}
+```
+
+返回结果直接是 Fish 官方的字段，包括：
+
+- `audio_url`：生成的音频 URL，可直接下载或播放。
+- `latency_ms`（可选）：上游处理耗时，毫秒。
+
+如果需要使用克隆音色，可以在请求体中加入 `reference_id`：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "reference_id": "d7900c21663f485ab63ebdb7e5905036",
+    "format": "mp3",
+    "sample_rate": 44100
+  }'
+```
+
+## 异步回调
+
+由于 Fish TTS 在长文本场景下生成耗时可能较长，长连接保持会消耗系统资源，本 API 提供了异步回调能力（这是相对 Fish 官方接口的扩展）。
+
+整体流程是：客户端发起请求时在请求体中额外指定 `callback_url` 字段，API 会立即返回包含 `task_id` 的应答；上游真正生成完成后，最终的 `audio_url` 等字段会以 POST JSON 的形式发送到 `callback_url`，并在请求体中带上同一个 `task_id` 字段，便于将异步结果与原始任务关联。
+
+请求示例：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s2-pro' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "callback_url": "https://webhook.site/4815f79f-a40f-4078-ac85-1cc126b6bb34"
+  }'
+```
+
+立即返回的应答如下：
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "started_at": "2025-05-09T12:34:56.789Z"
+}
+```
+
+稍等片刻，`callback_url` 会收到完整结果：
+
+```json
+{
+  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "audio_url": "https://platform.r2.fish.audio/task/b627c2f7d38a4083a837570ba6d0962f.mp3"
+}
+```
+
+也可以使用 [Fish Tasks API](https://platform.acedata.cloud/documents/fc541fac-a941-47fd-b6f7-48d6cb9da523) 通过 `task_id` 主动轮询任务状态。
+
+## 错误处理
+
+本接口的错误响应保留了 Fish 官方的 HTTP 状态码，但响应体使用了平台统一格式以便与 `/fish/audios`、`/fish/voices` 系列保持一致：
+
+- `400 token_mismatched`：Bad request, possibly due to missing or invalid parameters.
+- `400 api_not_implemented`：Bad request, possibly due to missing or invalid parameters.
+- `401 invalid_token`：Unauthorized, invalid or missing authorization token.
+- `429 too_many_requests`：Too many requests, you have exceeded the rate limit.
+- `500 api_error`：Internal server error, something went wrong on the server.
+
+### 错误响应示例
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "api_error",
+    "message": "fetch failed"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+## 结论
+
+Fish TTS API 与 Fish Audio 官方 OpenAPI 完全兼容，可在零代码改动的前提下迁移已有项目，同时享受到平台提供的统一鉴权、用量记账以及异步回调能力。建议在生成长文本时优先使用异步回调以避免长连接资源占用。
