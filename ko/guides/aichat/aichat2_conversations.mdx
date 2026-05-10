@@ -1,0 +1,440 @@
+---
+title: "AI Chat v2 API 연동 안내"
+description: "AI Dialogue 集成指南 - Ace Data Cloud"
+---
+
+AI Chat v2 API (`/aichat2/conversations`)는 차세대 대화 인터페이스로, [AI Chat API](https://platform.acedata.cloud/documents/59fb1199-6694-4afb-a222-3554d7f7d05a)의 완전한 업그레이드 버전입니다. v1의 간결하고 다중 회화 호스팅 기반에 다음과 같은 확장 기능을 더했습니다:
+
+- **멀티모달 사용자 입력**：구조화된 `message` 필드를 통해 텍스트 + 이미지 + 파일 블록을 직접 전달, `references`를 통한 간접 첨부 필요 없음.
+- **Agent형 도구 호출**：내장된 웹 검색, 웹페이지 크롤링, 파일 읽기 등 도구 세트와 사용자 권한 부여 MCP 서버(Google Drive, Notion, Slack, GitHub 등) 연동 가능, 모델이 한 요청 내 여러 차례 자율적으로 도구를 호출하여 복잡한 작업 수행.
+- **구조화된 스트리밍 이벤트**：`accept: text/event-stream` 또는 `application/x-ndjson`으로 토큰별 `text_delta`, `tool_use`, `tool_result`, `thinking`, `citation`, `card`, `artifact` 등 이벤트 수신, 프론트엔드에서 타입별 별도 렌더링 용이.
+- **중단/복구 가능**：모델이 사용자 보충 요청 시 `ask_user_question` 이벤트 발송 후 일시 정지, 다음 호출 시 `tool_results`로 답변 채우기 가능.
+- **신규 CRUD 동작**：같은 엔드포인트 내 `action` 필드로 `retrieve` / `retrieve_batch` / `update` / `delete` 수행, 별도 세션 관리 API 불필요.
+- **지속적 업데이트 모델 리스트**：기본적으로 GPT-5.4, Claude Opus 4.7, Claude Sonnet 4.6, Gemini 3.1 Pro, GLM 5.1, DeepSeek V4, Kimi K2.5 등 최신 모델 지원.
+
+또한, 요청 본문은 **완전한 하위 호환성**을 유지하여 `model` + `question` (+ 선택적 `stateful` / `id` / `references` / `preset`) 만으로도 v1과 동일한 `{answer, id}` JSON 응답을 받을 수 있어 `/aichat/conversations`에서 `/aichat2/conversations`로의 이전 시 클라이언트 재작성 없이 경로만 변경하면 됨.
+
+> 현재 `/aichat/conversations`를 사용 중인 경우, 기존 인터페이스는 계속 유지되며, 단계별로 마이그레이션 가능.
+
+## 신청 절차
+
+API 사용을 위해 [AI Chat v2 API](https://platform.acedata.cloud/documents/e4a7c2b9-3f1d-4e8a-9b6c-a5d2f8e1b4c7) 페이지에서 서비스 신청 후, 페이지 내 「Acquire」 버튼 클릭으로 요청에 필요한 인증 정보를 획득하세요.
+
+로그인 또는 회원가입이 필요하면 자동 전환되어 로그인 후 원래 페이지로 돌아갑니다.
+
+초기 신청 시 무료 할당량이 제공되어 무료로 API를 사용할 수 있습니다.
+
+## 기본 사용법
+
+가장 간단한 사용법은 v1과 동일하게 `model` + `question` 전달 후 `{answer, id}` 수신:
+
+CURL 예제:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "question": "AceDataCloud를 한 문장으로 소개해 주세요."
+  }'
+```
+
+응답 예시:
+
+```json
+{
+  "answer": "AceDataCloud는 주류 AI 모델과 멀티모달 서비스를 통합하는 API 플랫폼으로, 개발자는 하나의 키로 GPT, Claude, Gemini, Midjourney, Suno, Veo 등 여러 서비스를 호출할 수 있습니다.",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Python 예제:
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/json",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "question": "AceDataCloud를 한 문장으로 소개해 주세요.",
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.json())
+```
+
+`model` 값은 우측 Try 패널에서 드롭다운으로 선택 가능하며, 대표적 모델군은 다음과 같습니다:
+
+- OpenAI: `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.2-pro`, `gpt-5.1-all`, `gpt-5-all`, `gpt-4.1`, `gpt-4o`, `gpt-4o-image`, `o3`, `o4-mini` 등
+- Anthropic: `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5-20251101`, `claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001` 등
+- Google: `gemini-3.1-pro`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-image-preview`, `gemini-3-pro-preview`, `gemini-2.5-flash-lite` 등
+- xAI: `grok-4`, `grok-4-1-fast`, `grok-4-1-fast-reasoning`, `grok-3-mini-fast` 등
+- DeepSeek: `deepseek-v4-flash`, `deepseek-v3.2-exp`, `deepseek-r1-0528` 등
+- Moonshot: `kimi-k2.5`, `kimi-k2-thinking`, `kimi-k2-thinking-turbo` 등
+- Zhipu: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5v` 등
+
+상세 요금 정책은 서비스 페이지의 Pricing 탭 참고.
+
+## 다중 회화
+
+v1과 동일하게 `stateful: true` 전달 시 세션 저장 활성화, API는 `id`를 반환하며 이후 요청에 `id`를 포함하면 대화 연속 가능, 메시지 히스토리 관리 필요 없음.
+
+첫 요청 예시:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "question": "数字42を覚えてください。"
+  }'
+```
+
+응답:
+
+```json
+{
+  "answer": "좋아요, 42를 기억하겠습니다. 무엇을 하시겠어요?",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+두 번째 요청 시 동일 `id` 포함:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "question": "아까 기억하라고 했던 숫자는 무엇입니까?"
+  }'
+```
+
+응답:
+
+```json
+{
+  "answer": "당신이 기억하라고 한 숫자는 42입니다.",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+> `stateful` 기본값은 `true`이며, 생략하거나 명시적 `true` 전달은 동일 효과입니다. 서버에서 세션 저장을 원하지 않으면 `stateful: false`로 설정.
+
+## 스트리밍 응답
+
+v2는 두 가지 스트리밍 포맷 지원, `accept` 헤더에 따라 선택:
+
+| 시나리오 | `accept` | 데이터 포맷 |
+| :--- | :--- | :--- |
+| 웹 프론트 / EventSource | `text/event-stream` | `data: {json}\n\n` (마지막 `data: [DONE]\n\n`) |
+| 서버 / CLI / Node 스트리밍 | `application/x-ndjson` | 각 줄마다 JSON 객체 |
+| 비스트림 | `application/json` (기본값) | 한 번에 `{answer, id}` 반환 |
+
+### NDJSON 예제
+
+```python
+import json
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/x-ndjson",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "stateful": True,
+    "question": "杭州를 세 문장으로 소개해 주세요.",
+}
+
+with requests.post(url, json=payload, headers=headers, stream=True) as resp:
+    answer = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        event = json.loads(line)
+        if event.get("type") == "text_delta":
+            # v1 호환: 증분 텍스트 조각, `delta_answer`도 병행 제공
+            answer += event["content"]
+            print(event["delta_answer"], end="", flush=True)
+        elif event.get("type") == "done":
+            print()
+            print("usage =", event.get("usage"))
+```
+
+NDJSON 각 줄은 구조화된 이벤트, 가장 흔한 타입은 `text_delta`:
+
+```json
+{"type":"text_delta","content":"항","delta_answer":"항","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"주","delta_answer":"주","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"는","delta_answer":"는","id":"f2f4b3e8-..."}
+...
+{"type":"done","conversation_id":"f2f4b3e8-...","usage":{"prompt_tokens":21,"completion_tokens":58,"total_tokens":79},"terminal_reason":"natural_stop"}
+```
+
+### SSE 예제
+
+브라우저에서 `EventSource`는 커스텀 요청 본문 지원 안 함, `fetch` + 수동 파싱 추천:
+
+```javascript
+const resp = await fetch("https://api.acedata.cloud/aichat2/conversations", {
+  method: "POST",
+  headers: {
+    accept: "text/event-stream",
+    authorization: "Bearer {token}",
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "gpt-5.4",
+    stateful: true,
+    question: "杭州를 세 문장으로 소개해 주세요.",
+  }),
+});
+
+const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const blocks = buffer.split("\n\n");
+  buffer = blocks.pop() ?? "";
+  for (const block of blocks) {
+    const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+    if (!dataLine) continue;
+    const payload = dataLine.slice(6);
+    if (payload === "[DONE]") return;
+    const event = JSON.parse(payload);
+    if (event.type === "text_delta") process.stdout.write(event.content);
+  }
+}
+```
+
+### 이벤트 타입별 설명
+
+| `type` | 의미 |
+| :--- | :--- |
+| `text_delta` | 답변 텍스트 증분, `content`는 새 내용; v1 호환 위해 `delta_answer`도 병행 제공, `id` 포함. |
+| `thinking` | 모델의 사고 과정(모델이 reasoning 노출 시). |
+| `tool_use` | 도구 호출 결정, `tool_id`, `tool_name`, `input` 포함. |
+| `tool_result` | 도구 수행 결과, `tool_id`와 쌍, `is_error`로 실패 여부 표시. |
+| `card` | 도구 산출 구조화 카드(이미지, 링크 미리보기 등). |
+| `citation` | 텍스트 참조 URL 제공. |
+| `ask_user_question` | 사용자 보충 요청 시, 대기 상태 `awaiting_user_input`으로 전환, 상세는 하단 [일시 정지 대화 복구](#복구-일시-정지-대화) 참고. |
+| `artifact` | 코드 블록, 문서 등 독립 산출물, 저장 또는 다운로드 가능. |
+| `system_message` | 시스템 알림 메시지(사용자/어시스턴트 내용 아님), UI용. |
+| `compact` | 내부 맥락 압축 이벤트, 별도 처리 불필요. |
+| `error` | 이번 라운드 오류 발생, `message`에 오류 내용. |
+| `done` | 스트리밍 종료, `usage`(토큰 수 포함), `terminal_reason` 포함. |
+
+최종 답변만 관심 있으면, 모든 `text_delta`의 `content`를 이어 붙이면 `application/json` 모드의 `answer`와 동일.
+
+## 멀티모달 입력
+
+사용자 입력에 이미지 또는 파일 포함 시, `question` 대신 `message` 배열 전달. 각 요소는 블록:
+
+```json
+{
+  "model": "gpt-5.4",
+  "stateful": true,
+  "message": [
+    { "type": "text", "text": "이 사진에 고양이가 몇 마리 있나요?" },
+    { "type": "image_url", "image_url": { "url": "https://cdn.acedata.cloud/cats.jpg" } }
+  ]
+}
+```
+
+지원하는 블록 유형:
+
+- `text` — 일반 텍스트, 필수 `text` 필드.
+- `image_url` — 이미지, 필수 `image_url.url`.
+- `file_url` — 파일(PDF, CSV, TXT 등), 필수 `file_url.url`.
+
+### v1 `references`와의 관계
+
+구형 클라이언트 호환 위해 `references: ["https://...", ...]` 필드도 인식:
+
+- URL 확장자가 `jpg / jpeg / png / gif / bmp / webp / svg / heic / heif`이면 자동으로 `image_url` 블록으로 변환.
+- 기타 확장자는 `file_url` 블록으로 변환.
+- `question`도 함께 제공 시, 이를 `text` 블록으로 앞에 추가.
+
+즉, v1에서 요청 체를 변경하지 않고 `/aichat2/conversations`로 경로만 바꾸면 기존 `references` 방식도 정상 작동.
+
+더 세밀한 제어(여러 이미지 사이에 텍스트 배치, 순서 중요 등)는 `message` 배열로 직접 구성 권장.
+
+## 도구 호출 및 MCP 연동
+
+v2 핵심 강화점은 모델이 자율적으로 도구를 호출하여 다단계 작업 수행, **기본 활성화** 상태이며, 클라이언트 별도 설정 필요 없음. 대표 시나리오:
+
+- "최근 상하이 전시회 검색" → 내장 웹 검색 호출 → 결과 정리 답변.
+- "이 PDF 읽고 요약" → 파일 읽기 호출 → 요약 작성.
+- [Connections](https://platform.acedata.cloud/connections)에서 Google Drive / GitHub / Notion 등 권한 부여 시, 해당 MCP 도구 호출 가능.
+
+NDJSON / SSE 스트림 내 도구 호출은 `tool_use` / `tool_result` 이벤트로 표현, 예시:
+
+```json
+{"type":"tool_use","tool_id":"toolu_01ABCDEF","tool_name":"web_search","input":{"query":"상하이 2026 봄 전시"},"id":"f2f4b3e8-..."}
+{"type":"tool_result","tool_id":"toolu_01ABCDEF","output":"...","is_error":false,"id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"현재","delta_answer":"현재","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"상하이","delta_answer":"상하이","id":"f2f4b3e8-..."}
+...
+```
+
+툴 호출 세부 내용이 필요 없으면 `tool_use` / `tool_result` / `card` / `citation` 이벤트 무시 가능, 최종 출력은 `text_delta`로만 전달.
+
+`max_turns`는 모델이 도구를 호출하는 최대 회수 제한, 기본값은 플랫폼 정책에 따름. `max_turns: 1`로 설정 시, 단일 답변만 가능하며 도구 호출 금지.
+
+## 일시 정지 대화 복구
+
+일부 도구는 모델이 사용자에게 반문하는 경우, `ask_user_question` 이벤트 발생, 대화는 `awaiting_user_input` 상태로 정지:
+
+```json
+{
+  "type": "ask_user_question",
+  "tool_id": "toolu_01XYZW",
+  "tool_name": "ask_user_question",
+  "question": "생성 보고서 언어는 중국어 또는 영어입니까?",
+  "options": ["중국어", "영어"],
+  "id": "f2f4b3e8-..."
+}
+```
+
+프론트엔드에서는 이 이벤트를 카드로 렌더링 후 사용자 선택 유도, 이후 같은 `id`로 답변 요청 보내기:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: text/event-stream' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "tool_results": [
+      {
+        "tool_use_id": "toolu_01XYZW",
+        "output": "중국어"
+      }
+    ]
+  }'
+```
+
+`tool_use_id`는 정지 시 `tool_id`와 반드시 일치해야 하며, 불일치 시 400 오류 발생. `tool_results` 포함 시, `question`, `message`, `references`는 무시됨.
+
+사용자가 질문을 포기하면, 새 `question` 또는 `message` 전달으로 일시 정지 도구 호출을 건너뛰기 가능.
+
+## 세션 관리 (CRUD)
+
+v2는 동일 엔드포인트 내 `action` 필드로 간단한 세션 관리 제공, 별도 API 필요 없음.
+
+### `action: retrieve` — 세션 조회
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "action": "retrieve",
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+  }'
+```
+
+전체 세션 문서(히스토리 메시지, 모델, 타이틀, 사용 도구 등) 반환.
+
+### `action: retrieve_batch` — 세션 목록 조회
+
+```json
+{
+  "action": "retrieve_batch",
+  "model_group": "chatgpt",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`items` 배열과 `total` 반환. 메시지 히스토리 제외, 사이드바 목록 용도. 특정 세션 상세 조회 시 `action: retrieve` 사용.
+
+선택 필터: `user_id`, `application_id`, `model_group`, `model`.
+
+### `action: update` — 타이틀 변경 또는 히스토리 재작성
+
+```json
+{
+  "action": "update",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+  "title": "杭州 여행 계획"
+}
+```
+
+`messages`도 전달 가능하나, 서버는 엄격한 스키마 검증(접힌 `ToolUseContent` 형태) 수행, 미준수 시 400 반환. 주로 타이틀 변경 용도.
+
+### `action: delete` — 세션 삭제
+
+```json
+{
+  "action": "delete",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+`{id, success: true}` 반환. 삭제 후 복구 불가, 신중히 호출.
+
+## v1에서의 원활한 마이그레이션
+
+`/aichat/conversations` 사용 중인 경우, 거의 코드 수정 없이 v2로 전환 가능:
+
+1. URL 변경: `https://api.acedata.cloud/aichat/conversations` → `https://api.acedata.cloud/aichat2/conversations`
+2. 이전에 v1 모델명 사용 시(`gpt-3.5`, `gpt-4-browsing` 등), v2에서는 최신 모델(`gpt-5.4`, `claude-opus-4-7`, `gemini-3.1-pro` 등)로 업그레이드 권장.
+3. NDJSON 스트림의 `text_delta` 이벤트는 `delta_answer`와 `id`를 계속 제공하므로 기존 클라이언트의 `delta_answer` 파싱 로직 무리 없이 유지 가능.
+
+이후 신규 기능(멀티모달, SSE, 도구 호출, `action` CRUD 등)을 단계별로 활용 가능.
+
+## 오류 처리
+
+오류 응답은 일관되게 다음과 같음:
+
+```json
+{
+  "error": {
+    "code": "chat_error",
+    "message": "upstream LLM returned an error"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+자주 발생하는 오류:
+
+- `400 bad_request`：필수 필드 누락, `tool_use_id` 불일치, 스키마 위반 등
+- `401 invalid_token`：인증 토큰 오류
+- `404 not_found`：세션 ID 존재하지 않음
+- `429 too_many_requests`：요청 제한 초과
+- `500 chat_error`：상위 LLM 오류 또는 이번 요청 `completion_tokens=0` (비용 차감 없음)
+
+스트리밍 내 오류는 `{"type":"error","message":"..."}` 이벤트로 전달 후 스트림 종료.
+
+## 결론
+
+AI Chat v2 API는 하위 호환성을 유지하는 동시에, 대화를 '단일/다중 질문'에서 'Agent형 관측 가능 대화'로 업그레이드: 멀티모달 입력, 도구 호출, 일시 정지/복구, 구조화된 스트리밍 이벤트, 내장 CRUD 기능 포함. 신규 연동 시 v2 추천, 기존 v1는 단계별 점진적 마이그레이션 가능. 문의 사항은 언제든 기술 지원팀에 연락 바랍니다.

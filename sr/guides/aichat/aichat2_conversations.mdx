@@ -1,0 +1,438 @@
+---
+title: "AI Chat v2 API Инструкције за интеграцију"
+description: "AI Dialogue 集成指南 - Ace Data Cloud"
+---
+
+AI Chat v2 API (`/aichat2/conversations`) представља нову генерацију дијалошког интерфејса, потпуну надоградњу [AI Chat API](https://platform.acedata.cloud/documents/59fb1199-6694-4afb-a222-3554d7f7d05a). Основан на једноставности и хостовању мулти-рунд дијалога у v1, проширен је следећим могућностима:
+
+- **Мулти-модални улаз корисника**: директно пренос текста + слика + фајл блокова кроз структурирано поље `message`, без потребе за индиректним `references`.
+- **Агентски алати**: уграђени сет алата за претрагу на мрежи, преузимање веб страница, читање фајлова итд., уз могућност монтовања MCP сервера са корисничким овлашћењима (Google Drive, Notion, Slack, GitHub и други). Модел може у једном позиву самостално да позове више алата за извођење сложених задатака.
+- **Структурирани токови догађаја**: путем `accept: text/event-stream` или `application/x-ndjson` добијају се догађаји као што су `text_delta`, `tool_use`, `tool_result`, `thinking`, `citation`, `card`, `artifact` итд., што омогућава фронтенду да их одговарајуће приказује.
+- **Пауза / наставак**: модел може послати `ask_user_question` догађај и паузирати, а даљи позиви могу се наставити уз `tool_results`.
+- **CRUD акције**: у истом endpoint-у кроз `action` поље могу се извршити `retrieve`, `retrieve_batch`, `update`, `delete` без додатних API позива.
+- **Континуирано ажурирање модела**: подразумевано подржава GPT-5.4, Claude Opus 4.7, Gemini 3.1 Pro, GLM 5.1, DeepSeek V4, Kimi K2.5 и друге актуелне моделе.
+
+Истовремено, API је **потпуно назад компатибилан са v1**: довољно је послати `model` + `question` (+ опционално `stateful` / `id` / `references` / `preset`) и добити одговор у формату `{answer, id}` као у v1, без потребе за изменама клијентске стране. Само треба променити пут у `/aichat2/conversations`.
+
+> Ако тренутно користите `/aichat/conversations`, стари интерфејс ће и даље бити доступан, а ви можете прелазити у својој динамици.
+
+## Процес пријаве
+
+Да бисте користили API, потребно је да се пријавите на страницу [AI Chat v2 API](https://platform.acedata.cloud/documents/e4a7c2b9-3f1d-4e8a-9b6c-a5d2f8e1b4c7) и добијете креденцијале. После уноса, клик на „Acquire“ дугме ће вам дати потребне токене.
+
+Ако нисте пријављени или регистровани, бићете аутоматски пребачени на страницу за пријаву. После регистрације и пријаве, вратићете се на исту страницу.
+
+При првој пријави добићете бесплатни кредит за тестирање.
+
+## Основна употреба
+
+Најједноставнији начин је исти као у v1: пошаљите `model` + `question` и добијете `{answer, id}`.
+
+CURL пример:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "question": "用一句话介绍下 AceDataCloud。"
+  }'
+```
+
+Одговор:
+
+```json
+{
+  "answer": "AceDataCloud је унифицирана платформа која агрегира водеће AI моделе и мулти-модалне услуге, омогућавајући програмерима да једним кључем приступе GPT, Claude, Gemini, Midjourney, Suno, Veo и друге сервисе.",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Python пример:
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/json",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "question": "用一句话介绍下 AceDataCloud。",
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.json())
+```
+
+Модели које можете изабрати у dropdown-у су, на пример:
+
+- OpenAI: `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.2-pro`, `gpt-5.1-all`, `gpt-4.1`, `gpt-4o`, `gpt-4o-image` итд.
+- Anthropic: `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`, итд.
+- Google: `gemini-3.1-pro`, `gemini-3.1-flash-image-preview`, итд.
+- xAI: `grok-4`, `grok-4-1-fast`, итд.
+- DeepSeek: `deepseek-v4-flash`, `deepseek-v3.2-exp`, итд.
+- Moonshot: `kimi-k2.5`, `kimi-k2-thinking`, итд.
+- Zhipu: `glm-5.1`, `glm-5`, `glm-4.7`, итд.
+
+Детаљи о цени су на страници Pricing.
+
+## Мулти-рунд дијалог
+
+Као и у v1, постављањем `stateful: true` активирате сесију, а API вам враћа `id`. У даљим позивима, уз `id` можете наставити дијалог без чувања историје `messages`.
+
+Први позив:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "question": "记住一个数字：42。"
+  }'
+```
+
+Одговор:
+
+```json
+{
+  "answer": "好的，我已经记住了 42。需要我用它做什么吗？",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Други позив, са истим `id`:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "question": "我刚才让你记住的数字是多少？"
+  }'
+```
+
+Одговор:
+
+```json
+{
+  "answer": "你让我记住的数字是 42。",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+> `stateful` је подразумевано `true`. Ако не желите да сервер чува дијалог, можете експлицитно поставити `stateful: false`.
+
+## Streaming одговори
+
+Подржане су две формате стрима, у зависности од `accept`:
+
+| сценарио | `accept` | формат података |
+| --- | --- | --- |
+| Веб фронтенд / EventSource | `text/event-stream` | `data: {json}\n\n` са `data: [DONE]\n\n` на крају |
+| Сервер / CLI / Node | `application/x-ndjson` | по један JSON по линији |
+| Не треба стрим | `application/json` (подразумевано) | један одговор `{answer, id}` |
+
+### NDJSON пример
+
+```python
+import json
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/x-ndjson",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "stateful": True,
+    "question": "用三句话介绍杭州。",
+}
+
+with requests.post(url, json=payload, headers=headers, stream=True) as resp:
+    answer = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        event = json.loads(line)
+        if event.get("type") == "text_delta":
+            # као у v1: делимични одговор
+            answer += event["content"]
+            print(event["delta_answer"], end="", flush=True)
+        elif event.get("type") == "done":
+            print()
+            print("usage =", event.get("usage"))
+```
+
+Објава `text_delta`:
+
+```json
+{"type":"text_delta","content":"杭","delta_answer":"杭","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"州","delta_answer":"州","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"是","delta_answer":"是","id":"f2f4b3e8-..."}
+...
+{"type":"done","conversation_id":"f2f4b3e8-...","usage":{"prompt_tokens":21,"completion_tokens":58,"total_tokens":79},"terminal_reason":"natural_stop"}
+```
+
+### SSE пример
+
+Браузерски `EventSource` не подржава тело по позиву, па препоручујемо `fetch` + ручно парсирање:
+
+```javascript
+const resp = await fetch("https://api.acedata.cloud/aichat2/conversations", {
+  method: "POST",
+  headers: {
+    accept: "text/event-stream",
+    authorization: "Bearer {token}",
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "gpt-5.4",
+    stateful: true,
+    question: "用三句话介绍杭州。",
+  }),
+});
+
+const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const blocks = buffer.split("\n\n");
+  buffer = blocks.pop() ?? "";
+  for (const block of blocks) {
+    const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+    if (!dataLine) continue;
+    const payload = dataLine.slice(6);
+    if (payload === "[DONE]") return;
+    const event = JSON.parse(payload);
+    if (event.type === "text_delta") process.stdout.write(event.content);
+  }
+}
+```
+
+## Типови догађаја
+
+| `type` | Значај |
+| --- | --- |
+| `text_delta` | Делимични одговор корисничког асистента. `content` је нови део; за компатибилност са v1, садржи и `delta_answer` (једнак `content`) и `id`. |
+| `thinking` | Моделово размишљање (ако модел излаже reasoning). |
+| `tool_use` | Одлука модела да позове алат; садржи `tool_id`, `tool_name`, `input`. |
+| `tool_result` | Резултат алата; усклађен са `tool_use` по `tool_id`; `is_error` означава успех или грешку. |
+| `card` | Структурирана карта из алата (слике, прегледи линкова). |
+| `citation` | Извор линка за цитиране делове текста. |
+| `ask_user_question` | Модел пита корисника; дијалог у статусу `awaiting_user_input`. |
+| `artifact` | Самостални производ модела (код, документи). |
+| `system_message` | Системски поруке (не кориснички садржај). |
+| `compact` | Компримована контекстуална порука. |
+| `error` | Грешка у току дијалога. |
+| `done` | Завршетак стриминга; садржи `usage` и `terminal_reason`. |
+
+За клијенте који желе само финални одговор, све `text_delta` делове могу се спојити у један `answer`.
+
+## Мулти-модални улаз
+
+Ако корисник шаље слике или фајлове, уместо `question` пошаљите `message` (масив):
+
+```json
+{
+  "model": "gpt-5.4",
+  "stateful": true,
+  "message": [
+    { "type": "text", "text": "Ова слика има колико мачака?" },
+    { "type": "image_url", "image_url": { "url": "https://cdn.acedata.cloud/cats.jpg" } }
+  ]
+}
+```
+
+Подржани блокови:
+
+- `text` — обичан текст, обавезно `text`.
+- `image_url` — слика, обавезно `image_url.url`.
+- `file_url` — фајл (PDF, CSV, TXT), обавезно `file_url.url`.
+
+### Веза са `references` у v1
+
+За компатибилност, `references: ["https://..."]` и даље се препознаје:
+
+- URL са екстензијама `jpg/jpeg/png/gif/bmp/webp/svg/heic/heif` претварају се у `image_url` блокове.
+- остали типови у `file_url`.
+- ако је уз то послат и `question`, он се додаје као `text` блок на почетку.
+
+За прецизнију контролу (нпр. више слика у тексту или редослед), користите `message` масив.
+
+## Алати и MCP
+
+Главна новина је могућност да модел самостално позива алате за извођење више корака у процесу — ово је подразумевано омогућено. Примери:
+
+- Корисник пита „Покажи ми нове изложбе у Шангају“ → модел позива уграђени web search → добија одговор.
+- „Прочитај овај PDF и напиши резиме“ → модел позива `file_read` → добија резиме.
+- Ако је корисник овлашћен у [Connections](https://platform.acedata.cloud/connections), модел може да приступи Google Drive, GitHub, Notion и другим MCP алатима.
+
+У NDJSON / SSE потоку, позиви алата се приказују као `tool_use` и `tool_result` догађаји:
+
+```json
+{"type":"tool_use","tool_id":"toolu_01ABCDEF","tool_name":"web_search","input":{"query":"Шангај 2026 пролећне изложбе"},"id":"f2f4b3e8-..."}
+{"type":"tool_result","tool_id":"toolu_01ABCDEF","output":"...","is_error":false,"id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"Тренутно","delta_answer":"Тренутно","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"у Шангају","delta_answer":"у Шангају","id":"f2f4b3e8-..."}
+...
+```
+
+Ако не желите да прикажете детаље алата, можете једноставно игнорисати `tool_use`, `tool_result`, `card`, `citation` догађаје — модел ће и даље излазити финални одговор кроз `text_delta`.
+
+`max_turns` ограничење одређује колико пута модел може самостално позвати алате у једном позиву. Подразумевано је неограничено; смањење (`max_turns: 1`) може се користити за једноставне одговоре без позива алата.
+
+## Пауза и наставак дијалога
+
+Када модел треба да пита корисника за додатне информације, он шаље `ask_user_question` догађај и дијалог се ставља у статус `awaiting_user_input`:
+
+```json
+{
+  "type": "ask_user_question",
+  "tool_id": "toolu_01XYZW",
+  "tool_name": "ask_user_question",
+  "question": "Желите ли да генерација буде на кинеском или енглеском?",
+  "options": ["Кинески", "Енглески"],
+  "id": "f2f4b3e8-..."
+}
+```
+
+Фронтенд треба да приказује овај догађај као картон за избор. Након тога, корисник одговара, а одговор се шаље уз `tool_results`:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: text/event-stream' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "tool_results": [
+      {
+        "tool_use_id": "toolu_01XYZW",
+        "output": "Кинески"
+      }
+    ]
+  }'
+```
+
+`tool_use_id` мора бити исти као у `ask_user_question`. Ако се пошаље другачији, добићете грешку 400. Ако у истом позиву постоје `tool_results`, `question`, `message` и `references` се игноришу.
+
+Ако корисник одлучи да одустане од питања, пошаљите нови `question` или `message`, и дијалог ће се наставити.
+
+## Управљање сесијама (CRUD)
+
+Унутар истог endpoint-а, кроз `action` поље можете управљати сесијама:
+
+### `retrieve` — добијање сесије
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "action": "retrieve",
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+  }'
+```
+
+Резултат је цео документ сесије, укључујући `messages`, `model`, `title`, `tools_used` итд.
+
+### `retrieve_batch` — листа сесија
+
+```json
+{
+  "action": "retrieve_batch",
+  "model_group": "chatgpt",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+Реакција: `{ items: [...], total }`. Ово је за приказ у листи. За детаљније информације о одређеној сесији, користите `retrieve`.
+
+Могу се филтрирати по `user_id`, `application_id`, `model_group`, `model`.
+
+### `update` — измена наслова или редоследа порука
+
+```json
+{
+  "action": "update",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+  "title": "План путовања у Хангжу"
+}
+```
+
+Може се послати и `messages`, али се строго проверава схема (мора бити у облику `ToolUseContent`). Обично се користи за промену наслова.
+
+### `delete` — брисање сесије
+
+```json
+{
+  "action": "delete",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Реакција: `{ id, success: true }`. После брисања, опоравак није могућ.
+
+## Лако прелазак са v1
+
+Ако већ користите `/aichat/conversations`, прелазак на v2 је једноставан:
+
+1. Промените URL у `https://api.acedata.cloud/aichat2/conversations`.
+2. Ако сте користили старе моделе (`gpt-3.5`, `gpt-4-browsing`), препоручује се да их замените актуелним моделима (`gpt-5.4`, `claude-opus-4-7`, итд.).
+3. NDJSON потоци остају компатибилни — `delta_answer` и `id` се и даље преносе.
+
+Можете постепено активирати нове могућности.
+
+## Обрада грешака
+
+Стандардна структура одговора:
+
+```json
+{
+  "error": {
+    "code": "chat_error",
+    "message": "upstream LLM returned an error"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+Најчешће грешке:
+
+- `400 bad_request` — недостајући обавезни параметри, неусклађен `tool_use_id`, неправилна структура `messages`.
+- `401 invalid_token` — неисправан `authorization` токен.
+- `404 not_found` — сесија за `retrieve`, `update`, `delete` не постоји.
+- `429 too_many_requests` — прекорачен лимит.
+- `500 chat_error` — грешка у серверском LLM-у или унутрашња грешка.
+
+У стриминг одговорима, грешке се јављају као `{"type":"error","message":"..."}` и након тога поток престаје.
+
+## Закључак
+
+AI Chat v2 API доноси напредак у односу на v1: мулти-модални улаз, аутоматско позивање алата, могућност паузе и наставка, структуриране стримове, CRUD управљање сесијама. Препоручује се да се нови интеграције раде директно на v2; постојећу v1 могу постепено мигрирати. За сва питања, слободно контактирајте техничку подршку.
