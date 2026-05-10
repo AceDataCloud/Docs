@@ -1,0 +1,440 @@
+---
+title: "AI Chat v2 API 接続説明"
+description: "AI Dialogue 集成指南 - Ace Data Cloud"
+---
+
+AI Chat v2 API（`/aichat2/conversations`）は次世代の対話インターフェースであり、[AI Chat API](https://platform.acedata.cloud/documents/59fb1199-6694-4afb-a222-3554d7f7d05a) の全面的なアップグレード版です。v1 のシンプルで多回対話管理機能を基盤とし、以下の拡張を行っています：
+
+- **マルチモーダルユーザー入力**：構造化された `message` フィールドでテキスト＋画像＋ファイルブロックを直接送信可能で、`references` を介した間接的な添付は不要です。
+- **エージェント化ツール呼び出し**：ネット検索、ウェブスクレイピング、ファイル読み取りなどのツールを内蔵し、ユーザーが認可した MCP サーバー（Google Drive、Notion、Slack、GitHub など）もマウント可能。モデルは1回のリクエストで複数回自律的にツールを呼び出し複雑なタスクを完遂できます。
+- **構造化ストリーミングイベント**：`accept: text/event-stream` または `application/x-ndjson` により、逐次トークンの `text_delta`、`tool_use`、`tool_result`、`thinking`、`citation`、`card`、`artifact` などのイベントを取得可能で、フロントエンドでタイプ別にレンダリングしやすくなっています。
+- **中断・再開可能**：モデルがユーザー補足情報を求める際に `ask_user_question` イベントを発し処理を一時停止。次回呼び出し時に `tool_results` で回答を返すことで続行可能です。
+- **CRUD 操作の追加**：同一エンドポイントで `action` フィールドを用い、`retrieve` / `retrieve_batch` / `update` / `delete` を実行可能。追加の会話管理 API は不要です。
+- **継続的に更新されるモデルリスト**：デフォルトで GPT-5.4、Claude Opus 4.7、Claude Sonnet 4.6、Gemini 3.1 Pro、GLM 5.1、DeepSeek V4、Kimi K2.5 などの最新モデルに対応しています。
+
+また、リクエストボディは**完全に v1 と下位互換**で、`model` + `question`（+ 任意で `stateful` / `id` / `references` / `preset`）のみで v1 と同等の `{answer, id}` JSON レスポンスが得られます。したがって、`/aichat/conversations` からの移行はクライアントの書き換え不要で、パスを `/aichat2/conversations` に変えるだけで済みます。
+
+> 現在 `/aichat/conversations` を利用中の場合、旧インターフェースは引き続き提供されており、任意のペースで移行可能です。
+
+## 申請手順
+
+API を利用するには、まず [AI Chat v2 API](https://platform.acedata.cloud/documents/e4a7c2b9-3f1d-4e8a-9b6c-a5d2f8e1b4c7) の該当ページでサービスを申請します。ページにアクセス後、「Acquire」ボタンをクリックするとリクエストに必要な認証情報が取得できます。
+
+未ログインまたは未登録の場合は自動的にログインページにリダイレクトされ、登録・ログイン後に元のページに戻ります。
+
+初回申請時には無料利用枠が付与され、無料で API を利用可能です。
+
+## 基本的な使い方
+
+最も簡単な使い方は v1 と完全に同じで、`model` + `question` を送信し `{answer, id}` を受け取ります。
+
+CURL の例：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "question": "用一句话介绍下 AceDataCloud。"
+  }'
+```
+
+返却例：
+
+```json
+{
+  "answer": "AceDataCloud は主流の AI モデルとマルチモーダルサービスを統合した統一 API プラットフォームで、開発者は1つのキーで GPT、Claude、Gemini、Midjourney、Suno、Veo など複数サービスを呼び出せます。",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Python の例：
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/json",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "question": "用一句话介绍下 AceDataCloud。",
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.json())
+```
+
+利用可能な `model` は右側の Try パネルのドロップダウンで直接確認可能で、主なカテゴリは以下の通りです：
+
+- OpenAI：`gpt-5.4-mini`、`gpt-5.4-nano`、`gpt-5.2-pro`、`gpt-5.1-all`、`gpt-5-all`、`gpt-4.1`、`gpt-4o`、`gpt-4o-image`、`o3`、`o4-mini` など
+- Anthropic：`claude-opus-4-7`、`claude-opus-4-6`、`claude-opus-4-5-20251101`、`claude-sonnet-4-6`、`claude-sonnet-4-5-20250929`、`claude-haiku-4-5-20251001` など
+- Google：`gemini-3.1-pro`、`gemini-3.1-pro-preview`、`gemini-3.1-flash-image-preview`、`gemini-3-pro-preview`、`gemini-2.5-flash-lite` など
+- xAI：`grok-4`、`grok-4-1-fast`、`grok-4-1-fast-reasoning`、`grok-3-mini-fast` など
+- DeepSeek：`deepseek-v4-flash`、`deepseek-v3.2-exp`、`deepseek-r1-0528` など
+- Moonshot：`kimi-k2.5`、`kimi-k2-thinking`、`kimi-k2-thinking-turbo` など
+- Zhipu：`glm-5.1`、`glm-5`、`glm-5-turbo`、`glm-4.7`、`glm-4.5v` など
+
+詳細な課金ルールはサービスページの Pricing カードを参照してください。
+
+## 多回対話
+
+v1 と同様に、`stateful: true` を送信して会話保存を有効にすると、API は `id` を返します。以降のリクエストで同じ `id` を送れば対話を継続でき、メッセージ履歴を自分で管理する必要はありません。
+
+初回リクエスト例：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "question": "记住一个数字：42。"
+  }'
+```
+
+返却例：
+
+```json
+{
+  "answer": "わかりました、42を記憶しました。何かに使いましょうか？",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+2回目以降のリクエストは同じ `id` を含めます：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "question": "我刚才让你记住的数字是多少？"
+  }'
+```
+
+返却例：
+
+```json
+{
+  "answer": "あなたが私に覚えさせた数字は42です。",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+> `stateful` のデフォルトは `true` で、省略時も明示的に `true` を送った場合と同じです。サーバー側に対話を保存してほしくない場合は、明示的に `stateful: false` を設定してください。
+
+## ストリーミングレスポンス
+
+v2 は2種類のストリーミング形式をサポートし、`accept` ヘッダーで選択します：
+
+| シーン | `accept` | データ形式 |
+| :--- | :--- | :--- |
+| Web フロントエンド / EventSource | `text/event-stream` | `data: {json}\n\n`、最終行は `data: [DONE]\n\n` |
+| サーバー / CLI / Node ストリーム解析 | `application/x-ndjson` | 1行ごとに JSON オブジェクト |
+| ストリーミング不要 | `application/json`（デフォルト） | 一括で `{answer, id}` を返す |
+
+### NDJSON の例
+
+```python
+import json
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/x-ndjson",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "stateful": True,
+    "question": "用三句话介绍杭州。",
+}
+
+with requests.post(url, json=payload, headers=headers, stream=True) as resp:
+    answer = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        event = json.loads(line)
+        if event.get("type") == "text_delta":
+            # v1 互換：増分断片は delta_answer フィールドでも提供
+            answer += event["content"]
+            print(event["delta_answer"], end="", flush=True)
+        elif event.get("type") == "done":
+            print()
+            print("usage =", event.get("usage"))
+```
+
+NDJSON の各行は構造化イベントで、最も一般的なのは `text_delta` です：
+
+```json
+{"type":"text_delta","content":"杭","delta_answer":"杭","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"州","delta_answer":"州","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"是","delta_answer":"是","id":"f2f4b3e8-..."}
+...
+{"type":"done","conversation_id":"f2f4b3e8-...","usage":{"prompt_tokens":21,"completion_tokens":58,"total_tokens":79},"terminal_reason":"natural_stop"}
+```
+
+### SSE の例
+
+ブラウザ側の `EventSource` はカスタムリクエストボディをサポートしないため、`fetch` と手動で `\n\n` 区切り解析を使うことを推奨します：
+
+```javascript
+const resp = await fetch("https://api.acedata.cloud/aichat2/conversations", {
+  method: "POST",
+  headers: {
+    accept: "text/event-stream",
+    authorization: "Bearer {token}",
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "gpt-5.4",
+    stateful: true,
+    question: "用三句话介绍杭州。",
+  }),
+});
+
+const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const blocks = buffer.split("\n\n");
+  buffer = blocks.pop() ?? "";
+  for (const block of blocks) {
+    const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+    if (!dataLine) continue;
+    const payload = dataLine.slice(6);
+    if (payload === "[DONE]") return;
+    const event = JSON.parse(payload);
+    if (event.type === "text_delta") process.stdout.write(event.content);
+  }
+}
+```
+
+### ストリーミングイベントタイプ
+
+| `type` | 意味 |
+| :--- | :--- |
+| `text_delta` | アシスタントの回答増分テキスト断片。`content` は新規追加内容。v1 互換のため、同一イベントに `delta_answer`（`content` と同じ）と `id` を含む。 |
+| `thinking` | モデルの思考過程（選択モデルが reasoning を公開している場合のみ）。 |
+| `tool_use` | モデルがツール呼び出しを決定したイベント。`tool_id`、`tool_name`、`input` を含む。 |
+| `tool_result` | ツール実行結果。直前の `tool_use` と `tool_id` で対応付けられ、`is_error` で失敗判定。 |
+| `card` | ツールが生成した構造化カード（画像やリンクプレビューなど）、直接レンダリングに適する。 |
+| `citation` | 対応テキスト断片の引用元 URL 補足。 |
+| `ask_user_question` | モデルがユーザー補足情報を求めた際に発生し、対話は `awaiting_user_input` 状態になる。詳しくは後述の [中断対話の再開](#中断対話の再開) を参照。 |
+| `artifact` | モデルが生成した独立成果物（コードブロックやドキュメントなど）、保存やダウンロード可能。 |
+| `system_message` | システム通知（ユーザーやアシスタントの発言ではない）、UI 表示用。 |
+| `compact` | 内部コンテキスト圧縮イベント、特別な処理不要。 |
+| `error` | 当該ラウンドでのエラー発生。`message` にエラー内容を記述。 |
+| `done` | ストリーミング終了。`usage`（`prompt_tokens` / `completion_tokens` / `total_tokens` 含む）と `terminal_reason` を含む。 |
+
+最終回答のみを必要とするクライアントは、すべての `text_delta` の `content` を連結すれば、`application/json` モードの `answer` と同等です。
+
+## マルチモーダル入力
+
+ユーザー入力に画像やファイルが含まれる場合は、`question` の代わりに `message`（配列）を送信します。各配列要素はコンテンツブロックです：
+
+```json
+{
+  "model": "gpt-5.4",
+  "stateful": true,
+  "message": [
+    { "type": "text", "text": "この画像には何匹の猫がいますか？" },
+    { "type": "image_url", "image_url": { "url": "https://cdn.acedata.cloud/cats.jpg" } }
+  ]
+}
+```
+
+対応ブロックタイプ：
+
+- `text` — 通常テキスト。必須フィールドは `text`。
+- `image_url` — 画像。必須フィールドは `image_url.url`。
+- `file_url` — ファイル（PDF、CSV、TXT など）。必須フィールドは `file_url.url`。
+
+### v1 の `references` との関係
+
+旧クライアント互換のため、v2 は依然として `references: ["https://...", ...]` フィールドを認識します：
+
+- URL の拡張子が `jpg / jpeg / png / gif / bmp / webp / svg / heic / heif` の場合、自動的に `image_url` ブロックに変換。
+- その他の拡張子は `file_url` ブロックに変換。
+- 同時に `question` がある場合は、それを先頭の `text` ブロックとして扱います。
+
+したがって、v1 から移行してリクエストボディを変更したくない場合は、パスを `/aichat2/conversations` に変えるだけで、従来の `references` の使い方はそのまま動作します。
+
+より細かい制御（複数画像をテキスト間に挿入したい、順序が重要など）が必要な場合は、直接 `message` 配列を使ってください。
+
+## ツール呼び出しと MCP
+
+v2 のコア強化点は、モデルが自律的にツールを呼び出して多段階タスクを完遂できることです。**これはデフォルトで有効**で、クライアント側で特別な設定は不要です。典型的なシナリオ：
+
+- ユーザーが「最近の上海の新しい展示を調べて」と尋ねる → モデルが内蔵の web search を呼び出し → 結果をまとめて回答。
+- ユーザーが「この PDF を読んで要約を書いて」と依頼 → モデルが file_read を呼び出し → 要約を作成。
+- ユーザーが [Connections](https://platform.acedata.cloud/connections) で Google Drive / GitHub / Notion などを認可済み → モデルが対応する MCP ツールを呼び出してデータを読み書き。
+
+NDJSON / SSE ストリームでは、ツール呼び出しは `tool_use` と `tool_result` イベントで表現されます。例：
+
+```json
+{"type":"tool_use","tool_id":"toolu_01ABCDEF","tool_name":"web_search","input":{"query":"上海 2026 春季展览"},"id":"f2f4b3e8-..."}
+{"type":"tool_result","tool_id":"toolu_01ABCDEF","output":"...","is_error":false,"id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"現在","delta_answer":"現在","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"上海","delta_answer":"上海","id":"f2f4b3e8-..."}
+...
+```
+
+フロントエンドでツール呼び出しの詳細を表示したくない場合は、`tool_use` / `tool_result` / `card` / `citation` のイベントを無視しても問題ありません。モデルの最終出力は引き続き `text_delta` で流れます。
+
+`max_turns` パラメータで、モデルが1回のリクエスト内で自律的にツールを呼び出せる最大回数を制限可能です。デフォルト上限はプラットフォーム側で決定されます。小さく設定（例：`max_turns: 1`）すると単一回答に強制し、ツール呼び出しを禁止できます。
+
+## 中断対話の再開
+
+一部ツールはモデルにユーザーへ「質問返し」をさせることがあり、その際モデルは `ask_user_question` イベントを発し、対話は `awaiting_user_input` 状態で停止します：
+
+```json
+{
+  "type": "ask_user_question",
+  "tool_id": "toolu_01XYZW",
+  "tool_name": "ask_user_question",
+  "question": "生成するレポートは中国語と英語のどちらがよいですか？",
+  "options": ["中文", "英文"],
+  "id": "f2f4b3e8-..."
+}
+```
+
+フロントエンドはこのイベントをカードとして表示しユーザーに選択させ、同じ `id` で次のリクエストを送り、回答を `tool_results` で返します：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: text/event-stream' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "tool_results": [
+      {
+        "tool_use_id": "toolu_01XYZW",
+        "output": "中文"
+      }
+    ]
+  }'
+```
+
+リクエストボディの `tool_use_id` は中断時の `tool_id` と**完全に一致する必要があります**。不一致の場合は 400 エラーとなります。`tool_results` がある場合、`question` / `message` / `references` は無視されます。
+
+ユーザーが質問を放棄する場合は、新しい `question` / `message` を送信すればよく、プラットフォームは中断中のツール呼び出しを「ユーザースキップ」とマークします。
+
+## 会話管理（CRUD）
+
+v2 は同一エンドポイントで `action` フィールドを使った軽量会話管理を提供し、別途 API を用意しません。
+
+### `action: retrieve` — 会話取得
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "action": "retrieve",
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+  }'
+```
+
+メッセージ履歴、`model`、`title`、`tools_used` などを含む完全な会話ドキュメントを返します。
+
+### `action: retrieve_batch` — 会話サマリー一覧
+
+```json
+{
+  "action": "retrieve_batch",
+  "model_group": "chatgpt",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`{ items: [...], total }` を返します。**サマリーには `messages` は含まれません**。サイドバーリストなどに適し、ユーザーが特定会話を開く際に `action: retrieve` で詳細を取得します。
+
+オプションのフィルター：`user_id`、`application_id`、`model_group`、`model`。
+
+### `action: update` — タイトル変更や履歴書き換え
+
+```json
+{
+  "action": "update",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+  "title": "杭州旅行計画"
+}
+```
+
+`messages` も送信可能ですが、サーバー側で厳密なスキーマ検証（折りたたまれた `ToolUseContent` 形式であること）が行われ、不適合時は 400 エラーとなります。通常はタイトル変更にのみ使用推奨。
+
+### `action: delete` — 会話削除
+
+```json
+{
+  "action": "delete",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+`{ id, success: true }` を返します。削除後は復元不可のため、実行前に十分確認してください。
+
+## v1 からのスムーズな移行
+
+既に [`/aichat/conversations`](https://platform.acedata.cloud/documents/59fb1199-6694-4afb-a222-3554d7f7d05a) を利用中の場合、v2 への移行はほぼコード変更不要です：
+
+1. URL を `https://api.acedata.cloud/aichat/conversations` から `https://api.acedata.cloud/aichat2/conversations` に変更。
+2. 以前の v1 モデル名（例：`gpt-3.5`、`gpt-4-browsing` など）を使っていた場合は、v2 では最新モデル（例：`gpt-5.4`、`claude-opus-4-7`、`gemini-3.1-pro` など）へのアップグレードを推奨。
+3. NDJSON ストリームのフィールドは下位互換を保ち、各 `text_delta` イベントは引き続き `delta_answer` と `id` を含むため、従来の行単位で `delta_answer` を解析するクライアントは変更不要。
+
+移行後は必要に応じて v2 の新機能（マルチモーダル `message`、SSE、ツール呼び出し、`action` CRUD）を段階的に導入してください。
+
+## エラー処理
+
+エラー応答は統一フォーマットです：
+
+```json
+{
+  "error": {
+    "code": "chat_error",
+    "message": "upstream LLM returned an error"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+主なエラー：
+
+- `400 bad_request`：必須フィールド不足、`tool_use_id` 不一致、`messages` スキーマ不正など。
+- `401 invalid_token`：`authorization` ヘッダー不正。
+- `404 not_found`：`action: retrieve / update / delete` 時に指定 `id` の会話が存在しない。
+- `429 too_many_requests`：レートリミット超過。
+- `500 chat_error`：上流 LLM エラーまたは当該ラウンドの `completion_tokens=0`（消費なし扱いで課金なし）。
+
+ストリーミングレスポンス内のエラーは `{"type":"error","message":"..."}` イベントとして送信され、直後にストリームが終了します。
+
+## 結論
+
+AI Chat v2 API は v1 との下位互換を保ちつつ、対話を「単一・多回問答」から「エージェント化された可観測対話」へと進化させました。マルチモーダル入力、ツール呼び出し、中断・再開可能、ストリーミング構造化イベント、組み込み CRUD などの機能を備えています。新規導入は v2 を推奨し、既存の v1 統合は段階的にスムーズに移行可能です。ご不明点があれば、いつでも技術サポートチームまでお問い合わせください。

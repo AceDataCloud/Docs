@@ -1,0 +1,440 @@
+---
+title: "Інструкція з інтеграції AI Chat v2 API"
+description: "AI Dialogue 集成指南 - Ace Data Cloud"
+---
+
+AI Chat v2 API (`/aichat2/conversations`) — це нове покоління інтерфейсу для діалогів, повна модернізація [AI Chat API](https://platform.acedata.cloud/documents/59fb1199-6694-4afb-a222-3554d7f7d05a). Воно розширює можливості v1, який був простим і підтримував багатокрокові діалоги, за рахунок:
+
+- **Багатомодального введення користувача**: через структуроване поле `message` можна безпосередньо передавати текст + зображення + файли, без необхідності додавати їх через `references`.
+- **Виклик інструментів у режимі агента**: вбудований набір інструментів для пошуку в мережі, скрапінгу веб-сторінок, читання файлів тощо, а також можливість підключення MCP-серверів користувача (Google Drive, Notion, Slack, GitHub тощо). Модель може в одному запиті багаторазово викликати інструменти для виконання складних завдань.
+- **Структуровані потокові події**: через `accept: text/event-stream` або `application/x-ndjson` можна отримувати події по одному токену: `text_delta`, `tool_use`, `tool_result`, `thinking`, `citation`, `card`, `artifact` тощо, що полегшує відображення на фронтенді за типами.
+- **Можливість переривання та відновлення**: модель у разі потреби додаткової інформації від користувача надсилає подію `ask_user_question` і призупиняє роботу. Наступний виклик із заповненими `tool_results` продовжує діалог.
+- **Нові CRUD-операції**: на тому ж endpoint через поле `action` можна виконувати `retrieve` / `retrieve_batch` / `update` / `delete` без додаткових API для управління сесіями.
+- **Постійне оновлення списку моделей**: за замовчуванням доступні GPT-5.4, Claude Opus 4.7, Claude Sonnet 4.6, Gemini 3.1 Pro, GLM 5.1, DeepSeek V4, Kimi K2.5 та інші сучасні моделі.
+
+Водночас запити повністю сумісні з v1: достатньо передати `model` + `question` (+ опційно `stateful` / `id` / `references` / `preset`), щоб отримати еквівалентну v1 відповідь у форматі `{answer, id}`. Тож міграція з `/aichat/conversations` на `/aichat2/conversations` не вимагає переписування клієнта — лише замінити шлях.
+
+> Якщо ви зараз використовуєте `/aichat/conversations`, старий інтерфейс залишиться в роботі, тож можна мігрувати у зручному темпі.
+
+## Процес отримання доступу
+
+Щоб користуватися API, потрібно подати заявку на відповідний сервіс на сторінці [AI Chat v2 API](https://platform.acedata.cloud/documents/e4a7c2b9-3f1d-4e8a-9b6c-a5d2f8e1b4c7). Після переходу натисніть кнопку «Acquire», щоб отримати необхідні облікові дані для запитів.
+
+Якщо ви не увійшли або не зареєстровані, вас автоматично перенаправить на сторінку входу. Після реєстрації та входу ви повернетесь на цю сторінку.
+
+При першому запиті надається безкоштовний ліміт для використання API.
+
+## Базове використання
+
+Найпростіший спосіб — як і у v1: передати `model` + `question` і отримати `{answer, id}`.
+
+Приклад CURL:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "question": "用一句话介绍下 AceDataCloud。"
+  }'
+```
+
+Приклад відповіді:
+
+```json
+{
+  "answer": "AceDataCloud 是一个聚合主流 AI 模型与多模态服务的统一 API 平台，开发者通过一个密钥即可调用 GPT、Claude、Gemini、Midjourney、Suno、Veo 等多家服务。",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Приклад на Python:
+
+```python
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/json",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "question": "用一句话介绍下 AceDataCloud。",
+}
+
+response = requests.post(url, json=payload, headers=headers)
+print(response.json())
+```
+
+Доступні значення `model` можна побачити у випадаючому списку панелі Try праворуч. Популярні категорії:
+
+- OpenAI: `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-5.2-pro`, `gpt-5.1-all`, `gpt-5-all`, `gpt-4.1`, `gpt-4o`, `gpt-4o-image`, `o3`, `o4-mini` тощо
+- Anthropic: `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5-20251101`, `claude-sonnet-4-6`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001` тощо
+- Google: `gemini-3.1-pro`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-image-preview`, `gemini-3-pro-preview`, `gemini-2.5-flash-lite` тощо
+- xAI: `grok-4`, `grok-4-1-fast`, `grok-4-1-fast-reasoning`, `grok-3-mini-fast` тощо
+- DeepSeek: `deepseek-v4-flash`, `deepseek-v3.2-exp`, `deepseek-r1-0528` тощо
+- Moonshot: `kimi-k2.5`, `kimi-k2-thinking`, `kimi-k2-thinking-turbo` тощо
+- Zhipu: `glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5v` тощо
+
+Правила тарифікації дивіться у картці Pricing на сторінці сервісу.
+
+## Багатокрокові діалоги
+
+Як і у v1, передайте `stateful: true` для збереження сесії. API поверне `id`; у наступних запитах передавайте цей `id`, щоб продовжити діалог без необхідності зберігати історію повідомлень.
+
+Перший запит:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "question": "记住一个数字：42。"
+  }'
+```
+
+Відповідь:
+
+```json
+{
+  "answer": "好的，我已经记住了 42。需要我用它做什么吗？",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Другий запит із тим самим `id`:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "question": "我刚才让你记住的数字是多少？"
+  }'
+```
+
+Відповідь:
+
+```json
+{
+  "answer": "你让我记住的数字是 42。",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+> За замовчуванням `stateful` дорівнює `true`. Якщо не хочете, щоб сервер зберігав діалог, встановіть `stateful: false`.
+
+## Потокова відповідь
+
+v2 підтримує два формати потокової передачі, які вибираються через заголовок `accept`:
+
+| Сценарій | `accept` | Формат даних |
+| :--- | :--- | :--- |
+| Веб-фронтенд / EventSource | `text/event-stream` | `data: {json}\n\n`, останній рядок `data: [DONE]\n\n` |
+| Сервер / CLI / Node.js потоковий парсинг | `application/x-ndjson` | Кожен рядок — JSON-об’єкт |
+| Без потокової передачі | `application/json` (за замовчуванням) | Відповідь цілком `{answer, id}` |
+
+### Приклад NDJSON
+
+```python
+import json
+import requests
+
+url = "https://api.acedata.cloud/aichat2/conversations"
+
+headers = {
+    "accept": "application/x-ndjson",
+    "authorization": "Bearer {token}",
+    "content-type": "application/json",
+}
+
+payload = {
+    "model": "gpt-5.4",
+    "stateful": True,
+    "question": "用三句话介绍杭州。",
+}
+
+with requests.post(url, json=payload, headers=headers, stream=True) as resp:
+    answer = ""
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        event = json.loads(line)
+        if event.get("type") == "text_delta":
+            # Сумісність з v1: інкрементальні фрагменти також у полі delta_answer
+            answer += event["content"]
+            print(event["delta_answer"], end="", flush=True)
+        elif event.get("type") == "done":
+            print()
+            print("usage =", event.get("usage"))
+```
+
+Кожен рядок NDJSON — це структурована подія, найпоширеніша — `text_delta`:
+
+```json
+{"type":"text_delta","content":"杭","delta_answer":"杭","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"州","delta_answer":"州","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"是","delta_answer":"是","id":"f2f4b3e8-..."}
+...
+{"type":"done","conversation_id":"f2f4b3e8-...","usage":{"prompt_tokens":21,"completion_tokens":58,"total_tokens":79},"terminal_reason":"natural_stop"}
+```
+
+### Приклад SSE
+
+У браузері `EventSource` не підтримує кастомний body запиту, тому рекомендується використовувати `fetch` з ручним парсингом по `\n\n`:
+
+```javascript
+const resp = await fetch("https://api.acedata.cloud/aichat2/conversations", {
+  method: "POST",
+  headers: {
+    accept: "text/event-stream",
+    authorization: "Bearer {token}",
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "gpt-5.4",
+    stateful: true,
+    question: "用三句话介绍杭州。",
+  }),
+});
+
+const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let buffer = "";
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const blocks = buffer.split("\n\n");
+  buffer = blocks.pop() ?? "";
+  for (const block of blocks) {
+    const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+    if (!dataLine) continue;
+    const payload = dataLine.slice(6);
+    if (payload === "[DONE]") return;
+    const event = JSON.parse(payload);
+    if (event.type === "text_delta") process.stdout.write(event.content);
+  }
+}
+```
+
+### Типи потокових подій
+
+| `type` | Значення |
+| :--- | :--- |
+| `text_delta` | Інкрементальний фрагмент відповіді асистента. `content` — новий текст; для сумісності з v1 також є `delta_answer` (рівне `content`) і `id`. |
+| `thinking` | Процес мислення моделі (з’являється лише у моделях з підтримкою reasoning). |
+| `tool_use` | Модель вирішила викликати інструмент, подія містить `tool_id`, `tool_name`, `input`. |
+| `tool_result` | Результат виконання інструменту, пов’язаний з попереднім `tool_use` через `tool_id`, `is_error` вказує на помилку. |
+| `card` | Структурована картка, створена інструментом (наприклад, зображення, прев’ю посилання), підходить для прямого рендерингу. |
+| `citation` | Джерело URL для відповідного текстового фрагмента. |
+| `ask_user_question` | Модель потребує додаткової інформації від користувача, діалог переходить у стан `awaiting_user_input` (див. розділ [Відновлення призупиненого діалогу](#відновлення-призупиненого-діалогу)). |
+| `artifact` | Окремий артефакт, створений моделлю (наприклад, блок коду, документ), можна зберегти або завантажити. |
+| `system_message` | Системне повідомлення (не від користувача чи асистента), використовується для UI. |
+| `compact` | Подія стиснення внутрішнього контексту, не потребує обробки. |
+| `error` | Помилка у поточному циклі, `message` описує проблему. |
+| `done` | Кінець потокової відповіді, містить `usage` (токени запиту, відповіді, всього) та `terminal_reason`. |
+
+Клієнти, які цікавляться лише кінцевою відповіддю, можуть просто об’єднати всі `content` з `text_delta` — це еквівалентно полю `answer` у режимі `application/json`.
+
+## Багатомодальне введення
+
+Якщо користувач надсилає зображення або файли, замість `question` передавайте масив `message`. Кожен елемент — це блок контенту:
+
+```json
+{
+  "model": "gpt-5.4",
+  "stateful": true,
+  "message": [
+    { "type": "text", "text": "这张图片里有几只猫？" },
+    { "type": "image_url", "image_url": { "url": "https://cdn.acedata.cloud/cats.jpg" } }
+  ]
+}
+```
+
+Підтримувані типи блоків:
+
+- `text` — звичайний текст, обов’язкове поле `text`.
+- `image_url` — зображення, обов’язкове поле `image_url.url`.
+- `file_url` — файл (PDF, CSV, TXT тощо), обов’язкове поле `file_url.url`.
+
+### Відношення до `references` у v1
+
+Для сумісності з клієнтами v1, v2 також розпізнає поле `references: ["https://...", ...]`:
+
+- URL з розширеннями `jpg / jpeg / png / gif / bmp / webp / svg / heic / heif` автоматично конвертуються у блоки `image_url`;
+- інші розширення — у блоки `file_url`;
+- якщо одночасно передано `question`, воно додається як блок `text` на початок.
+
+Отже, якщо хочете просто перейти з v1 без зміни тіла запиту, замініть шлях на `/aichat2/conversations`, а `references` працюватимуть як раніше.
+
+Для більш тонкого контролю (наприклад, вставити кілька зображень між текстом або зберегти порядок) використовуйте масив `message`.
+
+## Виклик інструментів і MCP
+
+Головне покращення v2 — модель може самостійно викликати інструменти для багатокрокових завдань, **за замовчуванням увімкнено**, без додаткових налаштувань у запиті. Типові сценарії:
+
+- Користувач питає: «Пошукай, які нові виставки в Шанхаї» → модель викликає вбудований web search → формує відповідь.
+- Користувач: «Прочитай цей PDF і напиши резюме» → модель викликає file_read → створює резюме.
+- Користувач уже авторизував Google Drive / GitHub / Notion у [Connections](https://platform.acedata.cloud/connections) → модель може читати/писати через відповідні MCP-інструменти.
+
+У потоках NDJSON / SSE виклики інструментів відображаються подіями `tool_use` і `tool_result`, наприклад:
+
+```json
+{"type":"tool_use","tool_id":"toolu_01ABCDEF","tool_name":"web_search","input":{"query":"上海 2026 春季展览"},"id":"f2f4b3e8-..."}
+{"type":"tool_result","tool_id":"toolu_01ABCDEF","output":"...","is_error":false,"id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"目前","delta_answer":"目前","id":"f2f4b3e8-..."}
+{"type":"text_delta","content":"上海","delta_answer":"上海","id":"f2f4b3e8-..."}
+...
+```
+
+Якщо не хочете показувати деталі викликів інструментів на фронтенді, ігноруйте події `tool_use` / `tool_result` / `card` / `citation`. Остаточна відповідь моделі все одно надходить через `text_delta`.
+
+Параметр `max_turns` обмежує максимальну кількість кроків виклику інструментів у запиті. За замовчуванням ліміт встановлює платформа. Зменшення (наприклад, `max_turns: 1`) примусить модель відповідати одразу без виклику інструментів.
+
+## Відновлення призупиненого діалогу
+
+Деякі інструменти можуть змусити модель «запитати користувача». У цьому випадку модель надсилає подію `ask_user_question`, а діалог переходить у стан `awaiting_user_input`:
+
+```json
+{
+  "type": "ask_user_question",
+  "tool_id": "toolu_01XYZW",
+  "tool_name": "ask_user_question",
+  "question": "你希望生成的报告是中文还是英文？",
+  "options": ["中文", "英文"],
+  "id": "f2f4b3e8-..."
+}
+```
+
+На фронтенді цю подію можна відобразити як картку для вибору відповіді користувачем. Потім наступним запитом з тим самим `id` передайте відповідь у `tool_results`:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: text/event-stream' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "gpt-5.4",
+    "stateful": true,
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+    "tool_results": [
+      {
+        "tool_use_id": "toolu_01XYZW",
+        "output": "中文"
+      }
+    ]
+  }'
+```
+
+`tool_use_id` у тілі запиту **повинен** точно співпадати з `tool_id` події призупинення; інакше повернеться помилка 400. Якщо у запиті є `tool_results`, поля `question` / `message` / `references` ігноруються.
+
+Якщо користувач хоче пропустити це питання, можна просто надіслати нове `question` або `message`, і платформа автоматично позначить призупинений виклик інструменту як «пропущений користувачем».
+
+## Управління сесіями (CRUD)
+
+v2 на тому ж endpoint через поле `action` надає легкий інтерфейс управління сесіями без додаткових API.
+
+### `action: retrieve` — отримати сесію
+
+```shell
+curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
+  -H 'accept: application/json' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "action": "retrieve",
+    "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+  }'
+```
+
+Повертає повний документ сесії (історія `messages`, `model`, `title`, `tools_used` тощо).
+
+### `action: retrieve_batch` — список сесій (резюме)
+
+```json
+{
+  "action": "retrieve_batch",
+  "model_group": "chatgpt",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+Повертає `{ items: [...], total }`. **Резюме не містить `messages`**, підходить для бокової панелі. При відкритті сесії можна окремо викликати `action: retrieve`.
+
+Доступні параметри фільтрації: `user_id`, `application_id`, `model_group`, `model`.
+
+### `action: update` — змінити заголовок або історію
+
+```json
+{
+  "action": "update",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44",
+  "title": "杭州旅行计划"
+}
+```
+
+Можна також передати `messages`, але сервер виконає сувору перевірку схеми (повинна бути у вигляді складеного `ToolUseContent`), інакше поверне 400. Зазвичай рекомендується лише змінювати `title`.
+
+### `action: delete` — видалити сесію
+
+```json
+{
+  "action": "delete",
+  "id": "f2f4b3e8-0c0a-4d3a-aaa2-7ff80c0a1c44"
+}
+```
+
+Повертає `{ id, success: true }`. Видалення незворотне, будьте уважні.
+
+## Плавна міграція з v1
+
+Якщо ви вже використовуєте [`/aichat/conversations`](https://platform.acedata.cloud/documents/59fb1199-6694-4afb-a222-3554d7f7d05a), перехід на v2 майже не вимагає змін у коді:
+
+1. Змініть URL з `https://api.acedata.cloud/aichat/conversations` на `https://api.acedata.cloud/aichat2/conversations`.
+2. Якщо раніше використовували моделі v1 (наприклад, `gpt-3.5`, `gpt-4-browsing`), рекомендується оновити до сучасних моделей v2 (`gpt-5.4`, `claude-opus-4-7`, `gemini-3.1-pro` тощо).
+3. Потокові поля NDJSON залишаються сумісними: кожна подія `text_delta` має `delta_answer` і `id`, тому клієнти, які парсили `delta_answer` по рядках, працюватимуть без змін.
+
+Після міграції можна поступово використовувати нові можливості v2 (багатомодальні `message`, SSE, виклики інструментів, CRUD через `action`) у зручному темпі.
+
+## Обробка помилок
+
+Помилки повертаються у форматі:
+
+```json
+{
+  "error": {
+    "code": "chat_error",
+    "message": "upstream LLM returned an error"
+  },
+  "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
+}
+```
+
+Типові помилки:
+
+- `400 bad_request`: відсутні обов’язкові поля, невідповідність `tool_use_id`, некоректна схема `messages` тощо.
+- `401 invalid_token`: неправильний заголовок `authorization`.
+- `404 not_found`: сесія з `id` не знайдена при `retrieve` / `update` / `delete`.
+- `429 too_many_requests`: перевищено ліміт запитів.
+- `500 chat_error`: помилка upstream LLM або `completion_tokens=0` (вважається, що токени не використані, оплата не стягується).
+
+У потокових відповідях помилки надходять як подія `{"type":"error","message":"..."}`, після чого потік завершується.
+
+## Висновок
+
+AI Chat v2 API зберігає сумісність з v1, але трансформує діалог у «агентський спостережуваний діалог» з багатомодальним введенням, викликами інструментів, можливістю паузи та відновлення, потоковими структурованими подіями та вбудованим CRUD. Рекомендуємо новим користувачам одразу інтегрувати v2; існуючі інтеграції v1 можуть мігрувати поступово. Якщо виникнуть питання, звертайтеся до нашої технічної підтримки.
