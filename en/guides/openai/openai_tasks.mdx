@@ -3,7 +3,9 @@ title: "Integration and Use of OpenAI Tasks API"
 description: "OpenAI generation 集成指南 - Ace Data Cloud"
 ---
 
-The OpenAI Tasks API lets you query tasks that were previously submitted to an OpenAI image API in **callback mode**. Use it to retrieve the final result of an image generation or edit request when you cannot wait for the synchronous HTTP response, or when you want to look up a task later by its `id` or your own `trace_id`.
+The OpenAI Tasks API lets you query tasks that were previously submitted to an OpenAI image API in **callback mode**. Use it to retrieve the final result of an image generation or edit request when you cannot wait for the synchronous HTTP response, or when you want to look up a task later.
+
+In callback mode the original image endpoint **returns a `task_id` to you synchronously the moment the request is accepted**. You simply keep that `task_id` and hand it back to this Tasks API to look the task up later — there is no need to supply a custom `trace_id` (only do so if you want to correlate tasks against your own business identifier).
 
 > Tasks are persisted to the server **only when** the original image request was submitted with a `callback_url`. Synchronous (non-callback) calls are not stored.
 
@@ -39,10 +41,10 @@ Supported actions on the request body:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `action` | string | yes | Must be `retrieve` |
-| `id` | string | one of | Task ID returned by the original image request |
-| `trace_id` | string | one of | Custom trace ID you supplied via `trace_id` on the original request |
+| `id` | string | one of | Task ID returned synchronously by the original image request (recommended) |
+| `trace_id` | string | one of | Custom trace ID, only needed if you explicitly supplied one via `trace_id` on the original request |
 
-At least one of `id` or `trace_id` must be provided. When both are supplied, `trace_id` takes precedence.
+At least one of `id` or `trace_id` must be provided. The normal flow is to use the `id` returned by the submit response — supply `trace_id` only when you want to look the task up by your own business identifier.
 
 ### Code Example
 
@@ -72,7 +74,7 @@ headers = {
 }
 payload = {
     "action": "retrieve",
-    "trace_id": "my-custom-trace-001",
+    "id": "7489df4c-ef03-4de0-b598-e9a590793434",
 }
 response = requests.post(url, json=payload, headers=headers)
 print(response.json())
@@ -179,10 +181,10 @@ curl -X POST 'https://api.acedata.cloud/openai/tasks' \
 
 ## End-to-End Example: Submit-and-Poll
 
-The Tasks API is most useful in callback mode. Below is a complete flow:
+The Tasks API is most useful in callback mode. In callback mode the submit endpoint **returns the `task_id` to you immediately**, so the polling step just hands that `task_id` back to the Tasks API — no custom `trace_id` required.
 
 ```python
-import os, time, uuid, requests
+import os, time, requests
 
 API = "https://api.acedata.cloud"
 HEADERS = {
@@ -190,8 +192,8 @@ HEADERS = {
     "content-type": "application/json",
 }
 
-# 1. Submit the image generation task with callback_url + trace_id
-trace_id = str(uuid.uuid4())
+# 1. Submit the image generation task (callback mode: any callback_url makes
+#    the endpoint return a task_id synchronously).
 submit = requests.post(
     f"{API}/openai/images/generations",
     headers=HEADERS,
@@ -199,17 +201,18 @@ submit = requests.post(
         "model": "gpt-image-1",
         "prompt": "a watercolor cat sitting on a desk",
         "callback_url": "https://webhook.site/your-uuid",
-        "trace_id": trace_id,
     },
 ).json()
 print("submitted:", submit)
 
-# 2. Poll the Tasks API until the task is finished
+task_id = submit["task_id"]
+
+# 2. Poll the Tasks API with that task_id until the task is finished.
 while True:
     task = requests.post(
         f"{API}/openai/tasks",
         headers=HEADERS,
-        json={"action": "retrieve", "trace_id": trace_id},
+        json={"action": "retrieve", "id": task_id},
     ).json()
     if task and task.get("response"):
         print("finished:", task["response"])
