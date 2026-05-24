@@ -1,0 +1,106 @@
+---
+title: "Response Format"
+description: "Unified success / error JSON shape, HTTP status code reference, and retry guidance."
+---
+
+All Ace Data Cloud business APIs return a **unified JSON envelope**, whether the call is synchronous or asynchronous.
+
+## Success Response
+
+```json
+{
+  "success": true,
+  "task_id": "1bae3bec-3ac4-4180-a148-74ee6cb68b98",
+  "image_url": "https://cdn.acedata.cloud/midjourney/...",
+  "image_width": 1024,
+  "image_height": 1024,
+  "actions": ["upscale1", "upscale2", "variation1", "variation2"]
+}
+```
+
+Common fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `success` | `boolean` | **Always present**. `true` = request accepted or completed |
+| `task_id` | `string` (UUID) | Unique async task ID; use it with `/tasks` |
+
+Service-specific fields vary — see each [API Reference](/en/api-reference) page.
+
+## Error Response
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "insufficient_balance",
+    "message": "Application balance is not enough for this request."
+  },
+  "trace_id": "f3b3c33b-265a-462a-bd9f-a2e678b18038"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `success` | `boolean` | Always `false` |
+| `error.code` | `string` | Machine-readable code (see table below) |
+| `error.message` | `string` | Human-readable, safe to surface to end-users |
+| `trace_id` | `string` (UUID) | **Always include this when filing support tickets** |
+
+## HTTP Status Code Reference
+
+| Status | Meaning | Client action |
+|---|---|---|
+| `200` | Success | Read `success` for business outcome |
+| `202` | Accepted, async | Poll using `task_id` |
+| `400` | Bad request | Read `error.message`, **don't retry** |
+| `401` | Authentication failed | Fix `Authorization` header, **don't retry** |
+| `402` | Out of balance | Prompt user to top up, **don't retry** |
+| `403` | Content moderation / no permission | **Don't retry**, change prompt or add subscription |
+| `404` | Resource not found (e.g. wrong task_id) | Verify ID |
+| `429` | Rate limited | Exponential backoff |
+| `500` | Internal error | Backoff retry, file `trace_id` on repeat |
+| `502` / `503` / `504` | Upstream down / timeout | Backoff retry, circuit-break after 3 |
+
+## Common Error Codes
+
+| `error.code` | HTTP | Meaning |
+|---|---|---|
+| `unauthorized` | 401 | Token missing, wrong, or revoked |
+| `insufficient_balance` | 402 | Subscription quota or global balance exhausted |
+| `forbidden` | 403 | Moderation rejection or no access |
+| `invalid_request` | 400 | Field missing, malformed, or out-of-range |
+| `rate_limited` | 429 | Upstream / gateway rate limit hit |
+| `upstream_error` | 502 | Upstream AI service returned error |
+| `upstream_timeout` | 504 | Upstream processing timed out |
+| `content_moderation` | 403 | Prompt failed moderation |
+| `task_not_found` | 404 | `task_id` unknown or expired |
+| `task_failed` | 200 | Task eventually failed (`status: failed`, see `error`) |
+
+## Retry Strategy
+
+<Note>
+  Not every failure should retry. **4xx errors (except 429) should NOT retry** — fix the request first. **5xx / 429 are safe to retry** with exponential backoff.
+</Note>
+
+```python
+import time, random, requests
+
+def call_with_retry(url, headers, json_body, max_attempts=5):
+    for attempt in range(max_attempts):
+        r = requests.post(url, headers=headers, json=json_body, timeout=300)
+        if r.status_code < 500 and r.status_code != 429:
+            return r.json()
+        # Backoff: 1s, 2s, 4s, 8s, 16s + 0–1s jitter
+        delay = (2 ** attempt) + random.random()
+        time.sleep(delay)
+    raise RuntimeError("max retries exceeded")
+```
+
+## Reporting Issues
+
+Every error response carries a `trace_id`. Always include it when filing a support ticket along with the full request/response.
+
+- Online: [platform.acedata.cloud](https://platform.acedata.cloud) tickets
+- Email: `support@acedata.cloud`
+- Urgent: SLA contact on [status.acedata.cloud](https://status.acedata.cloud)
