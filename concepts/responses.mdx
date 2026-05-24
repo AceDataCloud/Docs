@@ -1,0 +1,129 @@
+---
+title: "统一响应格式"
+description: "Ace Data Cloud 同步响应与 Webhook 回调的响应结构、错误码、HTTP 状态。"
+---
+
+Ace Data Cloud 的响应结构因**调用类型**而异，主要分两类：
+
+1. **同步 HTTP 响应** ——`POST /xxx` 请求的直接返回
+2. **Webhook 回调主体** ——异步任务完成后，POST 给你的 `callback_url`
+
+两者的成功/失败字段约定**不完全一样**，请分别看。
+
+## 同步响应：成功
+
+成功时返回上游业务字段，**通常**包含一个 `success: true` 标记。具体字段以各 API 的 [API 参考](/api-reference) 为准。
+
+例（Midjourney `/midjourney/imagine`）：
+
+```json
+{
+  "success": true,
+  "task_id": "27a1128f-14b5-440e-a82d-510c81e6fcd4",
+  "image_id": "1211290228438868029",
+  "image_url": "https://midjourney.cdn.acedata.cloud/.../image.png",
+  "image_width": 1024,
+  "image_height": 1024,
+  "actions": ["upscale1", "upscale2", "variation1", "variation2", ...]
+}
+```
+
+## 同步响应：失败
+
+错误响应**没有** `success` 字段，仅含 `error` 与 `trace_id`：
+
+```json
+{
+  "error": {
+    "code": "invalid_token",
+    "message": "The specified token is invalid or wrong."
+  },
+  "trace_id": "2efa9340-b21b-4e26-9e14-4aac95f343ab"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `error.code` | `string` | 机器可识别的错误码，见下表 |
+| `error.message` | `string` | 人类可读说明 |
+| `trace_id` | `string` (UUID) | 请求追踪 ID。**报障时务必提供此值** |
+
+## Webhook 回调主体
+
+如果调用时传了 `callback_url`，任务完成后我们 POST 一个 JSON 到该地址。回调主体的约定与同步响应不同——**总是**包含 `success` 字段：
+
+**成功回调：**
+
+```json
+{
+  "success": true,
+  "task_id": "...",
+  "trace_id": "...",
+  "image_url": "...",
+  "...": "...（其余业务字段）"
+}
+```
+
+**失败回调：**
+
+```json
+{
+  "success": false,
+  "task_id": "...",
+  "trace_id": "...",
+  "error": {
+    "code": "...",
+    "message": "..."
+  }
+}
+```
+
+回调用普通 HTTP POST 投递，**当前不带签名**。请确保 `callback_url` 不易被外部猜中，或在自己的服务端校验 `task_id` 是否属于已发起的任务。
+
+## HTTP 状态码
+
+| 状态 | 含义 | 客户端建议 |
+|---|---|---|
+| `200` | 成功（同步直出，或异步已受理） | 读响应 JSON |
+| `400` | 请求字段格式错误 | 看 `error.message`，**不要重试** |
+| `401` | Token 无效 / 过期 / 不匹配 | 检查凭证，**不要重试** |
+| `403` | 余额耗尽 / 凭证禁用 / 内容审核拒绝 | 看 `error.code`，**通常不要重试** |
+| `404` | 接口不存在 | 核对 URL |
+| `429` | 触发速率限制 | 指数退避后重试 |
+| `500` | 网关或上游内部错误 | 退避后可重试一次，仍失败请上报 `trace_id` |
+| `504` | 上游处理超时 | 退避重试或改异步 + Webhook |
+
+## 真实存在的错误码
+
+下面列出的都来自 `PlatformGateway` 异常定义。其它服务路径上的上游错误码（例如 Midjourney 自身的 `task_failed`）以各 API 文档为准。
+
+| `error.code` | HTTP | 含义 |
+|---|---|---|
+| `bad_request` | 400 | JSON payload 不合法 |
+| `no_token` | 400 | 缺少 `Authorization` 头 |
+| `invalid_token` | 401 | Token 拼写错误或已撤销 |
+| `token_expired` | 401 | Token 已过期 |
+| `token_mismatched` | 401 | Token 不属于当前请求的服务 |
+| `disabled` | 403 | 凭证或应用被禁用 |
+| `used_up` | 403 | 实例余额与通用余额均不足 |
+| `forbidden` | 403 | 内容审核拒绝 |
+| `no_api` | 404 | 请求路径未注册 |
+| `too_many_requests` | 429 | 超出速率限制 |
+| `api_error` | 500 | 网关或上游内部错误 |
+| `timeout` | 504 | 上游推理超时 |
+
+## 重试建议
+
+- **4xx 一般不要自动重试**（429 除外），先看 `error.message` 修请求
+- **429 / 5xx 可以重试**，使用带抖动的指数退避
+- 把 `trace_id` 记到你的日志里，定位问题最快
+
+## 上报问题
+
+报障时请同时提供：
+
+1. `trace_id`
+2. 请求 URL、Headers（去掉 Token 后半段）、Body
+3. 响应 Status + Body
+
+入口：[platform.acedata.cloud](https://platform.acedata.cloud) 工单 / `support@acedata.cloud` / [状态页](https://status.acedata.cloud)。
