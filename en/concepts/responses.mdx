@@ -1,0 +1,129 @@
+---
+title: "Unified Response Format"
+description: "Synchronous response and Webhook callback envelopes, error codes, and HTTP status codes."
+---
+
+Ace Data Cloud's response shape differs by **call type**:
+
+1. **Synchronous HTTP responses** — direct return of `POST /xxx`
+2. **Webhook callback bodies** — POSTed to your `callback_url` once an async task finishes
+
+The success/failure conventions of the two are **not identical**.
+
+## Synchronous response: success
+
+On success the response carries upstream business fields and **usually** includes a `success: true` marker. See each API's [API reference](/en/api-reference) for exact fields.
+
+Example (Midjourney `/midjourney/imagine`):
+
+```json
+{
+  "success": true,
+  "task_id": "27a1128f-14b5-440e-a82d-510c81e6fcd4",
+  "image_id": "1211290228438868029",
+  "image_url": "https://midjourney.cdn.acedata.cloud/.../image.png",
+  "image_width": 1024,
+  "image_height": 1024,
+  "actions": ["upscale1", "upscale2", "variation1", "variation2", ...]
+}
+```
+
+## Synchronous response: error
+
+Error responses have **no** `success` field — only `error` and `trace_id`:
+
+```json
+{
+  "error": {
+    "code": "invalid_token",
+    "message": "The specified token is invalid or wrong."
+  },
+  "trace_id": "2efa9340-b21b-4e26-9e14-4aac95f343ab"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `error.code` | `string` | Machine-readable code, see table below |
+| `error.message` | `string` | Human-readable description |
+| `trace_id` | `string` (UUID) | Request trace ID. **Always include this when filing a support ticket.** |
+
+## Webhook callback body
+
+If you passed `callback_url` when creating the task, we POST a JSON to that URL when the task finishes. The callback envelope differs from the sync envelope — it **always** includes a `success` field:
+
+**Success callback:**
+
+```json
+{
+  "success": true,
+  "task_id": "...",
+  "trace_id": "...",
+  "image_url": "...",
+  "...": "...(other business fields)"
+}
+```
+
+**Failure callback:**
+
+```json
+{
+  "success": false,
+  "task_id": "...",
+  "trace_id": "...",
+  "error": {
+    "code": "...",
+    "message": "..."
+  }
+}
+```
+
+Callbacks are delivered via plain HTTP POST and **currently carry no signature header**. Make sure your `callback_url` is hard to guess, or verify the incoming `task_id` against tasks you previously created.
+
+## HTTP status codes
+
+| Status | Meaning | Client guidance |
+|---|---|---|
+| `200` | Success (sync result or async accepted) | Parse JSON |
+| `400` | Malformed request | Read `error.message`, **do not retry** |
+| `401` | Token invalid / expired / mismatched | Check credentials, **do not retry** |
+| `403` | Balance exhausted / credential disabled / content moderation | Inspect `error.code`, **usually do not retry** |
+| `404` | Endpoint not found | Verify URL |
+| `429` | Rate limited | Retry with exponential backoff |
+| `500` | Gateway or upstream internal error | Retry once with backoff; if still failing, escalate with `trace_id` |
+| `504` | Upstream timeout | Backoff retry, or switch to async + webhook |
+
+## Verified error codes
+
+These all come from `PlatformGateway` exception classes. Service-specific upstream codes (e.g. Midjourney's own `task_failed`) follow each API's own docs.
+
+| `error.code` | HTTP | Meaning |
+|---|---|---|
+| `bad_request` | 400 | Malformed JSON payload |
+| `no_token` | 400 | Missing `Authorization` header |
+| `invalid_token` | 401 | Token is wrong or revoked |
+| `token_expired` | 401 | Token expired |
+| `token_mismatched` | 401 | Token does not belong to the requested service |
+| `disabled` | 403 | Credential or application disabled |
+| `used_up` | 403 | Instance balance and / or general balance exhausted |
+| `forbidden` | 403 | Content moderation rejected |
+| `no_api` | 404 | Path not registered |
+| `too_many_requests` | 429 | Rate limit exceeded |
+| `api_error` | 500 | Gateway / upstream internal error |
+| `timeout` | 504 | Upstream inference timeout |
+
+## Retry guidance
+
+- **4xx generally should not be auto-retried** (429 excepted); inspect `error.message` and fix the request
+- **429 / 5xx may be retried** with exponential backoff and jitter
+- Persist `trace_id` to your logs for the fastest support resolution
+
+## Filing a ticket
+
+Always include:
+
+1. `trace_id`
+2. Request URL, headers (mask the Token), and body
+3. Response status and body
+
+Channels: [platform.acedata.cloud](https://platform.acedata.cloud) ticket / `support@acedata.cloud` / [status page](https://status.acedata.cloud).
