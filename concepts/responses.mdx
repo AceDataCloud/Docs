@@ -1,110 +1,141 @@
 ---
 title: "统一响应格式"
-description: "Ace Data Cloud 所有 API 的成功 / 失败响应结构、HTTP 状态码速查与错误处理建议。"
+description: "Ace Data Cloud 同步响应与 Webhook 回调的响应结构、错误码、HTTP 状态。"
 ---
 
-Ace Data Cloud 所有业务 API 都返回 **统一 JSON 包装**，无论同步还是异步任务，都遵循同一套字段约定。
+Ace Data Cloud 的响应结构因**调用类型**而异，主要分两类：
 
-## 成功响应
+1. **同步 HTTP 响应** ——`POST /xxx` 请求的直接返回
+2. **Webhook 回调主体** ——异步任务完成后，POST 给你的 `callback_url`
+
+两者的成功/失败字段约定**不完全一样**，请分别看。
+
+## 同步响应：成功
+
+成功时返回上游业务字段，**通常**包含一个 `success: true` 标记。具体字段以各 API 的 [API 参考](/api-reference) 为准。
+
+例（Midjourney `/midjourney/imagine`）：
 
 ```json
 {
   "success": true,
-  "task_id": "1bae3bec-3ac4-4180-a148-74ee6cb68b98",
-  "image_url": "https://cdn.acedata.cloud/midjourney/...",
+  "task_id": "27a1128f-14b5-440e-a82d-510c81e6fcd4",
+  "image_id": "1211290228438868029",
+  "image_url": "https://midjourney.cdn.acedata.cloud/.../image.png",
   "image_width": 1024,
   "image_height": 1024,
-  "actions": ["upscale1", "upscale2", "variation1", "variation2"]
+  "actions": ["upscale1", "upscale2", "variation1", "variation2", ...]
 }
 ```
 
-公共字段：
+## 同步响应：失败
+
+错误响应**没有** `success` 字段，仅含 `error` 与 `trace_id`：
+
+```json
+{
+  "error": {
+    "code": "invalid_token",
+    "message": "The specified token is invalid or wrong."
+  },
+  "trace_id": "2efa9340-b21b-4e26-9e14-4aac95f343ab"
+}
+```
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `success` | `boolean` | **永远存在**。`true` 表示请求受理或完成 |
-| `task_id` | `string` (UUID) | 异步任务的唯一 ID，用 `/tasks` 端点查结果 |
+| `error.code` | `string` | 机器可识别的错误码，见下表 |
+| `error.message` | `string` | 人类可读说明 |
+| `trace_id` | `string` (UUID) | 请求追踪 ID。**报障时务必提供此值** |
 
-其余字段因服务而异——以各服务的 [API 参考](/api-reference) 为准。
+## Webhook 回调主体
 
-## 失败响应
+如果调用时传了 `callback_url`，任务完成后我们 POST 一个 JSON 到该地址。回调主体的约定与同步响应不同——**总是**包含 `success` 字段：
+
+**成功回调：**
+
+```json
+{
+  "success": true,
+  "task_id": "...",
+  "trace_id": "...",
+  "image_url": "...",
+  "...": "...（其余业务字段）"
+}
+```
+
+**失败回调：**
 
 ```json
 {
   "success": false,
+  "task_id": "...",
+  "trace_id": "...",
   "error": {
-    "code": "insufficient_balance",
-    "message": "Application balance is not enough for this request."
-  },
-  "trace_id": "f3b3c33b-265a-462a-bd9f-a2e678b18038"
+    "code": "...",
+    "message": "..."
+  }
 }
 ```
 
-字段说明：
+回调用普通 HTTP POST 投递，**当前不带签名**。请确保 `callback_url` 不易被外部猜中，或在自己的服务端校验 `task_id` 是否属于已发起的任务。
 
-| 字段 | 类型 | 说明 |
+## HTTP 状态码
+
+| 状态 | 含义 | 客户端建议 |
 |---|---|---|
-| `success` | `boolean` | 永远是 `false` |
-| `error.code` | `string` | 机器可识别的错误码，见下表 |
-| `error.message` | `string` | 人类可读说明，可直接展示给最终用户 |
-| `trace_id` | `string` (UUID) | 请求追踪 ID。**报障时务必提供此值**，我们用它查日志 |
-
-## HTTP 状态码速查
-
-| 状态 | 含义 | 客户端行为 |
-|---|---|---|
-| `200` | 成功 | 读 `success` 字段判断业务结果 |
-| `202` | 已受理，异步处理中 | 用 `task_id` 轮询 |
-| `400` | 请求参数错误 | 检查 `error.message`，**不要重试** |
-| `401` | 认证失败 | 检查 `Authorization` 头，**不要重试** |
-| `402` | 余额或额度不足 | 提示用户充值，**不要重试** |
-| `403` | 内容审核拒绝 / 没有该服务权限 | **不要重试**，让用户改 prompt 或加订阅 |
-| `404` | 资源不存在（如 task_id 拼写错误） | 检查 ID |
+| `200` | 成功（同步直出，或异步已受理） | 读响应 JSON |
+| `400` | 请求字段格式错误 | 看 `error.message`，**不要重试** |
+| `401` | Token 无效 / 过期 / 不匹配 | 检查凭证，**不要重试** |
+| `403` | 余额耗尽 / 凭证禁用 / 内容审核拒绝 | 看 `error.code`，**通常不要重试** |
+| `404` | 接口不存在 | 核对 URL |
 | `429` | 触发速率限制 | 指数退避后重试 |
-| `500` | 服务器内部错误 | 退避重试，连续失败请上报 `trace_id` |
-| `502` / `503` / `504` | 上游不可用 / 超时 | 退避重试，建议 3 次后熔断 |
+| `500` | 网关或上游内部错误 | 退避后可重试一次，仍失败请上报 `trace_id` |
+| `504` | 上游处理超时 | 退避重试或改异步 + Webhook |
 
-## 常见错误码
+## 真实存在的错误码
+
+下面列出的都来自 `PlatformGateway` 异常定义。其它服务路径上的上游错误码（例如 Midjourney 自身的 `task_failed`）以各 API 文档为准。
 
 | `error.code` | HTTP | 含义 |
 |---|---|---|
-| `unauthorized` | 401 | Token 缺失、错误或已撤销 |
-| `insufficient_balance` | 402 | 订阅额度或全局余额不足 |
-| `forbidden` | 403 | 内容审核拒绝或无访问权限 |
-| `invalid_request` | 400 | 请求字段缺失、格式错误或超出范围 |
-| `rate_limited` | 429 | 触发上游 / 网关速率限制 |
-| `upstream_error` | 502 | 上游 AI 服务返回错误 |
-| `upstream_timeout` | 504 | 上游处理超时 |
-| `content_moderation` | 403 | 提示词命中内容审核 |
-| `task_not_found` | 404 | `task_id` 不存在或已过期 |
-| `task_failed` | 200 | 任务最终失败（`status: failed`，看 `error` 子字段） |
+| `bad_request` | 400 | JSON payload 不合法 |
+| `no_token` | 400 | 缺少 `Authorization` 头 |
+| `invalid_token` | 401 | Token 拼写错误或已撤销 |
+| `token_expired` | 401 | Token 已过期 |
+| `token_mismatched` | 401 | Token 不属于当前请求的服务 |
+| `disabled` | 403 | 凭证或应用被禁用 |
+| `used_up` | 403 | 订阅额度或全局余额不足 |
+| `forbidden` | 403 | 内容审核拒绝 |
+| `no_api` | 404 | 请求路径未注册 |
+| `too_many_requests` | 429 | 超出速率限制 |
+| `api_error` | 500 | 网关或上游内部错误 |
+| `timeout` | 504 | 上游推理超时 |
 
-## 重试策略
+## 重试建议
 
-<Note>
-  并不是所有失败都该重试。**4xx 错误一般不要重试**，先修请求；**5xx / 429 可以退避重试**。
-</Note>
-
-推荐的指数退避：
+- **4xx 一般不要自动重试**（429 除外），先看 `error.message` 修请求
+- **429 / 5xx 可以重试**，建议指数退避：`1s, 2s, 4s, 8s, 16s` + 0–1s 抖动，至多 5 次
+- 把 `trace_id` 记到你的日志里，定位问题最快
 
 ```python
 import time, random, requests
 
-def call_with_retry(url, headers, json_body, max_attempts=5):
+def call_with_retry(url, headers, body, max_attempts=5):
     for attempt in range(max_attempts):
-        r = requests.post(url, headers=headers, json=json_body, timeout=300)
+        r = requests.post(url, headers=headers, json=body, timeout=300)
         if r.status_code < 500 and r.status_code != 429:
             return r.json()
-        # 退避：1s, 2s, 4s, 8s, 16s + 0–1s 抖动
-        delay = (2 ** attempt) + random.random()
-        time.sleep(delay)
+        time.sleep((2 ** attempt) + random.random())
     raise RuntimeError("max retries exceeded")
 ```
 
 ## 上报问题
 
-每次失败响应里都有 `trace_id`。报障时把它和**完整的请求/响应**贴给我们，定位最快。
+报障时请同时提供：
 
-- 在线：[platform.acedata.cloud](https://platform.acedata.cloud) 工单
-- 邮件：`support@acedata.cloud`
-- 紧急：[状态页](https://status.acedata.cloud) 上的 SLA 联系方式
+1. `trace_id`
+2. 请求 URL、Headers（去掉 Token 后半段）、Body
+3. 响应 Status + Body
+
+入口：[platform.acedata.cloud](https://platform.acedata.cloud) 工单 / `support@acedata.cloud` / [状态页](https://status.acedata.cloud)。
