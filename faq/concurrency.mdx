@@ -1,0 +1,109 @@
+---
+title: "FAQ — 并发与速率"
+description: "限流策略、并发上限、429 处理与重试建议。"
+---
+
+## 默认并发上限
+
+每个 API Token 默认有以下并发上限（同时进行中的请求数）：
+
+| 服务品类 | 默认并发 |
+|---|---|
+| LLM Chat（同步） | 20 |
+| Midjourney | 5 |
+| Flux / Seedream / Nano Banana | 10 |
+| Sora / Veo / Kling / Hailuo / Luma | 5 |
+| Suno / Producer | 5 |
+| Fish Audio | 10 |
+
+超出限制时返回：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "rate_limited",
+    "message": "Concurrency limit exceeded for this token."
+  }
+}
+```
+
+HTTP `429`。
+
+## 速率限制（QPS）
+
+- **同步接口**：默认 60 QPS / Token
+- **异步提交**：取决于上游，下方表给参考
+- **任务轮询（`/tasks`）**：默认 60 QPS / Token
+
+异步提交参考：
+
+| 服务 | 默认 QPS |
+|---|---|
+| Midjourney | 1 |
+| Sora | 0.5 |
+| Veo | 0.5 |
+| Kling | 1 |
+| Suno | 1 |
+| Flux | 5 |
+
+## 如何申请提升
+
+发邮件到 `support@acedata.cloud`，附上：
+
+1. 你的账号 email 或 user_id
+2. 期望的并发 / QPS
+3. 业务场景（用于评估上游容量）
+
+我们通常 1 个工作日内回复。
+
+## 推荐重试策略
+
+针对 `429` / `5xx`：
+
+```python
+import time, random, requests
+
+def call(url, headers, body, max_attempts=5):
+    for i in range(max_attempts):
+        r = requests.post(url, headers=headers, json=body, timeout=300)
+        if r.status_code < 500 and r.status_code != 429:
+            return r
+        # 退避：1, 2, 4, 8, 16 秒 + 抖动
+        time.sleep(2 ** i + random.random())
+    raise RuntimeError("max retries exceeded")
+```
+
+<Note>
+  **不要**对 4xx（除 429 外）重试——参数错误重试只会浪费 quota。
+</Note>
+
+## 客户端最佳实践
+
+- **任务侧并发控制**：在你侧用 semaphore 限到并发上限以内，**不要**依赖被服务器拒后再退避
+- **批量提交时**：分批，每批 ≤ 并发上限，每批之间 sleep 1–2s
+- **轮询频率**：单 task 5–15s 间隔；用 Webhook 更省事
+
+## 上游本身的限制
+
+我们的网关已经做了排队和重试，但上游仍可能：
+
+- 单账号每分钟生成上限
+- 某些时段 GPU 紧张
+- 单个 prompt 排队过长
+
+体现为：`task.status` 长时间停留在 `pending`。建议设置 `timeout`（如 10 分钟），超时后**重新提交**而非无限轮询。
+
+## 全局熔断
+
+如果你的应用流量大到可能触发限制：
+
+- 用 Redis / 消息队列做异步缓冲
+- 重要请求带优先级标记（联系商务定制）
+- 持久化 `task_id`，断电恢复后接着轮询
+
+## 相关文档
+
+- [异步任务模式](/concepts/async-tasks)
+- [统一响应格式](/concepts/responses)
+- [FAQ — 计费与额度](/faq/billing)
