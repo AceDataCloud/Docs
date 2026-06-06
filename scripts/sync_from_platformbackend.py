@@ -523,7 +523,7 @@ def sync_mcp_docs(backend_dir: Path, output_dir: Path, languages: list[str]) -> 
         if not source_dir.is_dir():
             continue
         for markdown_file in sorted(source_dir.glob("mcp_*.md")):
-            mcp_name = markdown_file.stem.removeprefix("mcp_").replace("nanobanana", "nano-banana")
+            mcp_name = markdown_file.stem.removeprefix("mcp_")
             mdx = convert_markdown_to_mdx(
                 markdown_file.read_text(encoding="utf-8"),
                 f"{mcp_name.replace('-', ' ').title()} MCP Server",
