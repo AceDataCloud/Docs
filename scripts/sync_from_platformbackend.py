@@ -276,12 +276,39 @@ def clean_verbose_summaries(spec: dict[str, Any]) -> None:
                 operation["summary"] = path_short_title(path, method)
 
 
-def load_services(backend_dir: Path) -> list[dict[str, Any]]:
+def collect_page_paths(value: Any, result: list[str]) -> None:
+    if isinstance(value, str):
+        result.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            collect_page_paths(item, result)
+    elif isinstance(value, dict):
+        for item in value.values():
+            collect_page_paths(item, result)
+
+
+def get_documented_service_aliases(output_dir: Path) -> set[str]:
+    aliases = {path.stem for path in (output_dir / "openapi").glob("*.json")}
+    docs_json = load_json(output_dir / "docs.json")
+    page_paths: list[str] = []
+    collect_page_paths(docs_json.get("navigation", {}), page_paths)
+    for page_path in page_paths:
+        parts = page_path.split("/")
+        if "guides" not in parts:
+            continue
+        index = parts.index("guides")
+        if index + 1 < len(parts) and len(parts) > index + 2:
+            aliases.add(parts[index + 1])
+    return aliases
+
+
+def load_services(backend_dir: Path, documented_aliases: set[str]) -> list[dict[str, Any]]:
     services = load_json(backend_dir / "cost" / "service_api_mapping.json")
     return [
         service
         for service in services
-        if not service.get("private") and service.get("alias") not in EXCLUDED_SERVICES
+        if service.get("alias") not in EXCLUDED_SERVICES
+        and (not service.get("private") or service.get("alias") in documented_aliases)
     ]
 
 
@@ -526,7 +553,8 @@ def main() -> int:
     if not (output_dir / "docs.json").exists():
         raise SystemExit(f"Invalid Docs output directory: {output_dir}")
 
-    services = load_services(backend_dir)
+    documented_aliases = get_documented_service_aliases(output_dir)
+    services = load_services(backend_dir, documented_aliases)
     services_by_alias = {service["alias"]: service for service in services}
     doc_service_map = build_doc_service_map(services, backend_dir)
     languages = get_docs_languages(output_dir)
