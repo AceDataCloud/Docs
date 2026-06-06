@@ -3,60 +3,38 @@ title: "Claude Code GitHub Actions 使用教程"
 description: "Claude Code 集成指南 - Ace Data Cloud"
 ---
 
-Claude Code 是 Anthropic 推出的一款 **Agentic Coding** 工具，也被称为世界最强编程 Agent 之一。Claude Code GitHub Actions 可以将 AI 编程能力集成到你的 GitHub 工作流中，只需在 PR 或 Issue 中 `@claude`，即可让 Claude 自动分析代码、创建 PR、实现功能、修复 Bug。
+[Claude Code GitHub Actions](https://docs.claude.com/en/docs/claude-code/github-actions) 是 Anthropic 官方推出的 GitHub Actions 集成方案。安装之后，只需要在 Issue、PR 或评论中 `@claude`，Claude 就会以 GitHub Bot 的身份在你的仓库里直接读代码、改代码、提 PR、跑 Review。
 
-本文档主要介绍如何通过 AceData Cloud 的代理服务，配置和使用 Claude Code GitHub Actions。
+本文档介绍如何通过 Ace Data Cloud 的代理服务，把 Claude Code GitHub Actions 接到 `claude-opus-4-8` 等 Claude 模型上，**无需 Anthropic 官方订阅**。文中所有截图均来自我们公开的 demo 仓库 [acedatacloud-dev/claude-code-action-demo](https://github.com/acedatacloud-dev/claude-code-action-demo)，可以直接 fork 复现。
 
 ## 申请流程
 
-要使用 Claude Code，首先可以到 [Claude Messages 服务页面](https://platform.acedata.cloud/documents/claude-messages) 点击「Acquire」按钮，获取请求所需要的凭证：
+要使用 Claude Code，首先可以到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications)，获取您的 API Token，留作备用。
 
-![](https://cdn.acedata.cloud/nyq0xz.png)
+![](https://cdn.acedata.cloud/5hmkdg.jpg)
 
 如果你尚未登录或注册，会自动跳转到登录页面邀请您来注册和登录，登录注册之后会自动返回当前页面。
 
 在首次申请时会有免费额度赠送，可以免费体验 Claude Code 服务。
 
-## 功能特点
+## 配置 GitHub Secret
 
-- **即时创建 PR**：描述需求，Claude 自动创建完整的 Pull Request
-- **自动实现代码**：在 Issue 中 `@claude`，将 Issue 转化为可运行代码
-- **遵循项目规范**：自动读取 `CLAUDE.md`，遵循你的代码风格和项目规范
-- **安全可靠**：代码运行在 GitHub 的 Runner 上，数据安全有保障
-
-## 配置步骤
-
-### 步驤一：安装 Claude GitHub App
-
-前往 [https://github.com/apps/claude](https://github.com/apps/claude) 将 Claude GitHub App 安装到你的仓库。
-
-![GitHub Claude App 安装页面](https://cdn.acedata.cloud/ba4b8df66d.png)
-
-该 App 需要以下仓库权限：
-
-| 权限 | 级别 | 说明 |
-|------|------|------|
-| **Contents** | Read & Write | 修改仓库文件 |
-| **Issues** | Read & Write | 响应 Issue |
-| **Pull requests** | Read & Write | 创建 PR 和推送变更 |
-
-### 步骤二：添加 API 密钥
-
-将 AceData Cloud 的 API 密钥添加为仓库 Secret：
+把刚才复制的 Token 添加到目标仓库的 Secret 中，命名为 `ANTHROPIC_AUTH_TOKEN`：
 
 1. 进入仓库 **Settings** → **Secrets and variables** → **Actions**
 2. 点击 **New repository secret**
-3. Name 填写 `ANTHROPIC_API_KEY`，Value 填入你在 AceData Cloud 获取的 API 令牌
-4. 点击 **Add secret** 保存
+3. **Name** 填 `ANTHROPIC_AUTH_TOKEN`，**Secret** 粘贴 Token 原文
+4. 点击 **Add secret**
 
-> **提示**：API 令牌可在 [AceData Cloud 控制台](https://platform.acedata.cloud/console) 中查看。
+> Ace Data Cloud 网关使用 `Authorization: Bearer <token>` 鉴权，但 `anthropics/claude-code-action` 内部会通过 Anthropic SDK 把请求改写成 `x-api-key`。下面的 Workflow 里会启动一个 GitHub Runner 上的本地 HTTP 代理，把 `x-api-key` 翻译回 `Authorization: Bearer`。
 
-### 步骤三：创建 Workflow 文件
+## 添加 Workflow 文件
 
-在仓库中创建 `.github/workflows/claude.yml` 文件：
+在仓库中创建 `.github/workflows/claude.yml`，**完整内容如下**（这就是我们 demo 仓库实际跑成功的版本）：
 
 ```yaml
 name: Claude Code
+
 on:
   issue_comment:
     types: [created]
@@ -64,164 +42,196 @@ on:
     types: [created]
   issues:
     types: [opened, assigned]
-  pull_request:
-    types: [opened, synchronize]
+  pull_request_review:
+    types: [submitted]
 
 jobs:
   claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    env:
+      ANTHROPIC_BASE_URL: http://127.0.0.1:8788
     steps:
-      - uses: anthropics/claude-code-action@v1
+      - uses: actions/checkout@v4
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-```
+          fetch-depth: 1
 
-如果需要使用 AceData Cloud 的代理 API 端点，还需要在 Workflow 中设置环境变量：
-
-```yaml
-name: Claude Code
-on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-
-jobs:
-  claude:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Start AceData Cloud proxy (x-api-key → Bearer)
         env:
-          ANTHROPIC_BASE_URL: "https://api.acedata.cloud"
-```
+          UPSTREAM: https://api.acedata.cloud
+          ACEDATA_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+        run: |
+          cat > /tmp/proxy.py <<'PY'
+          import http.server, socketserver, urllib.request, urllib.error, os
+          UPSTREAM = os.environ["UPSTREAM"].rstrip("/")
+          TOKEN = os.environ["ACEDATA_TOKEN"]
+          HOP = {"host", "content-length", "connection", "keep-alive",
+                 "proxy-authenticate", "proxy-authorization", "te",
+                 "trailers", "transfer-encoding", "upgrade"}
 
-## 使用方式
+          class H(http.server.BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.1"
 
-### 在 Issue 或 PR 评论中使用
+              def _proxy(self, method):
+                  body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) \
+                      if method in ("POST", "PUT", "PATCH") else None
+                  req = urllib.request.Request(UPSTREAM + self.path, data=body, method=method)
+                  for k, v in self.headers.items():
+                      if k.lower() in HOP or k.lower() in ("authorization", "x-api-key"):
+                          continue
+                      req.add_header(k, v)
+                  req.add_header("Authorization", f"Bearer {TOKEN}")
+                  try:
+                      resp = urllib.request.urlopen(req, timeout=600)
+                      data, code, headers = resp.read(), resp.status, resp.headers
+                  except urllib.error.HTTPError as e:
+                      data, code, headers = e.read(), e.code, e.headers
+                  self.send_response(code)
+                  for k, v in headers.items():
+                      if k.lower() in HOP:
+                          continue
+                      self.send_header(k, v)
+                  self.send_header("Content-Length", str(len(data)))
+                  self.end_headers()
+                  self.wfile.write(data)
 
-配置完成后，在任何 Issue 或 PR 的评论中 `@claude`，Claude 就会自动响应：
+              def do_GET(self): self._proxy("GET")
+              def do_POST(self): self._proxy("POST")
+              def do_PUT(self): self._proxy("PUT")
+              def do_DELETE(self): self._proxy("DELETE")
+              def log_message(self, *a, **k): pass
 
-```
-@claude 根据这个 Issue 的描述实现功能
-@claude 审查这个 PR 的代码安全性
-@claude 修复 user dashboard 组件中的 TypeError
-@claude 这个端点的用户认证应该怎么实现？
-```
+          class T(socketserver.ThreadingMixIn, http.server.HTTPServer):
+              daemon_threads = True
+              allow_reuse_address = True
 
-### 自动代码审查
+          T(("127.0.0.1", 8788), H).serve_forever()
+          PY
+          nohup python3 /tmp/proxy.py > /tmp/proxy.log 2>&1 &
+          for i in $(seq 1 20); do
+            curl -sS -o /dev/null http://127.0.0.1:8788/ && break
+            sleep 0.3
+          done
 
-创建一个在 PR 打开时自动执行代码审查的 Workflow：
-
-```yaml
-name: Code Review
-on:
-  pull_request:
-    types: [opened, synchronize]
-
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: anthropics/claude-code-action@v1
+      - name: Run Claude Code via AceData Cloud
+        uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: "/review"
-          claude_args: "--max-turns 5"
-        env:
-          ANTHROPIC_BASE_URL: "https://api.acedata.cloud"
+          anthropic_api_key: dummy-not-used
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: |
+            --model claude-opus-4-8
+          show_full_output: 'true'
 ```
 
-### 定时任务自动化
+提交之后，在 GitHub Actions 的 Workflows 列表中就可以看到这个 `Claude Code` 工作流：
 
-创建定时执行的自动化任务：
+![](https://cdn.acedata.cloud/7af53b45d9.png)
+
+### 几个关键点
+
+- `ANTHROPIC_BASE_URL: http://127.0.0.1:8788` 把所有 Anthropic API 请求指向本地代理。
+- 代理脚本读取 Secret `ANTHROPIC_AUTH_TOKEN`，把上游请求里的 `x-api-key` 头丢弃，统一替换为 `Authorization: Bearer <token>` 再转发到 `https://api.acedata.cloud`。
+- `anthropic_api_key: dummy-not-used` 必须填一个非空字符串，否则 `claude-code-action` 启动前的校验会直接失败。真正鉴权用的是 Secret 里的 `ANTHROPIC_AUTH_TOKEN`。
+- `--model claude-opus-4-8` 指定使用 Claude Opus 4.8，可以替换为 Ace Data Cloud 支持的任意 Claude 模型，例如 `claude-sonnet-4-5`、`claude-haiku-4-5`。
+
+## 触发 Claude
+
+新建一个 Issue，正文里写 `@claude` 加你要它做的事。例如下图，标题 `Smoke test #11 (Opus 4.8)`，正文 `@claude Reply with: OK.`：
+
+![](https://cdn.acedata.cloud/6a3ae85995.png)
+
+大约 30 秒后，`github-actions` Bot 就会用 Claude Opus 4.8 的输出回复评论：
+
+> **Claude finished @acedatacloud-dev's task in 22s** — View job
+>
+> OK.
+
+对应的 Workflow 运行结果是 **Success**，总耗时 51 秒：
+
+![](https://cdn.acedata.cloud/39b4f24dd8.png)
+
+## 工作原理
+
+```
+GitHub Issue / PR comment 含 @claude
+  └─→ GitHub Actions 触发 .github/workflows/claude.yml
+        ├─ Step 1: 启动本地代理 127.0.0.1:8788
+        └─ Step 2: anthropics/claude-code-action@v1
+              └─→ Claude Code CLI 把 ANTHROPIC_BASE_URL 当成 Anthropic API
+                    └─→ 请求落到本地代理（自带 x-api-key=dummy-not-used）
+                          └─→ 代理替换为 Authorization: Bearer <ANTHROPIC_AUTH_TOKEN>
+                                └─→ 转发到 https://api.acedata.cloud
+                                      └─→ Claude Opus 4.8 实际推理
+              └─→ Claude 在仓库里读代码 / 写代码 / 评论 / 提 PR
+```
+
+整条链路上唯一关键的转换在本地代理这一步。Ace Data Cloud 网关只识别 `Authorization: Bearer <token>` 这一种鉴权头，但官方 `claude-code-action` 内部使用的是 Anthropic SDK，会强制以 `x-api-key` 头发起请求。中间这个不到 40 行的 Python HTTP 代理就是用来桥接两种鉴权约定的，**全部跑在 GitHub Runner 内存里，Token 不出 Runner**。
+
+## 切换模型
+
+通过 `claude_args` 即可切换：
 
 ```yaml
-name: Daily Report
-on:
-  schedule:
-    - cron: "0 9 * * *"
-
-jobs:
-  report:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: anthropics/claude-code-action@v1
+      - name: Run Claude Code via AceData Cloud
+        uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: "生成昨天的提交摘要和未关闭 Issue 的报告"
-        env:
-          ANTHROPIC_BASE_URL: "https://api.acedata.cloud"
-```
-
-## Action 参数说明
-
-| 参数 | 说明 | 必填 |
-|------|------|------|
-| `anthropic_api_key` | API 密钥 | 是 |
-| `prompt` | 给 Claude 的指令（文本或 Skill 如 `/review`） | 否 |
-| `claude_args` | 传递给 Claude Code CLI 的参数 | 否 |
-| `github_token` | GitHub Token | 否 |
-| `trigger_phrase` | 自定义触发短语（默认 `@claude`） | 否 |
-
-### claude_args 常用参数
-
-```yaml
-claude_args: "--max-turns 5 --model claude-sonnet-4-5-20250929"
+          anthropic_api_key: dummy-not-used
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: |
+            --model claude-sonnet-4-5
+            --max-turns 8
+          show_full_output: 'true'
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `--max-turns` | 最大对话轮次（默认 10） |
-| `--model` | 使用的模型 |
-| `--mcp-config` | MCP 配置文件路径 |
-| `--allowed-tools` | 允许的工具（逗号分隔） |
-| `--debug` | 启用调试输出 |
+| `--model` | 模型名，常用 `claude-opus-4-8`、`claude-sonnet-4-5`、`claude-haiku-4-5` |
+| `--max-turns` | 单次任务最多对话轮次，默认 10 |
+| `--allowed-tools` | 限制可用工具，逗号分隔 |
+| `--mcp-config` | 额外 MCP 配置文件路径 |
 
-## 最佳实践
-
-### 配置 CLAUDE.md
-
-在仓库根目录创建 `CLAUDE.md` 文件，定义代码风格指南、审查标准和项目规范，Claude 会自动遵循这些规则。
-
-### 安全注意事项
-
-- **永远不要** 将 API 密钥直接写在 Workflow 文件中
-- 始终使用 GitHub Secrets（如 `${{ secrets.ANTHROPIC_API_KEY }}`）
-- 限制 Action 权限为最小必要范围
-- 在合并前人工审查 Claude 的建议
-
-### 成本控制
-
-- 使用明确的 `@claude` 指令减少不必要的 API 调用
-- 配置合理的 `--max-turns` 限制对话轮次
-- 设置 Workflow 级别的超时时间
-- 使用 GitHub 的并发控制限制并行运行数
+可用模型清单可在 [Claude Messages 服务页面](https://platform.acedata.cloud/documents/claude-messages) 查询。
 
 ## 常见问题
 
-### Claude 没有响应 @claude 命令？
+### 1. Workflow 启动失败，提示 `Either anthropic_api_key or claude_code_oauth_token must be provided`
 
-1. 确认 Claude GitHub App 已正确安装
-2. 检查 Workflow 是否启用
-3. 确认 API 密钥已设置为仓库 Secret
-4. 确保评论中使用的是 `@claude`（非 `/claude`）
+`claude-code-action@v1` 启动前必须在 `anthropic_api_key`、`claude_code_oauth_token` 或工作负载联合三者中至少给一个非空值。即使我们后面会用 Bearer Token 鉴权，也必须给 `anthropic_api_key` 一个占位字符串（示例里的 `dummy-not-used`）。
 
-### 认证错误？
+### 2. 代理返回 401，CLS 里看到 `Authorization: Bearer -`
 
-1. 确认 API 密钥有效且有足够权限
-2. 检查 Secret 名称是否正确（`ANTHROPIC_API_KEY`）
-3. 如果使用了 `ANTHROPIC_BASE_URL`，确认 URL 正确
+通常是 Secret 设置出错。**强烈避免**用 `gh secret set ANTHROPIC_AUTH_TOKEN --body -` 这种从 stdin 读入的写法 —— 如果 stdin 没接好，Secret 真的会被设成字面量 `-`。推荐写法：
 
-### 如何查看剩余额度？
+```bash
+gh secret set ANTHROPIC_AUTH_TOKEN --repo <org>/<repo> --body '<your-real-token>'
+```
 
-登录 [AceData Cloud 控制台](https://platform.acedata.cloud/console)，即可查看当前账户的剩余额度和使用情况。
+设完后可以在 Workflow 里临时加一行 `echo "len=${#ACEDATA_TOKEN}"` 打印长度（不会泄露原值），验证 Secret 是否生效。
+
+### 3. Claude 没有响应 `@claude`
+
+- 确认 `if:` 条件覆盖了触发事件，比如评论触发对应 `issue_comment` / `pull_request_review_comment`。
+- 确认仓库里有 `.github/workflows/claude.yml` 且 Actions 没有被禁用。
+- 进入 **Actions** 选项卡，确认能看到对应的工作流 Run。
+- 检查代理 Step 是否成功启动，可参考 demo 仓库里 `Proxy log (on failure)` Step 的实现，把 `/tmp/proxy.log` 打出来定位问题。
+
+### 4. 如何查看剩余额度
+
+登录 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications) 即可查看当前账户的剩余额度。  
+[控制台 - 使用历史](https://platform.acedata.cloud/console/usages) 可以看到每一次调用的扣费明细。
 
 ## 了解更多
 
-- 📖 [Claude Code GitHub Actions 官方文档](https://code.claude.com/docs/en/github-actions)
-- 📂 [claude-code-action 仓库](https://github.com/anthropics/claude-code-action)
-- 📋 [Workflow 示例](https://github.com/anthropics/claude-code-action/tree/main/examples)
-- 🔧 [AceData Cloud Claude Code 服务](https://platform.acedata.cloud/documents/claude-messages)
-- 💬 如有任何问题，欢迎通过平台客服联系我们
+- 🧪 [acedatacloud-dev/claude-code-action-demo](https://github.com/acedatacloud-dev/claude-code-action-demo) — 本文使用的、可直接 fork 复现的 demo 仓库
+- 📖 [Claude Code GitHub Actions 官方文档](https://docs.claude.com/en/docs/claude-code/github-actions)
+- 🛠️ [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action) — Action 源码
+- 🔧 [Ace Data Cloud Claude Messages 服务](https://platform.acedata.cloud/documents/claude-messages)
