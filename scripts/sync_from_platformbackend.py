@@ -9,11 +9,13 @@ whole site or overwrite docs.json.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 START = time.time()
 
@@ -252,7 +254,40 @@ def clean_openapi_spec(spec: dict[str, Any]) -> dict[str, Any]:
         cleaned_paths[path] = next_path_item
 
     cleaned["paths"] = cleaned_paths
-    return cleaned
+    return inline_path_refs(cleaned)
+
+
+def inline_path_refs(spec: dict[str, Any]) -> dict[str, Any]:
+    """Inline any ``$ref`` that points into ``#/paths/...``.
+
+    Such cross-operation refs (e.g. one model's requestBody reusing another's
+    schema) are non-idiomatic targets that Mintlify's OpenAPI validator rejects,
+    failing the entire docs build. A single bad spec silently froze the whole
+    site for weeks. Resolving these refs to self-contained schemas keeps every
+    generated spec valid no matter how the upstream source was authored. No-op
+    for specs without such refs.
+    """
+
+    def resolve(ref: str) -> Any:
+        cur: Any = spec
+        for token in unquote(ref)[2:].split("/"):
+            cur = cur[token.replace("~1", "/").replace("~0", "~")]
+        return cur
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/paths/"):
+                try:
+                    return walk(copy.deepcopy(resolve(ref)))
+                except (KeyError, TypeError):
+                    return node
+            return {key: walk(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        return node
+
+    return walk(spec)
 
 
 def path_short_title(path: str, method: str) -> str:
