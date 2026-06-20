@@ -1,0 +1,215 @@
+---
+title: "接入「使用 Ace Data Cloud 登录」（OAuth 2.0）"
+---
+
+让你自己的产品支持「使用 Ace Data Cloud 登录」，并在用户授权后，**代表用户**读写其 Ace Data Cloud 资源（个人资料、API Token、订阅、用量、订单等）。底层是标准的 **OAuth 2.0 授权码模式（Authorization Code）+ PKCE**，与 GitHub / Google 登录的接法完全一致——你已有的任意 OAuth 客户端库都能直接用。
+
+> **适合场景**：你在做一个第三方应用 / Agent / MCP 客户端 / 自动化工作流，想让用户用 Ace Data Cloud 账号一键登录，并按需访问他在平台上的资源，而不必让用户手动复制粘贴 API Key。
+
+## 名词 & 端点速查
+
+所有端点都在 `https://auth.acedata.cloud`，可通过发现端点（Discovery）随时获取最新地址：
+
+```bash
+curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
+```
+
+| 用途 | 端点 |
+|------|------|
+| 发现文档（Discovery） | `GET /.well-known/oauth-authorization-server` |
+| 用户授权页（浏览器跳转） | `GET https://auth.acedata.cloud/oauth2/authorize` |
+| 令牌端点（换 / 刷新 token） | `POST https://auth.acedata.cloud/oauth2/token` |
+| 撤销令牌 | `POST https://auth.acedata.cloud/oauth2/revoke` |
+| 用户信息（UserInfo） | `GET https://auth.acedata.cloud/api/v1/users/me` |
+| 应用注册管理（自助） | `https://auth.acedata.cloud/user/oauth-apps` |
+
+支持的能力：`response_type=code`、`grant_types=authorization_code, refresh_token`、`code_challenge_methods=S256, plain`、客户端认证方式 `client_secret_post`（机密客户端）/ `none`（PKCE 公开客户端）。
+
+## 权限范围（Scope）
+
+按「最小权限」申请，用户会在授权页看到你申请的每一项权限。
+
+**身份类（OIDC 兼容）**
+
+| Scope | 含义 | `/users/me` 返回字段 |
+|-------|------|----------------------|
+| `openid` | 用户唯一标识 | `id` |
+| `profile` | 基础资料 | `username`、`nickname`、`avatar`、`is_verified`、`date_joined` |
+| `email` | 邮箱 | `email` |
+| `phone` | 手机号（敏感） | `phone`、`region` |
+
+**平台资源类**
+
+| Scope | 含义 |
+|-------|------|
+| `applications:read` / `applications:write` | 读 / 改 用户的服务订阅与额度 |
+| `credentials:read` / `credentials:write` | 读 / 创建撤销 用户的 API Token |
+| `usage:read` | 读用户的调用历史 |
+| `orders:read` / `orders:write` | 读订单 / 下单并发起支付 |
+
+**聚合类（自动展开）**
+
+| Scope | 展开为 |
+|-------|--------|
+| `platform:read` | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
+| `platform:write` | `applications:write` + `credentials:write` + `orders:write` |
+| `platform` | `platform:read` + `platform:write` |
+
+**特殊**
+
+| Scope | 含义 |
+|-------|------|
+| `offline_access` | 颁发 **Refresh Token**（不申请则只下发 Access Token，过期需重新授权） |
+
+> 典型组合：第三方「一键登录」=`openid profile`；MCP / IDE 客户端需要自动配 Key =`openid profile credentials:read credentials:write`；完整管理台 =`openid profile email platform offline_access`。
+
+## 第 1 步：注册一个 OAuth 应用
+
+打开 [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) →「创建应用」，填写：
+
+1. **应用名称 / 描述 / Logo**：会显示在用户的授权同意页。
+2. **客户端类型（Client Type）**：
+   - **机密（confidential）**——你有后端，能安全保管 `client_secret`（Web 服务、后端服务）。
+   - **公开（public）**——纯前端 / 桌面 / CLI / 移动端，**无法**保管密钥，必须用 **PKCE**。
+3. **回调地址（Redirect URIs）**：授权完成后用户被重定向回的地址，**必须与你发起授权时传的 `redirect_uri` 完全一致**，可填多个。
+4. **权限范围（Scopes）**：勾选上一节里你需要的 scope。
+
+保存后拿到 **`client_id`**；机密客户端还会**一次性**显示 **`client_secret`**——立刻保存，关闭后无法再次查看（可在详情页「轮换密钥 / Rotate Secret」重新生成，旧密钥立即失效）。
+
+> 每个账号最多创建 **20** 个 OAuth 应用。
+
+## 第 2 步：把用户重定向到授权页
+
+在你的应用里，把用户浏览器跳转到授权页，带上查询参数：
+
+```
+https://auth.acedata.cloud/oauth2/authorize
+  ?response_type=code
+  &client_id=<你的 client_id>
+  &redirect_uri=<你注册的回调地址>
+  &scope=openid%20profile%20credentials:read
+  &state=<随机防 CSRF 串>
+  &code_challenge=<PKCE 挑战值>          # 公开客户端必填
+  &code_challenge_method=S256            # 公开客户端必填
+```
+
+- `state`：自己生成的随机串，回调时原样带回，用来防 CSRF，**务必校验**。
+- **PKCE（公开客户端必做，机密客户端也推荐）**：先生成随机 `code_verifier`，再计算
+  `code_challenge = BASE64URL( SHA256( code_verifier ) )`，把 `code_challenge` 放进授权 URL，
+  `code_verifier` 自己留着第 4 步用。
+
+用户登录并点击「同意」后，浏览器会被重定向回：
+
+```
+<redirect_uri>?code=<授权码>&state=<原样返回的 state>
+```
+
+若用户拒绝：`<redirect_uri>?error=access_denied&error_description=...&state=...`。
+
+> 授权码有效期 **10 分钟**，且**只能用一次**。
+
+## 第 3 步：用授权码换取令牌
+
+在你的**后端**（机密客户端）或客户端（PKCE 公开客户端）用 `code` 调用令牌端点。
+
+**机密客户端（带 client_secret）：**
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<上一步拿到的 code> \
+  -d client_id=<你的 client_id> \
+  -d client_secret=<你的 client_secret> \
+  -d redirect_uri=<和第 2 步完全一致的回调地址>
+```
+
+**公开客户端（PKCE，无 client_secret）：**
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<code> \
+  -d client_id=<你的 client_id> \
+  -d code_verifier=<第 2 步生成的 code_verifier> \
+  -d redirect_uri=<回调地址>
+```
+
+成功返回（`refresh_token` 仅在申请了 `offline_access` 时出现）：
+
+```json
+{
+  "access_token": "<JWT>",
+  "token_type": "Bearer",
+  "expires_in": 1296000,
+  "scope": "openid profile credentials:read",
+  "refresh_token": "<JWT，仅 offline_access 时>"
+}
+```
+
+`access_token` 是一个 JWT，内含 `scope` 声明；有效期 **15 天**（`expires_in` 秒数）。Refresh Token 有效期 **30 天**。
+
+## 第 4 步：用 Access Token 调用接口
+
+把令牌放进 `Authorization: Bearer` 头即可。
+
+**读取用户信息（UserInfo，字段按已授权 scope 过滤）：**
+
+```bash
+curl https://auth.acedata.cloud/api/v1/users/me \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**调用平台资源接口**（`api.acedata.cloud`，按 scope 鉴权）。例如已获 `credentials:read`：
+
+```bash
+curl https://api.acedata.cloud/api/v1/credentials/ \
+  -H "Authorization: Bearer <access_token>"
+```
+
+平台后端会校验 JWT 里的 `scope` 声明——令牌只能访问用户授权过的资源。若访问了未授权的资源，会返回 `403`。
+
+## 刷新令牌
+
+Access Token 过期后，用 Refresh Token 换一对新令牌（需当初申请了 `offline_access`）：
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=refresh_token \
+  -d refresh_token=<你的 refresh_token>
+```
+
+返回结构同第 3 步；scope 会从原授权中**原样保留**。刷新后旧 Refresh Token 失效（轮换），请保存新的。
+
+## 撤销令牌
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/revoke \
+  -d token=<access_token 或 refresh_token>
+```
+
+## 真实案例：我们自己的 MCP 服务器就是这么接的
+
+Ace Data Cloud 的 15+ 个 MCP 服务器（NanoBanana、Midjourney、Suno、Seedance、Kling…）在 Claude Desktop / Cursor 里出现的「Sign in with Ace Data Cloud」连接，走的就是这套流程：它们都是注册为 **公开（PKCE）** 类型的 OAuth 应用，申请 `credentials` 相关 scope，用户授权后 MCP 服务器即可代表用户调用 `api.acedata.cloud`——无需用户手动粘贴 API Key。你的接法和它们完全一样。
+
+## 常见错误
+
+错误响应统一为 `{ "error": "<code>", "error_description": "&lt;人类可读说明>" }`：
+
+| error | 含义 / 排查 |
+|-------|-------------|
+| `invalid_request` | 缺少或非法参数（如没传 `code` / `client_id`） |
+| `invalid_client` | `client_id` 不存在、应用被停用，或 `client_secret` 不对 |
+| `invalid_grant` | 授权码不存在 / 已过期（>10 分钟）/ 已被用过 / PKCE 校验失败 / `redirect_uri` 与授权时不一致 |
+| `access_denied` | 用户在授权页点了「拒绝」 |
+| `unsupported_grant_type` | `grant_type` 不是 `authorization_code` 或 `refresh_token` |
+
+## 限制速查
+
+| 项 | 值 |
+|----|----|
+| 每账号最多 OAuth 应用数 | 20 |
+| 授权码有效期 | 10 分钟，单次使用 |
+| Access Token 有效期 | 15 天 |
+| Refresh Token 有效期 | 30 天（轮换） |
+| `redirect_uri` | 必须与注册值精确匹配 |
+| `client_secret` | 仅创建 / 轮换时显示一次，服务端以 SHA-256 哈希存储 |
