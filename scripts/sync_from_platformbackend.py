@@ -511,6 +511,14 @@ def sync_guides(
             write_text(output_dir / output_language / "guides" / "x402.mdx", mdx)
             total += 1
 
+        # OAuth "Sign in with Ace Data Cloud" is a platform-level guide (no service alias),
+        # so the loop above skips it — emit it explicitly like x402.
+        oauth_path = source_dir / "development_oauth_apps.md"
+        if oauth_path.exists():
+            mdx = convert_markdown_to_mdx(oauth_path.read_text(encoding="utf-8"), "OAuth Integration Guide")
+            write_text(output_dir / output_language / "guides" / "oauth.mdx", mdx)
+            total += 1
+
     log(f"  wrote {total} guide pages")
 
 
