@@ -16,10 +16,18 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 START = time.time()
 
 BASE_URL = "https://api.acedata.cloud"
+DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/?limit=1000"
+GUIDE_DESCRIPTIONS = {
+    "zh-Hans": "{service} 集成指南 - Ace Data Cloud",
+    "zh-Hant": "{service} 整合指南 - Ace Data Cloud",
+    "en": "{service} integration guide - Ace Data Cloud",
+}
 
 LANGUAGE_SOURCE_DIRS: dict[str, str] = {
     "zh-Hans": "zh-CN",
@@ -412,9 +420,13 @@ def build_doc_service_map(services: list[dict[str, Any]], backend_dir: Path) -> 
 
     alias_norms = sorted(((service["alias"], normalize(service["alias"])) for service in services), key=lambda item: -len(item[1]))
     result: dict[str, str | None] = {}
-    zh_docs = backend_dir / "docs" / "zh-CN"
+    zh_docs = backend_dir / "docs"
 
-    for markdown_file in sorted(zh_docs.glob("development_*.md")):
+    markdown_files = sorted(zh_docs.glob("development_*.md"))
+    if not markdown_files:
+        raise RuntimeError(f"No development docs found in {zh_docs}")
+
+    for markdown_file in markdown_files:
         doc_key = markdown_file.stem.removeprefix("development_")
         if doc_key.endswith("_title"):
             continue
@@ -464,6 +476,61 @@ def build_doc_service_map(services: list[dict[str, Any]], backend_dir: Path) -> 
         result[doc_key] = None
 
     return result
+
+
+def index_localized_guides(payload: Any, language: str) -> dict[str, dict[str, str]]:
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise RuntimeError(f"Invalid document feed for {language}")
+
+    guides: dict[str, dict[str, str]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sibling = item.get("sibling")
+        if not isinstance(sibling, dict) or not sibling.get("content"):
+            continue
+
+        candidates = [item.get("alias", ""), sibling.get("alias", "").removesuffix("-integration")]
+        api = item.get("api")
+        api_path = (api.get("path") or "").strip("/").replace("/", "_") if isinstance(api, dict) else ""
+
+        guide = {
+            "content": sibling["content"],
+            "title": sibling.get("title") or sibling.get("name") or "",
+        }
+        for candidate in candidates:
+            if candidate:
+                key = normalize(candidate)
+                existing = guides.get(key)
+                if existing and existing != guide:
+                    raise RuntimeError(f"Conflicting localized guide key {candidate!r} for {language}")
+                guides[key] = guide
+        if api_path:
+            guides.setdefault(normalize(api_path), guide)
+
+    if not guides:
+        raise RuntimeError(f"No localized guides found for {language}")
+    return guides
+
+
+def load_localized_guides(language: str) -> dict[str, dict[str, str]]:
+    request = Request(DOCUMENTS_URL, headers={"Accept-Language": language})
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=60) as response:
+                payload = json.load(response)
+            return index_localized_guides(payload, language)
+        except (HTTPError, URLError, OSError, RuntimeError, json.JSONDecodeError):
+            if attempt == 2:
+                raise
+            time.sleep(2**attempt)
+    raise AssertionError("unreachable")
+
+
+def guide_description(output_language: str, service_name: str) -> str:
+    template = GUIDE_DESCRIPTIONS.get(output_language, "{service} API guide - Ace Data Cloud")
+    return template.format(service=service_name)
 
 
 def sanitize_html_for_mdx(content: str) -> str:
@@ -519,14 +586,18 @@ def sync_guides(
 ) -> None:
     log("Syncing localized guides")
     total = 0
+    source_dir = backend_dir / "docs"
+    markdown_files = sorted(source_dir.glob("development_*.md"))
+    if not markdown_files:
+        raise RuntimeError(f"No development docs found in {source_dir}")
+
     for output_language in languages:
         source_language = LANGUAGE_SOURCE_DIRS.get(output_language, output_language)
-        source_dir = backend_dir / "docs" / source_language
-        if not source_dir.is_dir():
-            log(f"  WARNING: missing docs source language {source_language}")
-            continue
+        localized_guides = None if output_language == "zh-Hans" else load_localized_guides(source_language)
+        language_total = 0
+        missing_guides: list[str] = []
 
-        for markdown_file in sorted(source_dir.glob("development_*.md")):
+        for markdown_file in markdown_files:
             doc_key = markdown_file.stem.removeprefix("development_")
             if doc_key.endswith("_title") or doc_key in SKIP_DOC_KEYS:
                 continue
@@ -535,21 +606,37 @@ def sync_guides(
                 continue
             service = services_by_alias.get(service_alias, {})
             service_name = service.get("display_name") or service_alias.replace("-", " ").title()
-            content = markdown_file.read_text(encoding="utf-8")
-            mdx = convert_markdown_to_mdx(content, doc_key.replace("_", " ").title(), f"{service_name} 集成指南 - Ace Data Cloud")
+            localized_guide = localized_guides.get(normalize(doc_key)) if localized_guides else None
+            if localized_guides and not localized_guide:
+                missing_guides.append(doc_key)
+                continue
+            content = localized_guide["content"] if localized_guide else markdown_file.read_text(encoding="utf-8")
+            fallback_title = localized_guide["title"] if localized_guide else doc_key.replace("_", " ").title()
+            mdx = convert_markdown_to_mdx(
+                content,
+                fallback_title,
+                guide_description(output_language, service_name),
+            )
             write_text(output_dir / output_language / "guides" / service_alias / f"{doc_key}.mdx", mdx)
             total += 1
+            language_total += 1
 
-        x402_path = source_dir / "x402_integration_guide.md"
-        if x402_path.exists():
+        if language_total == 0:
+            raise RuntimeError(f"No guide pages generated for {output_language}")
+        if missing_guides:
+            log(f"  WARNING: {output_language} missing {len(missing_guides)} localized guides: {', '.join(missing_guides)}")
+        log(f"  {output_language}: wrote {language_total} guide pages")
+
+        x402_path = source_dir / "x402_integration_guide.md" if output_language == "zh-Hans" else None
+        if x402_path and x402_path.exists():
             mdx = convert_markdown_to_mdx(x402_path.read_text(encoding="utf-8"), "X402 Integration Guide")
             write_text(output_dir / output_language / "guides" / "x402.mdx", mdx)
             total += 1
 
         # OAuth "Sign in with Ace Data Cloud" is a platform-level guide (no service alias),
         # so the loop above skips it — emit it explicitly like x402.
-        oauth_path = source_dir / "development_oauth_apps.md"
-        if oauth_path.exists():
+        oauth_path = source_dir / "development_oauth_apps.md" if output_language == "zh-Hans" else None
+        if oauth_path and oauth_path.exists():
             mdx = convert_markdown_to_mdx(oauth_path.read_text(encoding="utf-8"), "OAuth Integration Guide")
             write_text(output_dir / output_language / "guides" / "oauth.mdx", mdx)
             total += 1
@@ -561,10 +648,9 @@ def sync_mcp_docs(backend_dir: Path, output_dir: Path, languages: list[str]) -> 
     log("Syncing localized MCP docs")
     total = 0
     for output_language in languages:
-        source_language = LANGUAGE_SOURCE_DIRS.get(output_language, output_language)
-        source_dir = backend_dir / "docs" / source_language
-        if not source_dir.is_dir():
+        if output_language != "zh-Hans":
             continue
+        source_dir = backend_dir / "docs"
         for markdown_file in sorted(source_dir.glob("mcp_*.md")):
             mcp_name = markdown_file.stem.removeprefix("mcp_")
             mdx = convert_markdown_to_mdx(
