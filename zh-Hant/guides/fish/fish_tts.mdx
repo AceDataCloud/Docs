@@ -1,136 +1,231 @@
 ---
-title: "Fish TTS API 接入說明"
+title: "Fish TTS API 對接說明"
 description: "Fish music generation 整合指南 - Ace Data Cloud"
 ---
 
-本文將介紹 Fish TTS API 的接入說明，該接口與 [Fish Audio 官方 OpenAPI](https://docs.fish.audio/text-to-speech/text-to-speech) 完全相容，可直接將原本調用 `https://api.fish.audio/v1/tts` 的程式碼遷移到 `https://api.acedata.cloud/fish/tts`，僅需替換授權資訊即可，無需修改請求體結構。
+本接口基於 [Fish Audio 官方 TTS API](https://docs.fish.audio/text-to-speech/text-to-speech)，僅在鑑權方式（使用本平台 token）和異步回調（`callback_url` 擴展）上有差異，請求體結構與上游一致。地址為 `POST https://api.acedata.cloud/fish/tts`。
 
 ## 申請流程
 
-要使用 API，需要先到 [Fish TTS API](https://platform.acedata.cloud/services/fish) 對應頁面申請對應的服務，進入頁面後，點擊「Acquire」按鈕。
+要使用 Fish TTS API，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications) 獲取您的 API Token，留作備用。
 
-如果你尚未登入或註冊，會自動跳轉到登入頁面邀請您來註冊和登入，登入註冊後會自動返回當前頁面。
+![](https://cdn.acedata.cloud/5hmkdg.jpg)
 
-在首次申請時會有免費額度贈送，可以免費使用該 API。
+如果你尚未登錄或註冊，會自動跳轉到登錄頁面邀請你註冊和登錄，完成後會自動返回當前頁面。
 
-## 與官方 API 的差異
+**一個 API Token 即可調用平台所有服務，無需為每個服務單獨申請。** 首次申請會贈送免費額度，可免費體驗；額度不足時可在 [控制台](https://platform.acedata.cloud/console/coin) 充值通用餘額。
 
-本 API 在保留 Fish Audio 官方請求和響應欄位的基礎上做了如下少量增強，方便在我們的平台上更好地整合：
+> 📘 完整文檔：[Fish TTS API →](https://platform.acedata.cloud/services/fish)
 
-- **授權方式**：使用 `Authorization: Bearer {token}`，其中 `{token}` 是在本平台申請的密鑰，而非 Fish 官方密鑰。
-- **TTS 模型選擇**：透過 HTTP 請求標頭 `model` 指定，可選 `s1` 或 `s2-pro`，預設值為 `s2-pro`。這與 Fish 官方一致。
-- **`latency` 預設值**：上游 `/fish/v1/tts` 在未傳 `latency` 時會返回錯誤，本接口在缺省時會自動補上 `latency=normal`，與 Fish 官方預設行為保持一致。
-- **異步回調（平台擴展）**：在請求體中傳入額外的 `callback_url` 欄位時，接口會立即返回 `{task_id, started_at}`，待上游真正完成後，將完整的 `{audio_url, ...}` 結果以 POST JSON 形式回調到該 URL。Fish 官方接口不支援此欄位，傳入它僅會觸發我方的異步流程。
+## 請求頭
 
-除上述差異外，TTS 請求體中的所有欄位（`text`、`reference_id`、`references`、`prosody`、`format`、`sample_rate`、`mp3_bitrate`、`chunk_length`、`temperature`、`top_p` 等）皆直接透傳給上游，行為與官方文件完全一致。
+| Header          | 必填  | 說明                                                                                                     |
+| --------------- | --- | ------------------------------------------------------------------------------------------------------ |
+| `authorization` | 是   | `Bearer {token}`，`{token}` 是在本平台申請的密鑰。                                                                 |
+| `content-type`  | 是   | `application/json`。                                                                                    |
+| `accept`        | 否   | `application/json`。                                                                                    |
+| `model`         | 否   | TTS 模型，可選 `s1`、`s2-pro` 或 `s2.1-pro`，默認 `s2-pro`。`s2.1-pro` 為最新一代，`s2-pro` 表現力強；`s1` 更穩定，長文本不易跑偏。三者同價。 |
 
-## 基本使用
+## 請求體字段
 
-最小的請求只需傳 `text` 一個欄位，範例如下：
+| 字段             | 類型                | 必填  | 說明                                                                                                                                                                         |
+| -------------- | ----------------- | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`         | string            | 是   | 要合成的文本，非空字符串。                                                                                                                                                              |
+| `format`       | string            | 是   | 輸出音頻格式。**當前必須顯式傳值**，可選 `mp3` 或 `pcm`。即使官方文檔列出 `wav`、`opus`，本接口上游也會返回 `400 Input should be 'pcm' or 'mp3'`。                                                                 |
+| `reference_id` | string | string[] | 否   | 克隆音色 ID（可由 [Fish Model API](https://platform.acedata.cloud/documents/fish-model) 創建，或在 [Fish Model Query](https://platform.acedata.cloud/documents/fish-model-query) 中檢索）。 |
+| `references`   | object[]          | 否   | 內聯參考樣本，結構與上游一致，每項含 `audio` 與 `text`。與 `reference_id` 二選一。                                                                                                                  |
+| `sample_rate`  | integer           | 否   | 采樣率，常用 `16000`、`22050`、`44100`。`format=mp3` 默認 44100。                                                                                                                      |
+| `mp3_bitrate`  | integer           | 否   | MP3 码率，可選 `64`、`128`、`192`。僅 `format=mp3` 生效。                                                                                                                              |
+| `prosody`      | object            | 否   | 韻律覆蓋，支持 `speed`（語速，1.0 為原速）和 `volume`（音量增益 dB）。例如 `{"speed":1.2,"volume":0}`。                                                                                              |
+| `chunk_length` | integer           | 否   | 上游分片長度，默認上游決定。                                                                                                                                                             |
+| `temperature`  | number            | 否   | 采樣溫度，範圍約 0.0–1.0。                                                                                                                                                          |
+| `top_p`        | number            | 否   | top-p 采樣參數。                                                                                                                                                                |
+| `latency`      | string            | 否   | `normal` 或 `balanced`，缺省由本接口自動補 `normal`（直接傳空字符串上游會拒絕）。                                                                                                                    |
+| `normalize`    | boolean           | 否   | 是否對文本做歸一化。                                                                                                                                                                 |
+| `callback_url` | string            | 否   | 異步回調地址，詳見下文「異步回調」。**這是相對官方接口的擴展**。                                                                                                                                         |
+
+> 字段命名與上游完全一致。除 `callback_url` 外，其餘字段含義和取值參見 [Fish 官方 TTS 文檔](https://docs.fish.audio/text-to-speech/text-to-speech)。
+
+## 示例 1：最小請求（`text` + `format=mp3`）
 
 ```shell
 curl -X POST 'https://api.acedata.cloud/fish/tts' \
-  -H 'accept: application/json' \
   -H 'authorization: Bearer {token}' \
   -H 'content-type: application/json' \
-  -H 'model: s2-pro' \
   -d '{
-    "text": "今天天氣真好，我們一起出去散散步吧。"
+    "text": "Hello world.",
+    "format": "mp3"
   }'
 ```
 
-回傳結果範例：
+返回（實測）：
 
 ```json
 {
-  "audio_url": "https://platform.r2.fish.audio/task/8a72ff9840234006a9f74cb2fa04f978.mp3"
+  "audio_url": "https://platform.r2.fish.audio/task/05f81919f2e04e35bb404a88fb177854.mp3"
 }
 ```
 
-回傳結果直接是 Fish 官方的欄位，包括：
+`audio_url` 是 Fish R2 直鏈，可直接 GET 下載或在 `<audio>` 中播放，簽名通常在 1 小時內有效，建議落地後轉存到自己的對象存儲。
 
-- `audio_url`：生成的音訊 URL，可直接下載或播放。
-- `latency_ms`（可選）：上游處理耗時，毫秒。
+## 示例 2：使用克隆音色 `reference_id`
 
-如果需要使用克隆音色，可以在請求體中加入 `reference_id`：
+下面用 Fish 平台上一個公開的西班牙語音色（`_id` 可通過 [Fish Model Query](https://platform.acedata.cloud/documents/fish-model-query) 檢索得到）：
 
 ```shell
 curl -X POST 'https://api.acedata.cloud/fish/tts' \
-  -H 'accept: application/json' \
   -H 'authorization: Bearer {token}' \
   -H 'content-type: application/json' \
-  -H 'model: s2-pro' \
   -d '{
-    "text": "今天天氣真好，我們一起出去散散步吧。",
-    "reference_id": "d7900c21663f485ab63ebdb7e5905036",
-    "format": "mp3",
-    "sample_rate": 44100
+    "text": "Hermanos míos, hoy es un buen día.",
+    "reference_id": "8d2c17a9b26d4d83888ea67a1ee565b2",
+    "format": "mp3"
   }'
 ```
 
-## 異步回調
+返回（實測）：
 
-由於 Fish TTS 在長文本場景下生成耗時可能較長，長連線保持會消耗系統資源，本 API 提供了異步回調能力（這是相較 Fish 官方接口的擴展）。
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/560078cf603d4584a2313ca4cd742056.mp3"
+}
+```
 
-整體流程為：客戶端發起請求時在請求體中額外指定 `callback_url` 欄位，API 會立即返回包含 `task_id` 的回應；上游真正生成完成後，最終的 `audio_url` 等欄位會以 POST JSON 形式發送到 `callback_url`，並在請求體中帶上同一個 `task_id` 欄位，便於將異步結果與原始任務關聯。
-
-請求範例：
+## 示例 3：調節語速 / 音量（`prosody`）
 
 ```shell
 curl -X POST 'https://api.acedata.cloud/fish/tts' \
-  -H 'accept: application/json' \
   -H 'authorization: Bearer {token}' \
   -H 'content-type: application/json' \
-  -H 'model: s2-pro' \
   -d '{
-    "text": "今天天氣真好，我們一起出去散散步吧。",
+    "text": "Faster speech with prosody overrides.",
+    "prosody": { "speed": 1.2, "volume": 0 },
+    "format": "mp3"
+  }'
+```
+
+返回（實測）：
+
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/f16759a3335748f1b4d1e56ed54d81dd.mp3"
+}
+```
+
+`speed` 大於 1 加快，小於 1 減慢；`volume` 單位 dB，0 表示不變，正數增益，負數衰減。
+
+## 示例 4：切換模型 + 控制碼率
+
+通過 HTTP 頭 `model: s1` 切換到穩定型模型，請求體中加 `mp3_bitrate: 128` 控制 MP3 码率：
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -H 'model: s1' \
+  -d '{
+    "text": "高比特率 mp3",
+    "format": "mp3",
+    "mp3_bitrate": 128
+  }'
+```
+
+返回（实测）：
+
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/6b660348776e40529e537aa30b1051d2.mp3"
+}
+```
+
+## 示例 5：PCM 原始波形
+
+需要在浏览器里做实时拼接、或在客户端做后续处理（混音、变速）的场景，推荐使用 `pcm`：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "text": "嗨",
+    "format": "pcm",
+    "sample_rate": 16000
+  }'
+```
+
+返回（实测）：
+
+```json
+{
+  "audio_url": "https://platform.r2.fish.audio/task/2052cc1f33b049d99a18fcc496f4462e.mp3"
+}
+```
+
+> 当前响应链接的扩展名固定为 `.mp3`，实际内容为请求中指定 `format` 的字节流。下载时应根据请求里的 `format` 决定如何解析。
+
+## 异步回调（`callback_url`）
+
+长文本一次合成可能需要十几秒到几十秒，连接如果中断需要重试。请求体中传 `callback_url` 后，接口会立即返回 `{task_id, started_at}`，上游真正完成时把完整结果以 POST JSON 形式回调到该 URL，请求体中带同一个 `task_id`。
+
+```shell
+curl -X POST 'https://api.acedata.cloud/fish/tts' \
+  -H 'authorization: Bearer {token}' \
+  -H 'content-type: application/json' \
+  -d '{
+    "text": "今天天气真好，我们一起出去散散步吧。",
+    "format": "mp3",
     "callback_url": "https://webhook.site/4815f79f-a40f-4078-ac85-1cc126b6bb34"
   }'
 ```
 
-立即返回的回應如下：
+立即返回（实测）：
 
 ```json
 {
-  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
-  "started_at": "2025-05-09T12:34:56.789Z"
+  "task_id": "79d82713-2897-4eeb-9934-e7544d471aa7",
+  "started_at": "2026-05-11T01:23:04.742Z"
 }
 ```
 
-稍後，`callback_url` 會收到完整結果：
+稍后 `callback_url` 会收到形如：
 
 ```json
 {
-  "task_id": "2725a2d3-f87e-4905-9c53-9988d5a7b2f5",
+  "task_id": "79d82713-2897-4eeb-9934-e7544d471aa7",
   "audio_url": "https://platform.r2.fish.audio/task/b627c2f7d38a4083a837570ba6d0962f.mp3"
 }
 ```
 
-也可使用 [Fish Tasks API](https://platform.acedata.cloud/documents/fish-tasks) 透過 `task_id` 主動輪詢任務狀態。
+也可以用 [Fish Tasks API](https://platform.acedata.cloud/documents/fish-tasks) 主动按 `task_id` 拉取结果，详见该文档。
 
-## 錯誤處理
+## 错误处理
 
-本接口的錯誤回應保留了 Fish 官方的 HTTP 狀態碼，但回應體使用平台統一格式，以便與 `/fish/audios`、`/fish/voices` 系列保持一致：
+- `400 token_mismatched`：请求参数缺失或不合法（最常见是漏传 `format`、`text` 为空）。
+- `401 invalid_token`：鉴权 token 不存在或无效。
+- `429 too_many_requests`：触发账号速率限制。
+- `500 api_error`：服务器内部错误。
 
-- `400 token_mismatched`：Bad request，可能缺少或參數無效。
-- `400 api_not_implemented`：Bad request，可能缺少或參數無效。
-- `401 invalid_token`：未授權，授權 token 無效或缺失。
-- `429 too_many_requests`：請求過多，已超出速率限制。
-- `500 api_error`：伺服器內部錯誤，伺服器端出現問題。
-
-### 錯誤回應範例
+错误响应示例：
 
 ```json
 {
   "success": false,
   "error": {
     "code": "api_error",
-    "message": "fetch failed"
+    "message": "获取失败"
   },
   "trace_id": "2cf86e86-22a4-46e1-ac2f-032c0f2a4e89"
 }
 ```
 
-## 結論
+参数校验错误会把上游的 pydantic 报错原文放在 `message` 字段，便于定位是哪个字段不合法，例如：
 
-Fish TTS API 與 Fish Audio 官方 OpenAPI 完全相容，可在零程式碼修改的前提下遷移既有專案，同時享有平台提供的統一授權、用量記帳以及異步回調能力。建議在生成長文本時優先使用異步回調，以避免長連線資源佔用。
+```json
+{
+  "status": 400,
+  "message": "[{\"type\":\"literal_error\",\"loc\":[\"format\"],\"msg\":\"输入应为 'pcm' 或 'mp3'\",\"input\":\"wav\"}]"
+}
+```
+
+## 结论
+
+接入 Fish TTS 的最小代价是：在已有调用 `api.fish.audio/v1/tts` 的代码里把鉴权换成本平台 token，并在请求体里**显式带上** `format: "mp3"`。长文本场景建议使用 `callback_url` 异步回调；对克隆音色 `reference_id` 的发现，请配合 [Fish Model Query](https://platform.acedata.cloud/documents/fish-model-query) 与 [Fish Model Get](https://platform.acedata.cloud/documents/fish-model-get)。
