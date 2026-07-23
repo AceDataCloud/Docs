@@ -7,13 +7,15 @@ description: "Recaptcha verification code recognition service 整合指南 - Ace
 
 ## 申請流程
 
-要使用 API，需要先到 [Recaptcha2 圖像識別 API](https://platform.acedata.cloud/documents/captcha-recognition-recaptcha2) 對應頁面申請對應的服務，進入頁面之後，點擊「Acquire」按鈕，如圖所示：
+要使用 Recaptcha2 圖像識別 API，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications) 獲取您的 API Token，留作備用。
 
-![](https://cdn.acedata.cloud/q6ytrc.png)
+![](https://cdn.acedata.cloud/5hmkdg.jpg)
 
-如果你尚未登錄或註冊，會自動跳轉到登錄頁面邀請您來註冊和登錄，登錄註冊之後會自動返回當前頁面。
+如果你尚未登錄或註冊，會自動跳轉到登錄頁面邀請你註冊和登錄，完成後會自動返回當前頁面。
 
-在首次申請時會有免費額度贈送，可以免費使用該 API。
+**一個 API Token 即可調用平台所有服務，無需為每個服務單獨申請。** 首次申請會贈送免費額度，可免費體驗；額度不足時可在 [控制台](https://platform.acedata.cloud/console/coin) 充值通用餘額。
+
+> 📘 完整文檔：[Recaptcha2 圖像識別 API →](https://platform.acedata.cloud/documents/captcha-recognition-recaptcha2)
 
 ## 基本使用
 
@@ -124,11 +126,11 @@ description: "Recaptcha verification code recognition service 整合指南 - Ace
 返回結果一共有多個字段，介紹如下：
 
 - `solution`，此次 Recaptcha2 驗證碼圖像任務處理後驗證結果。
-  - `size`，Recaptcha2 驗證碼圖像的尺寸大小。
-  - `label`，Recaptcha2 驗證碼圖像所識別的內容。
-  - `confidences`，Recaptcha2 驗證碼圖像識別區域的置信度，區域是從0開始的。
-  - `objects`，Recaptcha2 驗證碼圖像識別後滿足識別內容的區域，區域從0開始。
-  - `type`，此次 Recaptcha2 驗證碼圖像任務的類型，多個區域時為 `multi`。
+    - `size`，Recaptcha2 驗證碼圖像的尺寸大小。
+    - `label`，Recaptcha2 驗證碼圖像所識別的內容。
+    - `confidences`，Recaptcha2 驗證碼圖像識別區域的置信度，區域是從0開始的。
+    - `objects`，Recaptcha2 驗證碼圖像識別後滿足識別內容的區域，區域從0開始。
+    - `type`，此次 Recaptcha2 驗證碼圖像任務的類型，多個區域時為 `multi`。
 
 可以看到我們得到了處理 Recaptcha2 驗證碼圖像的驗證結果，我們首先對驗證碼圖像進行劃分區域，如下圖所示：
 
@@ -170,12 +172,75 @@ response = requests.post(url, json=payload, headers=headers)
 print(response.text)
 ```
 
+## 非同步模式（async）
+
+預設情況下 API 是同步阻塞的：一次請求會一直等待，直到識別結果處理完成才返回。如果你在做多打碼器輪換（multi-solver rotation），希望「提交任務後立即拿到 task_id，先去調度其他打碼器，稍後再回來取結果」，可以在請求體中傳入 `async: true`。
+
+傳入 `async: true` 後，接口會立即返回一個 `task_id`，而不會阻塞等待：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/captcha/recognition/recaptcha2' \
+-H 'accept: application/json' \
+-H 'authorization: Bearer {token}' \
+-H 'content-type: application/json' \
+-d '{
+  "question": "/m/01pns0",
+  "image": "iVBORw0KGgoAAAANSUhEUgAAASoAAAEsCAIAAAD7AWllAAAAAX...",
+  "async": true
+}'
+```
+
+```json
+{
+  "success": true,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "trace_id": "2efa9340-b21b-4e26-9e14-4aac95f343ab",
+  "status": "processing"
+}
+```
+
+隨後使用該 `task_id` 轮询 `POST /captcha/tasks`（建議每 3~5 秒一次）來獲取結果：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/captcha/tasks' \
+-H 'accept: application/json' \
+-H 'authorization: Bearer {token}' \
+-H 'content-type: application/json' \
+-d '{
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002"
+}'
+```
+
+處理中會返回 `status: processing`：
+
+```json
+{ "success": true, "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002", "status": "processing" }
+```
+
+處理完成會返回 `status: ready` 和識別結果 `solution`（字段結構與同步模式完全一致）：
+
+```json
+{
+  "success": true,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "ready",
+  "solution": {
+    "size": 300,
+    "label": "/m/01pns0",
+    "objects": [2, 5, 7],
+    "type": "multi"
+  }
+}
+```
+
+計費說明：非同步模式下，創建任務與輪詢「處理中」都不計費；**僅在成功取到識別結果時計費一次**（與同步模式的價格一致）。因此在輪換中取消尚未完成的任務不會產生費用。`/captcha/tasks` 對所有驗證碼接口（token 與 recognition 系列）通用，用同一個 `task_id` 輪詢即可。
+
 ## 錯誤處理
 
 在調用 API 時，如果遇到錯誤，API 會返回相應的錯誤代碼和信息。例如：
 
-- `400 token_mismatched`：錯誤的請求，可能是由於缺少或無效的參數。
-- `400 api_not_implemented`：錯誤的請求，可能是由於缺少或無效的參數。
+- `400 token_mismatched`：錯誤請求，可能是因為缺少或無效的參數。
+- `400 api_not_implemented`：錯誤請求，可能是因為缺少或無效的參數。
 - `401 invalid_token`：未授權，無效或缺少授權令牌。
 - `429 too_many_requests`：請求過多，您已超過速率限制。
 - `500 api_error`：內部伺服器錯誤，伺服器出現問題。
@@ -195,4 +260,4 @@ print(response.text)
 
 ## 結論
 
-通過本文檔，您已經了解了如何使用 Recaptcha2 圖像識別 API 讓用戶輸入識別的內容和 Recaptcha2 驗證碼圖像，最後返回需要點擊的小圖像的坐標，完成驗證。希望本文檔能幫助您更好地對接和使用該 API。如有任何問題，請隨時聯繫我們的技術支持團隊。
+通過本文檔，您已經了解了如何使用 Recaptcha2 圖像識別 API 讓用戶輸入識別的內容和 Recaptcha2驗證碼圖像，最後返回需要點擊的小圖像的坐標，完成驗證。希望本文檔能幫助您更好地對接和使用該 API。如有任何問題，請隨時聯繫我們的技術支持團隊。
