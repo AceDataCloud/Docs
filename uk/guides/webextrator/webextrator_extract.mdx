@@ -1,67 +1,395 @@
 ---
-title: "WebExtrator Інтелектуальний API для вилучення даних – Посібник із інтеграції"
+title: "WebExtrator Інтелектуальний API для витягування даних"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
 `POST https://api.acedata.cloud/webextrator/extract`
 
-Виконує вилучення контенту на основі `/webextrator/render`. Окрім усіх параметрів render API, додатково підтримує:
+WebExtrator Інтелектуальний API перетворює URL на **типізовані структуровані результати** — статті, товари, рецепти, відео, обговорення, вакансії тощо, одночасно надаючи очищений Markdown та чистий текст. Коли вам потрібні "чисті структуровані дані", а не сирий HTML, це інтерфейс, який слід використовувати.
 
-| Поле | Тип | Обов’язкове | За замовчуванням | Опис |
-|------|------|:----:|------|------|
-| `expected_type` | string | ❌ | `markdown` | Очікуваний тип вилученого результату: `markdown` / `article` / `text` / `links` / `structured` |
-| `enable_llm` | boolean | ❌ | false | Увімкнення LLM для постобробки (підходить для `article` / `structured`) |
-| `instruction` | string | ❌ | - | Інструкції для LLM щодо вилучення, наприклад «вилучити назву товару, ціну, характеристики» |
+В основі лежить трирівнева система:
+
+1. **schema.org JSON-LD мапер** — детермінований, нульова вартість LLM. Охоплює Wikipedia / BestBuy / AllRecipes / YouTube / більшість новин / більшість товарних сторінок.
+2. **Типізоване LLM витягування** — спрацьовує лише тоді, коли schema.org не спрацьовує. Вибір схеми за типом сторінки, строгий контроль Zod.
+3. **Readability + Markdown підстрахування** — завжди працює, заповнюючи верхні поля, які не були заповнені першими двома рівнями.
+
+Повторні запити URL будуть кешуватися результатами Redis, &lt;1 мс повернення.
+
+## Процес подачі заявки
+
+Щоб використовувати сторінку послуг WebExtrator, спочатку перейдіть до [консолі Ace Data Cloud](https://platform.acedata.cloud/console/applications) для отримання вашого API токена, залиште його на випадок потреби.
+
+![](https://cdn.acedata.cloud/5hmkdg.jpg)
+
+Якщо ви ще не увійшли або не зареєструвалися, вас автоматично перенаправлять на сторінку входу, запрошуючи вас зареєструватися та увійти, після чого ви будете автоматично повернені на поточну сторінку.
+
+**Один API токен дозволяє викликати всі послуги платформи, не потрібно окремо подавати заявку на кожну послугу.** Перша заявка надає безкоштовний ліміт, ви можете безкоштовно випробувати; при недостатньому ліміті ви можете поповнити загальний баланс на [консолі](https://platform.acedata.cloud/console/coin).
+
+> 📘 Повна документація: [Сторінка послуг WebExtrator →](https://platform.acedata.cloud/service/webextrator)
+
+## Аутентифікація
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+## Параметри запиту
+
+Extract приймає **всі** [Render API](development_webextrator_render) параметри (`url`, `user_agent`, `timeout`, `wait_until`, `delay`, `wait_for_selector`, `block_resources`, `headers`, `cookies`, `callback_url`, `bypass_cache`, `cache_ttl_seconds`, `async`), плюс два спеціальних поля Extract:
+
+| Поле              | Тип      | Обов'язкове  | За замовчуванням | Опис                                                                                      |
+| --------------- | ------- | :-: | ------- | --------------------------------------------------------------------------------------- |
+| `expected_type` | enum    |  ❌  | Автоматичне визначення    | Підказка типу сторінки: `product` / `article` / `general`. Пропускає URL / текстову евристичну обробку, відразу переходить до відповідної гілки.                        |
+| `enable_llm`    | boolean |  ❌  | `false` | Дозволяє виклик LLM витягування, коли schema.org не спрацьовує. На сторінках без JSON-LD, таких як Amazon / HN / Greenhouse, потрібно включити, щоб отримати типізовані результати. |
+
+> Коли сторінка має schema.org JSON-LD, `enable_llm` не діє — детермінований мапер безпосередньо видає результати, ніколи не витрачаючи виклик LLM. Ви **безкоштовно** отримуєте типізовані результати.
 
 ## Синхронна відповідь
 
 ```json
 {
   "success": true,
-  "task_id": "550e8400-...",
-  "trace_id": "550e8400-...",
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
   "started_at": "2026-05-02T10:30:00.123Z",
-  "finished_at": "2026-05-02T10:30:08.789Z",
-  "elapsed": 8.666,
+  "finished_at": "2026-05-02T10:30:02.535Z",
+  "elapsed": 2.412,
   "data": {
     "kind": "extract",
-    "expected_type": "article",
-    "url": "https://example.com/post/1",
-    "title": "Приклад статті",
-    "author": "Чжан Сан",
-    "published_at": "2026-05-01",
-    "content": "# Приклад статті\n\nОсновний текст ...",
-    "summary": "У цій статті описано ..."
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "finalUrl": "https://en.wikipedia.org/wiki/Diffbot",
+    "contentType": "article",
+    "title": "Diffbot",
+    "description": "Американська компанія з машинного навчання та управління знаннями",
+    "byline": "Учасники проектів Wikimedia",
+    "language": "en",
+    "siteName": "Wikipedia",
+    "publishedAt": "2007-08-08T05:47:27Z",
+    "images": ["https://en.wikipedia.org/static/images/icons/enwiki-25.svg"],
+    "links": ["https://en.wikipedia.org/wiki/Machine_learning"],
+    "markdown": "# Diffbot\n\nDiffbot is a developer of machine learning ...",
+    "text": "Diffbot is a developer of machine learning algorithms ...",
+    "structured": {
+      "schemaOrg": { "primary": { /* типізовані сутності */ }, "breadcrumbs": [], "all": [] },
+      "openGraph": { "title": "...", "description": "...", "image": "...", "type": "..." },
+      "jsonLd": [ /* оригінальний JSON-LD */ ]
+    },
+    "rawSignals": {
+      "hasJsonLd": true,
+      "title": "Diffbot - Wikipedia",
+      "metaDescription": null,
+      "pageStatus": 200,
+      "textLength": 11473
+    },
+    "elapsedMs": 2412
   }
 }
 ```
 
-Асинхронний режим, коди помилок та правила тарифікації повністю збігаються з `/webextrator/render`.
+### Верхні поля
 
-## Приклад: вилучення основного тексту статті (з увімкненим LLM)
+| Поле              | Тип       | Опис                                                                                   |
+| --------------- | -------- | ------------------------------------------------------------------------------------ |
+| `kind`          | string   | Фіксоване `"extract"`。                                                                      |
+| `url`           | string   | URL, який ви подали.                                                                            |
+| `finalUrl`      | string   | Остаточний URL після редиректу.                                                                         |
+| `contentType`   | enum     | `product` / `article` / `general`, визначається за допомогою `expected_type` → schema.org primary → евристично. |
+| `title`         | string   | Readability `<title>` або рендерений `document.title`。                                        |
+| `description`   | string?  | Пріоритет: `<meta name="description" />` → `og:description` → schema.org / LLM витягування → уривок з основного тексту.   |
+| `byline`        | string?  | Автор / канал / компанія. Джерело `<meta name="author" />` → schema.org / LLM。                           |
+| `language`      | string?  | `<html lang>`。                                                                       |
+| `siteName`      | string?  | `og:site_name`。                                                                      |
+| `publishedAt`   | string?  | ISO 8601. Пріоритет: `article:published_time` → `<time datetime>` → schema.org / LLM。        |
+| `images`        | string[] | Максимум 50 `<img src />`, перетворені на абсолютні URL, без дублікатів, відкинуті `data:` URI.                                    |
+| `links`         | string[] | Максимум 100 зовнішніх посилань, відфільтровані фрагменти / `javascript:` / `mailto:` / `tel:`.                               |
+| `markdown`      | string   | Markdown, перетворений з Turndown.                                                               |
+| `text`          | string   | `textContent`, витягнуте з Mozilla Readability.                                               |
+| `structured`    | object   | Повні структуровані результати, див. нижче.                                                                          |
+| `rawSignals`    | object   | Діагностична інформація для налагодження.                                                                            |
+| `cached`        | boolean? | Якщо кеш спрацьовує, то `true`。                                                                       |
+| `cacheStoredAt` | number?  | Unix мілісекундний таймстамп, коли кеш-елемент вперше записано.                                                                |
+
+### Підполя `data.structured`
+| Підполе         | Коли з'являється               | Опис                                                                   |
+| ----------- | ------------------ | -------------------------------------------------------------------- |
+| `schemaOrg` | Завжди                 | `{ primary, breadcrumbs, all }`. `primary` - це типізований об'єкт з найвищим пріоритетом; якщо не знайдено, то `null`. |
+| `openGraph` | Завжди                 | `{ title, description, image, type }`, отримано з `<meta property="og:*" />`.   |
+| `jsonLd`    | Завжди                 | Всі оригінальні масиви JSON з `<script type="application/ld+json">`.               |
+| `llm`       | Коли LLM успішно запущено         | `{ kind, data, model, promptCharCount }`, типізований результат, перевірений Zod.              |
+| `llmError`  | Коли LLM запущено, але не вдалося         | `{ kind, error, model }`, запит не призведе до збоїв, евристичний результат все ще повертається.                         |
+| `amazon`    | Коли URL є `amazon.*` | Результати старого спеціалізованого парсера amazon (будуть поступово скасовані).                                            |
+
+## Покриття мапера schema.org
+
+Сортовано за пріоритетом (якщо спрацьовує, то як `structured.schemaOrg.primary`):
+
+| Тип schema.org                                                                                              | Мапа kind      | Вихідні поля                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Product`                                                                                                  | product      | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]`                                 |
+| `Recipe`                                                                                                   | recipe       | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
+| `VideoObject`                                                                                              | video        | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount`                                                                                 |
+| `JobPosting`                                                                                               | job          | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType`                                                                              |
+| `Event` (включаючи `*Event`)                                                                                        | event        | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}`                                                                                  |
+| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | article      | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]`                                                                                 |
+| `FAQPage`                                                                                                  | faq          | `questions[{question, answer}]`                                                                                                                                                          |
+| `BreadcrumbList`                                                                                           | (прикріплено до sibling) | Завжди виводиться в `structured.schemaOrg.breadcrumbs[]`, не буде як primary.                                                                                                                                 |
+
+Обробка мапера:
+
+- Контейнер `@graph` (рекурсивно розгортається);
+- Масив `@type` (наприклад, `["Recipe", "NewsArticle"]` — обидва розпізнаються, пріоритет за першим);
+- Варіанти з префіксом `http://schema.org/`;
+- Вкладені `Offer` та `AggregateOffer` (остання читає `lowPrice`);
+- Відносні URL зображень (перетворюються на абсолютні за `finalUrl`).
+
+## Типізований Schema LLM
+
+Коли `enable_llm: true` **і** schema.org не має primary, парсер за URL евристично
+(або за підказкою `expected_type`) вибирає один з наведених нижче Zod Schema перевірочних моделей:
+
+| Kind         | URL евристика                                                                            | Обов'язкові поля       | Додаткові поля                                                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `article`    | Текст ≥400 слів і інші не спрацювали                                                                    | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]`                                                                                          |
+| `product`    | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*`                | `name`     | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]`                                                      |
+| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs`                                    | `title`    | `author, postedAt, points, commentCount, body, url`                                                                                                                          |
+| `recipe`     | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes` | `name`     | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]`                                              |
+| `video`      | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video`               | `name`     | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript`                                                                                 |
+| `job`        | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr`          | `title`    | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
+
+Успішний LLM також заповнить "останній резерв" для верхніх полів:
+
+- `article` → `description` / `byline` / `publishedAt` / `language`
+- `product` → `description`
+- `discussion` → `description` (перші 280 символів тіла) / `byline` (автор) / `publishedAt` (дата публікації)
+- `recipe` → `description` / `byline` (автор)
+- `video` → `description` / `byline` (канал) / `publishedAt` (дата завантаження)
+- `job` → `description` / `byline` (компанія) / `publishedAt` (дата публікації)
+
+Заповнення відбувається лише тоді, коли **впевнений** джерело даних **не заповнило** відповідні поля — LLM завжди є останнім резервом.
+
+## Кешування
+
+Один і той же запит буде хешуватися в один і той же Redis Key:
+`webextrator:cache:extract:<sha256(canonical-json)>`. Кеш Key **ігнорує** `async`,
+`bypass_cache`, `cache_ttl_seconds` (це перемикач, не впливає на відповідь). `cookies` /
+`headers` **будуть** кешуватися в окремих відрах.
+
+| Поле                     | Ефект                         |
+| ---------------------- | -------------------------- |
+| `bypass_cache: true`   | Пропустити читання; результати цього разу все ще будуть записані в кеш, наступного разу однаковий запит зможе спрацювати. |
+| `cache_ttl_seconds: 0` | Ця відповідь **не кешується**.               |
+| `cache_ttl_seconds: N` | Налаштувати TTL для цього запису (за замовчуванням 3600 секунд).    |
+
+Відповіді, що потрапили в кеш, будуть містити `data.cached: true` та `data.cacheStoredAt: <unix-ms>`.
+
+## Асинхронний режим та зворотний виклик
+
+Встановіть `async: true`, щоб увійти в асинхронний режим (надання `callback_url` також автоматично активує). Платформа негайно повертає (HTTP 200):
+
+```json
+{
+  "success": true,
+  "task_id": "550e8400-...",
+  "trace_id": "6ba7b810-...",
+  "started_at": "2026-05-02T10:30:00.123Z"
+}
+```
+
+Коли завдання завершено, повний конверт `POST` на ваш `callback_url` (якщо налаштовано). Також можна
+потім активно запитати через [`/webextrator/tasks`](development_webextrator_tasks).
+
+## Приклад
+
+### 1. Стаття Wikipedia (спрацьовує schema.org, LLM не потрібен)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://example.com/news/1",
-    "expected_type": "article",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "expected_type": "article"
+  }'
+```
+
+Ключові поля `data.structured.schemaOrg.primary`:
+```json
+{
+  "kind": "article",
+  "subtype": "Article",
+  "headline": "Американська компанія з машинного навчання та управління знаннями",
+  "datePublished": "2007-08-08T05:47:27Z",
+  "dateModified": "2025-07-10T20:42:45Z",
+  "author": { "name": "Учасники проектів Вікіпедії", "type": "Organization" },
+  "publisher": { "name": "Фонд Вікімедіа, Inc." }
+}
+```
+
+### 2. Сторінка товару BestBuy (schema.org виявлено)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.bestbuy.com/product/apple-airpods-pro-2nd-generation-white/JJ8ZH6TPSW",
+    "expected_type": "product"
+  }'
+```
+
+Виявлення schema.org:
+
+```json
+{
+  "kind": "product",
+  "name": "Apple - Відновлені відмінні - AirPods Pro (2-го покоління) - Білий",
+  "sku": "10845412",
+  "model": "MQD83AM/A",
+  "color": "Білий",
+  "brand": "Apple",
+  "offer": { "price": 159.99, "currency": "USD", "availability": "https://schema.org/InStock", "seller": "Best Buy" },
+  "rating": { "value": 4.4, "count": 8 }
+}
+```
+
+### 3. Сторінка рецепту AllRecipes (з харчуванням та етапами)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.allrecipes.com/recipe/16354/easy-meatloaf/"
+  }'
+```
+
+Виявлення schema.org:
+
+```json
+{
+  "kind": "recipe",
+  "name": "Легкий м'ясний хліб",
+  "cookTime": "PT60M",
+  "totalTime": "PT75M",
+  "recipeYield": "8 / 1 (9x5-дюймовий) м'ясний хліб",
+  "ingredients": ["1 1/2 фунта яловичини", "..."],
+  "instructions": [{ "text": "Розігрійте духовку до 350°F ..." }, "..."],
+  "rating": { "value": 4.7, "count": 9348 }
+}
+```
+
+### 4. Сторінка обговорення HN (без JSON-LD — потрібно увімкнути LLM)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://news.ycombinator.com/item?id=37000000",
     "enable_llm": true
   }'
 ```
 
-## Приклад: асинхронне вилучення + користувацька структурована витяг
+`data.structured.llm.data`:
+
+```json
+{
+  "kind": "discussion",
+  "title": "Показати HN: Новий спосіб витягувати веб-сторінки",
+  "author": "alice",
+  "points": 173,
+  "commentCount": 42,
+  "body": "Привіт HN, ми створили самостійно хостовану альтернативу API аналізу Diffbot ..."
+}
+```
+
+Верхні поля також були заповнені: `byline = "alice"`、`publishedAt = "..."`。
+
+### 5. Сторінка товару Amazon (Amazon без JSON-LD — потрібно увімкнути LLM)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://shop.example.com/item/123",
-    "expected_type": "structured",
-    "enable_llm": true,
-    "instruction": "вилучити назву товару, ціну, наявність, URL трьох основних зображень",
-    "callback_url": "https://your-domain.com/wbx-callback"
+    "url": "https://www.amazon.com/dp/B0BSHF7WHW",
+    "expected_type": "product",
+    "enable_llm": true
   }'
 ```
+
+`data.structured.llm.data` (типізований `product`):
+
+```json
+{
+  "kind": "product",
+  "name": "Apple 2023 MacBook Pro M2 Pro 14-дюймовий",
+  "brand": "Apple",
+  "price": 1799,
+  "currency": "USD",
+  "bullets": ["Чіп Apple M2 Pro з 10-ядерним ЦП", "..."],
+  "specifications": [{ "name": "Розмір дисплея", "value": "14.2 дюйма" }, "..."]
+}
+```
+
+### Python (requests)
+
+```python
+import os, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+
+resp = requests.post(
+    "https://api.acedata.cloud/webextrator/extract",
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "url": "https://en.wikipedia.org/wiki/Diffbot",
+        "expected_type": "article",
+    },
+    timeout=120,
+)
+resp.raise_for_status()
+data = resp.json()["data"]
+
+primary = (data.get("structured") or {}).get("schemaOrg", {}).get("primary")
+print("contentType:", data["contentType"])
+print("title:      ", data["title"])
+print("byline:     ", data.get("byline"))
+print("publishedAt:", data.get("publishedAt"))
+if primary and primary["kind"] == "article":
+    print("headline:    ", primary["headline"])
+    print("dateModified:", primary.get("dateModified"))
+```
+
+### Node.js (fetch)
+
+```js
+const apiKey = process.env.ACEDATA_API_KEY;
+
+const res = await fetch('https://api.acedata.cloud/webextrator/extract', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    url: 'https://www.allrecipes.com/recipe/16354/easy-meatloaf/',
+  }),
+});
+const { data } = await res.json();
+const recipe = data?.structured?.schemaOrg?.primary;
+console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, 'інгредієнтів');
+```
+
+## Поради та підводні камені
+
+- **Якщо можливо, передайте `expected_type`.** Безкоштовна порада, пропустіть евристичне визначення, особливо корисно для сторінок, URL-адреси яких не входять до вбудованого списку.
+- **`enable_llm: true` на сторінках з виявленим schema.org безкоштовно.** LLM викликається лише тоді, коли schema.org не має первинного, тому за замовчуванням це також безпечно.
+- **Під час налагодження спочатку перевірте `rawSignals.hasJsonLd`.** Якщо `true`, але `structured.schemaOrg.primary` дорівнює `null`, це означає, що сторінка використовує тип, який наш мапер ще не покрив — створіть issue, ми додамо.
+- **`structured.llmError` є інформаційним.** Запит все ще успішний, евристичний результат все ще повертається. Перегляньте `llmError.error`, щоб визначити причину (тайм-аут, помилка парсингу JSON, помилка валідації Zod).
+- **Посилання `links[]` на не-сторінках статей не будуть відсортовані за релевантністю.** Лише за "максимум 100 записів + фільтрація недійсних протоколів" намагайтеся очистити.
+- **Кешування також підлягає оплаті.** Кеш призначений для затримки та захисту пулу браузерів, а не для економії.

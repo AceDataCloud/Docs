@@ -1,67 +1,398 @@
 ---
-title: "WebExtrator Intelligente Extraktions-API Integrationsanleitung"
+title: "WebExtrator Intelligente Extraktions-API Integrationsleitfaden"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
 `POST https://api.acedata.cloud/webextrator/extract`
 
-Inhaltsextraktion basierend auf `/webextrator/render`. Zusätzlich zu allen Parametern der Render-Schnittstelle werden folgende unterstützt:
+Die WebExtrator Intelligente Extraktions-API wandelt eine URL in **typisierte strukturierte Ergebnisse** um – Artikel, Produkte, Rezepte, Videos, Diskussionen, Stellenangebote usw., und liefert gleichzeitig bereinigtes Markdown und reinen Text. Wenn Sie "saubere strukturierte Daten" anstelle von rohem HTML wünschen, ist dies die Schnittstelle, die Sie verwenden sollten.
 
-| Feld | Typ | Pflicht | Standard | Beschreibung |
-|------|------|:----:|------|------|
-| `expected_type` | string | ❌ | `markdown` | Erwartetes Extraktionsergebnis: `markdown` / `article` / `text` / `links` / `structured` |
-| `enable_llm` | boolean | ❌ | false | Aktiviert LLM-Nachbearbeitung (geeignet für `article` / `structured`) |
-| `instruction` | string | ❌ | - | LLM-Extraktionsanweisung, z.B. „Extrahiere Produkttitel, Preis, Spezifikationen“ |
+Im Hintergrund gibt es eine dreistufige Pipeline:
 
-## Synchrone Antwort
+1. **schema.org JSON-LD Mapper** – deterministisch, null LLM-Kosten. Deckt Wikipedia / BestBuy / AllRecipes / YouTube / die meisten Nachrichten / die meisten Produktseiten ab.
+2. **Typisierte LLM-Extraktion** – wird nur ausgelöst, wenn schema.org nicht zutrifft. Schema nach Seitentyp auswählen, Zod strenge Validierung.
+3. **Readability + Markdown Absicherung** – läuft immer, um die obersten Felder der ersten beiden Ebenen zu ergänzen.
+
+Wiederholte URL-Anfragen werden vom Redis-Ergebnis-Cache erfasst, &lt;1 ms Rückgabe.
+
+## Antragsprozess
+
+Um den WebExtrator-Dienst zu nutzen, gehen Sie zuerst zur [Ace Data Cloud Konsole](https://platform.acedata.cloud/console/applications), um Ihr API-Token zu erhalten, das Sie für später aufbewahren.
+
+![](https://cdn.acedata.cloud/5hmkdg.jpg)
+
+Wenn Sie noch nicht angemeldet oder registriert sind, werden Sie automatisch zur Anmeldeseite weitergeleitet, die Sie zur Registrierung und Anmeldung einlädt. Nach Abschluss werden Sie automatisch zur aktuellen Seite zurückgeleitet.
+
+**Ein API-Token reicht aus, um auf alle Dienste der Plattform zuzugreifen, ohne dass für jeden Dienst separat beantragt werden muss.** Bei der ersten Beantragung erhalten Sie ein kostenloses Kontingent, um es kostenlos auszuprobieren; wenn das Kontingent erschöpft ist, können Sie im [Dashboard](https://platform.acedata.cloud/console/coin) Ihr allgemeines Guthaben aufladen.
+
+> 📘 Vollständige Dokumentation: [WebExtrator-Dienstseite →](https://platform.acedata.cloud/service/webextrator)
+
+## Authentifizierung
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+## Anfrageparameter
+
+Extract akzeptiert **alle** [Render API](development_webextrator_render) Parameter
+(`url`, `user_agent`, `timeout`, `wait_until`, `delay`, `wait_for_selector`,
+`block_resources`, `headers`, `cookies`, `callback_url`, `bypass_cache`,
+`cache_ttl_seconds`, `async`), zusätzlich zu zwei Extract-spezifischen Feldern:
+
+| Feld              | Typ      | Erforderlich  | Standard      | Beschreibung                                                                                      |
+| --------------- | ------- | :-: | ------- | --------------------------------------------------------------------------------------- |
+| `expected_type` | enum    |  ❌  | Automatische Bestimmung    | Hinweis auf den Seitentyp: `product` / `article` / `general`. Umgeht URL / Textheuristik und geht direkt den entsprechenden Zweig.                        |
+| `enable_llm`    | boolean |  ❌  | `false` | Erlaubt die LLM-Extraktion, wenn schema.org nicht zutrifft. Bei Seiten ohne JSON-LD wie Amazon / HN / Greenhouse muss dies aktiviert werden, um typisierte Ergebnisse zu erhalten. |
+
+> Wenn die Seite schema.org JSON-LD enthält, ist `enable_llm` unwirksam – der deterministische Mapper gibt direkt Ergebnisse zurück,
+> es wird niemals eine LLM-Anfrage verschwendet. Sie erhalten **kostenlos** typisierte Ergebnisse.
+
+## Synchronisierte Antwort
+
+```json
+{
+  "success": true,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+  "started_at": "2026-05-02T10:30:00.123Z",
+  "finished_at": "2026-05-02T10:30:02.535Z",
+  "elapsed": 2.412,
+  "data": {
+    "kind": "extract",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "finalUrl": "https://en.wikipedia.org/wiki/Diffbot",
+    "contentType": "article",
+    "title": "Diffbot",
+    "description": "Amerikanisches Unternehmen für maschinelles Lernen und Wissensmanagement",
+    "byline": "Beitragsleistende zu Wikimedia-Projekten",
+    "language": "en",
+    "siteName": "Wikipedia",
+    "publishedAt": "2007-08-08T05:47:27Z",
+    "images": ["https://en.wikipedia.org/static/images/icons/enwiki-25.svg"],
+    "links": ["https://en.wikipedia.org/wiki/Machine_learning"],
+    "markdown": "# Diffbot\n\nDiffbot ist ein Entwickler von maschinellem Lernen ...",
+    "text": "Diffbot ist ein Entwickler von Algorithmen für maschinelles Lernen ...",
+    "structured": {
+      "schemaOrg": { "primary": { /* typisierte Entität */ }, "breadcrumbs": [], "all": [] },
+      "openGraph": { "title": "...", "description": "...", "image": "...", "type": "..." },
+      "jsonLd": [ /* Roh-JSON-LD */ ]
+    },
+    "rawSignals": {
+      "hasJsonLd": true,
+      "title": "Diffbot - Wikipedia",
+      "metaDescription": null,
+      "pageStatus": 200,
+      "textLength": 11473
+    },
+    "elapsedMs": 2412
+  }
+}
+```
+
+### Oberste Felder
+
+| Feld              | Typ       | Beschreibung                                                                                   |
+| --------------- | -------- | ------------------------------------------------------------------------------------ |
+| `kind`          | string   | Fest `"extract"`。                                                                      |
+| `url`           | string   | Die von Ihnen eingereichte URL。                                                                            |
+| `finalUrl`      | string   | Die endgültige URL nach Weiterleitung。                                                                         |
+| `contentType`   | enum     | `product` / `article` / `general`, bestimmt durch `expected_type` → schema.org primary → heuristisch  in dieser Reihenfolge. |
+| `title`         | string   | Readability `<title>` oder gerendertes `document.title`。                                        |
+| `description`   | string?  | Priorität: `<meta name="description" />` → `og:description` → schema.org / LLM-Extraktion → Textabschnitt.   |
+| `byline`        | string?  | Autor / Kanal / Unternehmen. Quelle `<meta name="author" />` → schema.org / LLM。                           |
+| `language`      | string?  | `<html lang>`。                                                                       |
+| `siteName`      | string?  | `og:site_name`。                                                                      |
+| `publishedAt`   | string?  | ISO 8601。Priorität: `article:published_time` → `<time datetime>` → schema.org / LLM。        |
+| `images`        | string[] | Maximal 50 `<img src />`, auf absolute URLs aufgelöst, dupliziert und `data:` URIs entfernt.                                    |
+| `links`         | string[] | Maximal 100 externe Links, gefiltert nach Fragmenten / `javascript:` / `mailto:` / `tel:`.                               |
+| `markdown`      | string   | Aus Turndown exportiertes Markdown。                                                               |
+| `text`          | string   | Aus `textContent` extrahierter Text von Mozilla Readability。                                               |
+| `structured`    | object   | Vollständige strukturierte Ergebnisse, siehe unten.                                                                          |
+| `rawSignals`    | object   | Diagnostische Informationen für Debugging.                                                                            |
+| `cached`        | boolean? | Bei Cache-Treffer `true`。                                                                       |
+| `cacheStoredAt` | number?  | Unix-Millisekunden-Zeitstempel, wann der Cache-Eintrag erstmals geschrieben wurde.                                                                |
+
+### `data.structured` Unterfelder
+| Unterfeld       | Wann erscheint            | Beschreibung                                                             |
+| --------------- | ------------------------ | ---------------------------------------------------------------------- |
+| `schemaOrg`     | Immer                    | `{ primary, breadcrumbs, all }`. `primary` ist der am höchsten priorisierte typisierte Entität; wenn nicht gefunden, ist es `null`. |
+| `openGraph`     | Immer                    | `{ title, description, image, type }`, stammt von `<meta property="og:*" />`.   |
+| `jsonLd`        | Immer                    | Alle `<script type="application/ld+json">` Blöcke als rohes JSON-Array.               |
+| `llm`           | Wenn LLM erfolgreich lief | `{ kind, data, model, promptCharCount }`, typisierte Ergebnisse, die von Zod validiert wurden.              |
+| `llmError`      | Wenn LLM lief, aber fehlschlug | `{ kind, error, model }`, die Anfrage wird dadurch nicht abgebrochen, heuristische Ergebnisse werden weiterhin zurückgegeben.                         |
+| `amazon`        | Wenn die URL `amazon.*` ist | Ergebnisse des alten, speziellen Amazon-Crawlers (werden schrittweise eingestellt).                                            |
+
+## schema.org Mapper Abdeckung
+
+Nach Priorität sortiert (bei Treffer als `structured.schemaOrg.primary`):
+
+| schema.org Typ                                                                                              | Mapping kind  | Ausgabefelder                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Product`                                                                                                  | product       | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]`                                 |
+| `Recipe`                                                                                                   | recipe        | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
+| `VideoObject`                                                                                              | video         | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount`                                                                                 |
+| `JobPosting`                                                                                               | job           | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType`                                                                              |
+| `Event` (einschließlich `*Event`)                                                                          | event         | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}`                                                                                  |
+| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | article       | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]`                                                                                 |
+| `FAQPage`                                                                                                  | faq           | `questions[{question, answer}]`                                                                                                                                                          |
+| `BreadcrumbList`                                                                                           | (an Geschwister) | Wird immer in `structured.schemaOrg.breadcrumbs[]` ausgegeben, wird nicht als primär betrachtet.                                                                                          |
+
+Mapper Verarbeitung:
+
+- `@graph` Container (rekursiv entfaltet);
+- `@type` Array (z. B. `["Recipe", "NewsArticle"]` — beide werden erkannt, der mit höherer Priorität gewinnt);
+- Varianten mit dem Präfix `http://schema.org/`;
+- Verschachtelte `Offer` und `AggregateOffer` (letzteres liest `lowPrice`);
+- Relative Bild-URLs (werden gemäß `finalUrl` in absolute umgewandelt).
+
+## LLM typisierte Schema
+
+Wenn `enable_llm: true` **und** schema.org keinen primären Eintrag hat, extrahiert der Mapper basierend auf der URL heuristisch
+(oder `expected_type` Hinweis) eines der folgenden Zod Schema Validierungsmodell-Ausgaben:
+
+| Art          | URL Heuristik                                                                          | Pflichtfelder   | Optionale Felder                                                                                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------ | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `article`    | Text ≥400 Wörter und andere nicht getroffen                                            | `headline`     | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]`                                                                                          |
+| `product`    | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*`                  | `name`         | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]`                                                      |
+| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs`                                      | `title`        | `author, postedAt, points, commentCount, body, url`                                                                                                                          |
+| `recipe`     | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes` | `name`         | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]`                                              |
+| `video`      | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video`                 | `name`         | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript`                                                                                 |
+| `job`        | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr`            | `title`        | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
+
+Bei Erfolg wird LLM auch die "last-resort" Rückfüllung in die obersten Felder vornehmen:
+
+- `article` → `description` / `byline` / `publishedAt` / `language`
+- `product` → `description`
+- `discussion` → `description` (= body die ersten 280 Zeichen) / `byline` (= author) / `publishedAt` (= postedAt)
+- `recipe` → `description` / `byline` (= author)
+- `video` → `description` / `byline` (= channel) / `publishedAt` (= uploadDate)
+- `job` → `description` / `byline` (= company) / `publishedAt` (= datePosted)
+
+Die Rückfüllung wird nur ausgelöst, wenn die **sicheren** Datenquellen die entsprechenden Felder **nicht** ausgefüllt haben — LLM ist immer die letzte Instanz.
+
+## Cache
+
+Gleiche Anfragen werden auf denselben Redis Key gehasht:
+`webextrator:cache:extract:<sha256(canonical-json)>`. Der Cache Key **ignoriert** `async`,
+`bypass_cache`, `cache_ttl_seconds` (dies ist ein Schalter, der die Antwort nicht beeinflusst). `cookies` /
+`headers` **werden** in Buckets zwischengespeichert.
+
+| Feld                     | Effekt                         |
+| ---------------------- | ---------------------------- |
+| `bypass_cache: true`   | Überspringt das Lesen; das Ergebnis wird dennoch im Cache gespeichert, sodass die nächste gleiche Anfrage getroffen werden kann. |
+| `cache_ttl_seconds: 0` | Diese Antwort **wird nicht zwischengespeichert**.               |
+| `cache_ttl_seconds: N` | Legt die TTL dieses Eintrags fest (Standard 3600 Sekunden).    |
+
+Antworten, die den Cache treffen, enthalten `data.cached: true` und `data.cacheStoredAt: <unix-ms>`.
+
+## Asynchroner Modus und Rückruf
+
+Setzen Sie `async: true`, um in den asynchronen Modus zu wechseln (das Bereitstellen von `callback_url` führt ebenfalls automatisch dazu). Die Plattform gibt sofort zurück (HTTP 200):
 
 ```json
 {
   "success": true,
   "task_id": "550e8400-...",
-  "trace_id": "550e8400-...",
-  "started_at": "2026-05-02T10:30:00.123Z",
-  "finished_at": "2026-05-02T10:30:08.789Z",
-  "elapsed": 8.666,
-  "data": {
-    "kind": "extract",
-    "expected_type": "article",
-    "url": "https://example.com/post/1",
-    "title": "Beispielartikel",
-    "author": "Zhang San",
-    "published_at": "2026-05-01",
-    "content": "# Beispielartikel\n\nHaupttext ...",
-    "summary": "Dieser Artikel stellt vor ..."
-  }
+  "trace_id": "6ba7b810-...",
+  "started_at": "2026-05-02T10:30:00.123Z"
 }
 ```
 
-Asynchroner Modus, Fehlercodes und Abrechnungsregeln entsprechen vollständig denen von `/webextrator/render`.
+Wenn die Aufgabe abgeschlossen ist, wird das vollständige Envelope an Ihre `callback_url` `POST` gesendet (wenn konfiguriert). Sie können auch später aktiv über [`/webextrator/tasks`](development_webextrator_tasks) abfragen.
 
-## Beispiel: Extraktion des Artikeltexts (LLM aktiviert)
+## Beispiel
+
+### 1. Wikipedia Artikel (schema.org Treffer, kein LLM erforderlich)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://example.com/news/1",
-    "expected_type": "article",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "expected_type": "article"
+  }'
+```
+
+`data.structured.schemaOrg.primary` Schlüssel-Felder:
+```json
+{
+  "kind": "article",
+  "subtype": "Artikel",
+  "headline": "Amerikanisches Unternehmen für maschinelles Lernen und Wissensmanagement",
+  "datePublished": "2007-08-08T05:47:27Z",
+  "dateModified": "2025-07-10T20:42:45Z",
+  "author": { "name": "Beitragende zu Wikimedia-Projekten", "type": "Organisation" },
+  "publisher": { "name": "Wikimedia Foundation, Inc." }
+}
+```
+
+### 2. BestBuy Produktseite (schema.org Treffer)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.bestbuy.com/product/apple-airpods-pro-2nd-generation-white/JJ8ZH6TPSW",
+    "expected_type": "product"
+  }'
+```
+
+schema.org Extraktion:
+
+```json
+{
+  "kind": "product",
+  "name": "Apple - Generalüberholt Exzellent - AirPods Pro (2. Generation) - Weiß",
+  "sku": "10845412",
+  "model": "MQD83AM/A",
+  "color": "Weiß",
+  "brand": "Apple",
+  "offer": { "price": 159.99, "currency": "USD", "availability": "https://schema.org/InStock", "seller": "Best Buy" },
+  "rating": { "value": 4.4, "count": 8 }
+}
+```
+
+### 3. AllRecipes Rezeptseite (mit Nährwert und Schritten)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.allrecipes.com/recipe/16354/easy-meatloaf/"
+  }'
+```
+
+schema.org Extraktion:
+
+```json
+{
+  "kind": "recipe",
+  "name": "Einfacher Hackbraten",
+  "cookTime": "PT60M",
+  "totalTime": "PT75M",
+  "recipeYield": "8 / 1 (9x5-Zoll) Hackbraten",
+  "ingredients": ["1 1/2 Pfund Rinderhackfleisch", "..."],
+  "instructions": [{ "text": "Ofen auf 350°F vorheizen ..." }, "..."],
+  "rating": { "value": 4.7, "count": 9348 }
+}
+```
+
+### 4. HN Diskussionsseite (ohne JSON-LD —— LLM aktivieren)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://news.ycombinator.com/item?id=37000000",
     "enable_llm": true
   }'
 ```
 
-## Beispiel: Asynchron + benutzerdefinierte strukturierte Extraktion
+`data.structured.llm.data`:
+
+```json
+{
+  "kind": "discussion",
+  "title": "Show HN: Eine neue Möglichkeit, Webseiten zu extrahieren",
+  "author": "alice",
+  "points": 173,
+  "commentCount": 42,
+  "body": "Hallo HN, wir haben eine selbstgehostete Alternative zur Diffbot's Analyze API gebaut ..."
+}
+```
+
+Top-Level-Felder wurden ebenfalls ausgefüllt: `byline = "alice"`、`publishedAt = "..."`。
+
+### 5. Amazon Produktseite (Amazon ohne JSON-LD —— LLM aktivieren)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://shop.example.com/item/123",
-    "expected_type": "structured",
-    "enable_llm": true,
-    "instruction": "Extrahiere Produkttitel, Preis, Lagerbestand, 3 Hauptbild-URLs",
-    "callback_url": "https://your-domain.com/wbx-callback"
+    "url": "https://www.amazon.com/dp/B0BSHF7WHW",
+    "expected_type": "product",
+    "enable_llm": true
   }'
 ```
+
+`data.structured.llm.data` (typisiert `product`):
+
+```json
+{
+  "kind": "product",
+  "name": "Apple 2023 MacBook Pro M2 Pro 14-Zoll",
+  "brand": "Apple",
+  "price": 1799,
+  "currency": "USD",
+  "bullets": ["Apple M2 Pro Chip mit 10-Kern CPU", "..."],
+  "specifications": [{ "name": "Displaygröße", "value": "14,2 Zoll" }, "..."]
+}
+```
+
+### Python (requests)
+
+```python
+import os, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+
+resp = requests.post(
+    "https://api.acedata.cloud/webextrator/extract",
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "url": "https://en.wikipedia.org/wiki/Diffbot",
+        "expected_type": "article",
+    },
+    timeout=120,
+)
+resp.raise_for_status()
+data = resp.json()["data"]
+
+primary = (data.get("structured") or {}).get("schemaOrg", {}).get("primary")
+print("contentType:", data["contentType"])
+print("title:      ", data["title"])
+print("byline:     ", data.get("byline"))
+print("publishedAt:", data.get("publishedAt"))
+if primary and primary["kind"] == "article":
+    print("headline:    ", primary["headline"])
+    print("dateModified:", primary.get("dateModified"))
+```
+
+### Node.js (fetch)
+
+```js
+const apiKey = process.env.ACEDATA_API_KEY;
+
+const res = await fetch('https://api.acedata.cloud/webextrator/extract', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    url: 'https://www.allrecipes.com/recipe/16354/easy-meatloaf/',
+  }),
+});
+const { data } = await res.json();
+const recipe = data?.structured?.schemaOrg?.primary;
+console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, 'Zutaten');
+```
+
+## Hinweise und Fallstricke
+
+- **Wenn `expected_type` übergeben werden kann, dann übergeben.** Kostenlose Hinweise, um heuristische Bewertungen zu überspringen, besonders nützlich für Seiten, deren URL-Muster nicht in der eingebauten Liste enthalten ist.
+- **`enable_llm: true` ist auf Seiten mit schema.org Treffer kostenlos.** LLM wird nur aufgerufen, wenn schema.org kein primäres Element hat, daher ist es standardmäßig auch sicher.
+- **Beim Debuggen zuerst `rawSignals.hasJsonLd` überprüfen.** Wenn es `true` ist, aber `structured.schemaOrg.primary` `null` ist, bedeutet das, dass die Seite einen `@type` verwendet, den unser Mapper noch nicht abgedeckt hat – bitte ein Issue erstellen, wir fügen es hinzu.
+- **`structured.llmError` ist informativ.** Die Anfrage war weiterhin erfolgreich, heuristische Ergebnisse werden weiterhin zurückgegeben. Überprüfen Sie `llmError.error`, um den Grund zu lokalisieren (Zeitüberschreitung, JSON-Parsing-Fehler, Zod-Validierungsfehler).
+- **Links[] auf Nicht-Artikel-Seiten werden nicht nach Relevanz sortiert.** Nur nach "maximal 100 Einträgen + Filterung ungültiger Protokolle" wird versucht, zu reinigen.
+- **Cache-Treffer werden ebenfalls berechnet.** Der Cache dient der Verzögerung und dem Schutz des Browser-Pools, nicht um Geld zu sparen.
