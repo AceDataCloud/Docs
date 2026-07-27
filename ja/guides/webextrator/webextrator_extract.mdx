@@ -5,63 +5,393 @@ description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 
 `POST https://api.acedata.cloud/webextrator/extract`
 
-`/webextrator/render` をベースにコンテンツ抽出を行います。render インターフェースの全パラメータに加え、以下をサポートします：
+WebExtrator インテリジェント抽出 API は、URL を **型化された構造化結果** に変換します —— 記事、商品、レシピ、動画、ディスカッション、求人など、同時にクリーンな Markdown とプレーンテキストを添付します。原始的な HTML ではなく「クリーンな構造化データ」が必要なときに使用するインターフェースです。
 
-| フィールド | タイプ | 必須 | デフォルト | 説明 |
-|------|------|:----:|------|------|
-| `expected_type` | string | ❌ | `markdown` | 期待する抽出成果物：`markdown` / `article` / `text` / `links` / `structured` |
-| `enable_llm` | boolean | ❌ | false | LLM 後処理を有効化（`article` / `structured` に適用） |
-| `instruction` | string | ❌ | - | LLM 抽出指示例：「商品タイトル、価格、仕様を抽出」 |
+基盤は三層のパイプラインです：
 
-## 同期レスポンス
+1. **schema.org JSON-LD マッパー** —— 決定的、ゼロ LLM コスト。Wikipedia / BestBuy / AllRecipes / YouTube / 大部分のニュース / 大部分の商品ページをカバーします。
+2. **型化 LLM 抽出** —— schema.org がヒットしなかった場合のみトリガーされます。ページタイプに応じてスキーマを選択し、Zod による厳密な検証を行います。
+3. **Readability + Markdown フォールバック** —— 常に実行され、前の二層で埋められなかったトップレベルフィールドを補完します。
+
+URL の重複リクエストは Redis 結果キャッシュにキャッチされ、&lt;1 ms で返されます。
+
+## 申請プロセス
+
+WebExtrator サービスページを使用するには、まず [Ace Data Cloud コンソール](https://platform.acedata.cloud/console/applications) にアクセスして API トークンを取得し、保管してください。
+
+![](https://cdn.acedata.cloud/5hmkdg.jpg)
+
+まだログインまたは登録していない場合、自動的にログインページにリダイレクトされ、登録とログインを促されます。完了後、現在のページに自動的に戻ります。
+
+**1つの API トークンでプラットフォームのすべてのサービスを呼び出すことができ、各サービスごとに個別に申請する必要はありません。** 初回申請時には無料枠が付与され、無料で体験できます；枠が不足した場合は [コンソール](https://platform.acedata.cloud/console/coin) で共通残高をチャージできます。
+
+> 📘 完全なドキュメント：[WebExtrator サービスページ →](https://platform.acedata.cloud/service/webextrator)
+
+## 認証
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+## リクエストパラメータ
+
+Extract は **すべての** [Render API](development_webextrator_render) のパラメータ（`url`、`user_agent`、`timeout`、`wait_until`、`delay`、`wait_for_selector`、`block_resources`、`headers`、`cookies`、`callback_url`、`bypass_cache`、`cache_ttl_seconds`、`async`）を受け入れ、さらに二つの Extract 専用フィールドを追加します：
+
+| フィールド          | タイプ      | 必須  | デフォルト      | 説明                                                                                      |
+| --------------- | ------- | :-: | ------- | --------------------------------------------------------------------------------------- |
+| `expected_type` | enum    |  ❌  | 自動判断    | ページタイプのヒント：`product` / `article` / `general`。URL / テキストのヒューリスティックをスキップし、直接対応するブランチに進みます。                        |
+| `enable_llm`    | boolean |  ❌  | `false` | schema.org がヒットしなかった場合に LLM 抽出を許可します。Amazon / HN / Greenhouse のような JSON-LD がないページでは、型化結果を得るためにオンにする必要があります。 |
+
+> ページが schema.org JSON-LD を持っている場合、`enable_llm` は無効です —— 決定的マッパーが直接結果を出し、LLM 呼び出しを無駄にすることはありません。あなたは **無料で** 型化結果を得ることができます。
+
+## 同期応答
+
+```json
+{
+  "success": true,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+  "started_at": "2026-05-02T10:30:00.123Z",
+  "finished_at": "2026-05-02T10:30:02.535Z",
+  "elapsed": 2.412,
+  "data": {
+    "kind": "extract",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "finalUrl": "https://en.wikipedia.org/wiki/Diffbot",
+    "contentType": "article",
+    "title": "Diffbot",
+    "description": "アメリカの機械学習および知識管理会社",
+    "byline": "Wikimedia プロジェクトの貢献者",
+    "language": "en",
+    "siteName": "Wikipedia",
+    "publishedAt": "2007-08-08T05:47:27Z",
+    "images": ["https://en.wikipedia.org/static/images/icons/enwiki-25.svg"],
+    "links": ["https://en.wikipedia.org/wiki/Machine_learning"],
+    "markdown": "# Diffbot\n\nDiffbot は機械学習の開発者です ...",
+    "text": "Diffbot は機械学習アルゴリズムの開発者です ...",
+    "structured": {
+      "schemaOrg": { "primary": { /* 型化されたエンティティ */ }, "breadcrumbs": [], "all": [] },
+      "openGraph": { "title": "...", "description": "...", "image": "...", "type": "..." },
+      "jsonLd": [ /* 原始 JSON-LD */ ]
+    },
+    "rawSignals": {
+      "hasJsonLd": true,
+      "title": "Diffbot - Wikipedia",
+      "metaDescription": null,
+      "pageStatus": 200,
+      "textLength": 11473
+    },
+    "elapsedMs": 2412
+  }
+}
+```
+
+### トップレベルフィールド
+
+| フィールド          | タイプ       | 説明                                                                                   |
+| --------------- | -------- | ------------------------------------------------------------------------------------ |
+| `kind`          | string   | 固定 `"extract"`。                                                                      |
+| `url`           | string   | あなたが提出した URL。                                                                            |
+| `finalUrl`      | string   | リダイレクト後の最終 URL。                                                                         |
+| `contentType`   | enum     | `product` / `article` / `general`、`expected_type` → schema.org primary → ヒューリスティックの順に決定されます。 |
+| `title`         | string   | Readability `<title>` またはレンダリング後の `document.title`。                                        |
+| `description`   | string?  | 優先順位：`<meta name="description" />` → `og:description` → schema.org / LLM 抽出 → 本文の最初の段落の切り取り。   |
+| `byline`        | string?  | 著者 / チャンネル / 会社。出所 `<meta name="author" />` → schema.org / LLM。                           |
+| `language`      | string?  | `<html lang>`。                                                                       |
+| `siteName`      | string?  | `og:site_name`。                                                                      |
+| `publishedAt`   | string?  | ISO 8601。優先順位：`article:published_time` → `<time datetime>` → schema.org / LLM。        |
+| `images`        | string[] | 最大 50 個の `<img src />`、絶対 URL に解析され、重複を排除し、`data:` URI を削除します。                                    |
+| `links`         | string[] | 最大 100 個の外部リンク、スニペット / `javascript:` / `mailto:` / `tel:` をフィルタリング済み。                               |
+| `markdown`      | string   | Turndown から出力された Markdown。                                                               |
+| `text`          | string   | Mozilla Readability によって抽出された `textContent`。                                               |
+| `structured`    | object   | 完全な構造化結果、下記を参照。                                                                          |
+| `rawSignals`    | object   | デバッグ用の診断情報。                                                                            |
+| `cached`        | boolean? | キャッシュにヒットした場合は `true`。                                                                       |
+| `cacheStoredAt` | number?  | キャッシュエントリが最初に書き込まれた Unix ミリ秒タイムスタンプ。                                                                |
+
+### `data.structured` サブフィールド
+| 子字段         | 何时出现               | 说明                                                                   |
+| ----------- | ------------------ | -------------------------------------------------------------------- |
+| `schemaOrg` | 始终                 | `{ primary, breadcrumbs, all }`。`primary` は最高優先度の型化エンティティ；見つからない場合は `null`。 |
+| `openGraph` | 始終                 | `{ title, description, image, type }`、`<meta property="og:*" />` から取得。   |
+| `jsonLd`    | 始终                 | すべての `<script type="application/ld+json">` ブロックの生の JSON 配列。               |
+| `llm`       | LLM が実行され成功した時 | `{ kind, data, model, promptCharCount }`、Zod によって検証された型化結果。              |
+| `llmError`  | LLM が実行され失敗した時 | `{ kind, error, model }`、リクエストはこれにより失敗しない、ヒューリスティック結果は依然として返される。                         |
+| `amazon`    | URL が `amazon.*` の時 | 古い amazon 専用クローラーの結果（段階的に廃止予定）。                                            |
+
+## schema.org マッパーのカバレッジ
+
+優先度順にソート（ヒットした場合は `structured.schemaOrg.primary` として扱う）：
+
+| schema.org タイプ                                                                                              | マッピング kind      | 出力フィールド                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Product`                                                                                                  | product      | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]`                                 |
+| `Recipe`                                                                                                   | recipe       | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
+| `VideoObject`                                                                                              | video        | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount`                                                                                 |
+| `JobPosting`                                                                                               | job          | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType`                                                                              |
+| `Event`（含 `*Event`）                                                                                        | event        | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}`                                                                                  |
+| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | article      | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]`                                                                                 |
+| `FAQPage`                                                                                                  | faq          | `questions[{question, answer}]`                                                                                                                                                          |
+| `BreadcrumbList`                                                                                           | （sibling に付随） | 常に `structured.schemaOrg.breadcrumbs[]` に出力され、primary とはならない。                                                                                                                                 |
+
+マッパーの処理：
+
+- `@graph` コンテナ（再帰的に展開）；
+- `@type` 配列（例： `["Recipe", "NewsArticle"]` —— 両方を認識し、優先度で勝つ）；
+- `http://schema.org/` プレフィックスのバリエーション；
+- ネストされた `Offer` と `AggregateOffer`（後者は `lowPrice` を読み取る）；
+- 相対画像 URL（`finalUrl` に基づいて絶対に解決）。
+
+## LLM 型化スキーマ
+
+`enable_llm: true` **かつ** schema.org に primary がない場合、抽出器は URL ヒューリスティック
+（または `expected_type` ヒント）に基づいて以下のいずれかの Zod スキーマ検証モデル出力を選択：
+
+| Kind         | URL ヒューリスティック                                                                            | 必須フィールド       | オプションフィールド                                                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `article`    | テキスト ≥400 字かつ他にヒットしない                                                                    | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]`                                                                                          |
+| `product`    | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*`                | `name`     | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]`                                                      |
+| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs`                                    | `title`    | `author, postedAt, points, commentCount, body, url`                                                                                                                          |
+| `recipe`     | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes` | `name`     | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]`                                              |
+| `video`      | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video`               | `name`     | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript`                                                                                 |
+| `job`        | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr`          | `title`    | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
+
+LLM が成功した場合、トップレベルフィールドに「最終手段」のバックフィルを行う：
+
+- `article` → `description` / `byline` / `publishedAt` / `language`
+- `product` → `description`
+- `discussion` → `description`（= body の最初の 280 字）/ `byline`（= author）/ `publishedAt`（= postedAt）
+- `recipe` → `description` / `byline`（= author）
+- `video` → `description` / `byline`（= channel）/ `publishedAt`（= uploadDate）
+- `job` → `description` / `byline`（= company）/ `publishedAt`（= datePosted）
+
+バックフィルは、確定的データソースが**対応するフィールドを**埋めていない場合にのみトリガーされる —— LLM は常に最後の手段。
+
+## キャッシュ
+
+同じリクエストは同じ Redis キーにハッシュされる：
+`webextrator:cache:extract:<sha256(canonical-json)>`。キャッシュキーは **無視** される `async`、
+`bypass_cache`、`cache_ttl_seconds`（これは操作スイッチであり、応答には影響しない）。`cookies` /
+`headers` **は**バケットキャッシュされる。
+
+| フィールド                     | 効果                         |
+| ---------------------- | -------------------------- |
+| `bypass_cache: true`   | 読み取りをスキップ；今回の結果は依然としてキャッシュに書き戻され、次回同じリクエストがヒットする。 |
+| `cache_ttl_seconds: 0` | 今回の応答は**キャッシュしない**。               |
+| `cache_ttl_seconds: N` | このエントリの TTL をカスタマイズ（デフォルトは 3600 秒）。    |
+
+キャッシュにヒットした応答は `data.cached: true` と `data.cacheStoredAt: <unix-ms>` を持つ。
+
+## 非同期モードとコールバック
+
+`async: true` を設定すると非同期モードに入る（`callback_url` を提供すると自動的に入る）。プラットフォームはすぐに返す（HTTP 200）：
 
 ```json
 {
   "success": true,
   "task_id": "550e8400-...",
-  "trace_id": "550e8400-...",
-  "started_at": "2026-05-02T10:30:00.123Z",
-  "finished_at": "2026-05-02T10:30:08.789Z",
-  "elapsed": 8.666,
-  "data": {
-    "kind": "extract",
-    "expected_type": "article",
-    "url": "https://example.com/post/1",
-    "title": "サンプル記事",
-    "author": "張三",
-    "published_at": "2026-05-01",
-    "content": "# サンプル記事\n\n本文 ...",
-    "summary": "本記事では ..."
-  }
+  "trace_id": "6ba7b810-...",
+  "started_at": "2026-05-02T10:30:00.123Z"
 }
 ```
 
-非同期モード、エラーコード、課金ルールは `/webextrator/render` と完全に同じです。
+タスクが完了した時、完全なエンベロープをあなたの `callback_url` に `POST` する（設定されている場合）。また、後で [`/webextrator/tasks`](development_webextrator_tasks) を通じて積極的にクエリすることもできる。
 
-## 例：記事本文抽出（LLM 有効）
+## 例
+
+### 1. Wikipedia 記事（schema.org ヒット、LLM は不要）
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://example.com/news/1",
-    "expected_type": "article",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "expected_type": "article"
+  }'
+```
+
+`data.structured.schemaOrg.primary` 重要フィールド：
+```json
+{
+  "kind": "article",
+  "subtype": "Article",
+  "headline": "アメリカの機械学習と知識管理会社",
+  "datePublished": "2007-08-08T05:47:27Z",
+  "dateModified": "2025-07-10T20:42:45Z",
+  "author": { "name": "ウィキメディアプロジェクトの貢献者", "type": "Organization" },
+  "publisher": { "name": "ウィキメディア財団株式会社" }
+}
+```
+
+### 2. BestBuy 商品页（schema.org 命中）
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.bestbuy.com/product/apple-airpods-pro-2nd-generation-white/JJ8ZH6TPSW",
+    "expected_type": "product"
+  }'
+```
+
+schema.org 抽出：
+
+```json
+{
+  "kind": "product",
+  "name": "Apple - リファービッシュエクセレント - AirPods Pro (第2世代) - ホワイト",
+  "sku": "10845412",
+  "model": "MQD83AM/A",
+  "color": "ホワイト",
+  "brand": "Apple",
+  "offer": { "price": 159.99, "currency": "USD", "availability": "https://schema.org/InStock", "seller": "Best Buy" },
+  "rating": { "value": 4.4, "count": 8 }
+}
+```
+
+### 3. AllRecipes 食谱页（含营养与步骤）
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.allrecipes.com/recipe/16354/easy-meatloaf/"
+  }'
+```
+
+schema.org 抽出：
+
+```json
+{
+  "kind": "recipe",
+  "name": "簡単ミートローフ",
+  "cookTime": "PT60M",
+  "totalTime": "PT75M",
+  "recipeYield": "8 / 1 (9x5インチ) ミートローフ",
+  "ingredients": ["1 1/2ポンドの挽き肉", "..."],
+  "instructions": [{ "text": "オーブンを350°Fに予熱します ..." }, "..."],
+  "rating": { "value": 4.7, "count": 9348 }
+}
+```
+
+### 4. HN 讨论页（无 JSON-LD —— 需要启用 LLM）
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://news.ycombinator.com/item?id=37000000",
     "enable_llm": true
   }'
 ```
 
-## 例：非同期 + カスタム構造化抽出
+`data.structured.llm.data`：
+
+```json
+{
+  "kind": "discussion",
+  "title": "Show HN: ウェブページを抽出する新しい方法",
+  "author": "alice",
+  "points": 173,
+  "commentCount": 42,
+  "body": "こんにちはHN、私たちはDiffbotのAnalyze APIの自己ホスト型代替を構築しました ..."
+}
+```
+
+頂层字段也被回填：`byline = "alice"`、`publishedAt = "..."`。
+
+### 5. Amazon 商品页（Amazon 无 JSON-LD —— 需要启用 LLM）
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://shop.example.com/item/123",
-    "expected_type": "structured",
-    "enable_llm": true,
-    "instruction": "商品タイトル、価格、在庫、3枚のメイン画像 URL を抽出",
-    "callback_url": "https://your-domain.com/wbx-callback"
+    "url": "https://www.amazon.com/dp/B0BSHF7WHW",
+    "expected_type": "product",
+    "enable_llm": true
   }'
 ```
+
+`data.structured.llm.data`（类型化 `product`）：
+
+```json
+{
+  "kind": "product",
+  "name": "Apple 2023 MacBook Pro M2 Pro 14インチ",
+  "brand": "Apple",
+  "price": 1799,
+  "currency": "USD",
+  "bullets": ["Apple M2 Proチップ（10コアCPU）", "..."],
+  "specifications": [{ "name": "ディスプレイサイズ", "value": "14.2インチ" }, "..."]
+}
+```
+
+### Python (requests)
+
+```python
+import os, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+
+resp = requests.post(
+    "https://api.acedata.cloud/webextrator/extract",
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "url": "https://en.wikipedia.org/wiki/Diffbot",
+        "expected_type": "article",
+    },
+    timeout=120,
+)
+resp.raise_for_status()
+data = resp.json()["data"]
+
+primary = (data.get("structured") or {}).get("schemaOrg", {}).get("primary")
+print("contentType:", data["contentType"])
+print("title:      ", data["title"])
+print("byline:     ", data.get("byline"))
+print("publishedAt:", data.get("publishedAt"))
+if primary and primary["kind"] == "article":
+    print("headline:    ", primary["headline"])
+    print("dateModified:", primary.get("dateModified"))
+```
+
+### Node.js (fetch)
+
+```js
+const apiKey = process.env.ACEDATA_API_KEY;
+
+const res = await fetch('https://api.acedata.cloud/webextrator/extract', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    url: 'https://www.allrecipes.com/recipe/16354/easy-meatloaf/',
+  }),
+});
+const { data } = await res.json();
+const recipe = data?.structured?.schemaOrg?.primary;
+console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, '種類の材料');
+```
+
+## 提示与坑
+
+- **`expected_type` を指定できる場合は指定してください。** 無料のヒントで、ヒューリスティック判断をスキップし、URLパターンが
+  内蔵リストにないページに特に有用です。
+- **`enable_llm: true` はschema.orgにヒットしたページで無料です。** LLMはschema.orgに
+  プライマリがない場合にのみ呼び出されるため、デフォルトでオンにしても安全です。
+- **デバッグ時はまず`rawSignals.hasJsonLd`を確認してください。** もし`true`ですが`structured.schemaOrg.primary`
+  が`null`の場合、ページが私たちのマッパーを使用していてもカバーされていない`@type`を使用していることを示します —— イシューを提起してください、私たちが追加します。
+- **`structured.llmError`は情報提供的です。** リクエストは成功し、ヒューリスティック結果は引き続き返されます。`llmError.error`を見て原因を特定してください（タイムアウト、JSON解析失敗、Zod検証失敗）。
+- **非記事ページの`links[]`は関連性のソートを行いません。** "上限100件+無効なプロトコルのフィルタリング"に従って、できる限りクリーンアップします。
+- **キャッシュヒットも課金されます。** キャッシュは遅延とブラウザプールの保護のためのものであり、節約のためではありません。
