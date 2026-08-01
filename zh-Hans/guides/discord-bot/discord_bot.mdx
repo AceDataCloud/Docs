@@ -1,0 +1,199 @@
+---
+title: "Discord Agent Proxy 使用文档"
+description: "Discord Agent Proxy 集成指南 - Ace Data Cloud"
+---
+
+Discord Agent Proxy 是一个**独立部署**的服务：它保管你自己的 Discord 账号凭据，与 Discord 保持一条常驻连接，并把这个账号的能力通过 **MCP** 和 **REST API** 两个接口开放出来，让 AI 或程序代替你操作 Discord。
+
+容器内**不含任何 AI 模型**，它只负责执行——由你的 AI 客户端（Claude、Cursor 等）或自己的程序发起调用。
+
+```
+AI 客户端  ──MCP /mcp──┐
+                       ├─→ Discord Agent Proxy ──→ Discord
+你的程序 ──REST /api───┘      （保管你的账号凭据）
+```
+
+## ⚠️ 使用前必读
+
+用程序自动化操作**个人账号**（self-bot）违反 Discord 的服务条款，账号存在被封禁的风险。这是本服务的固有前提：你提供自己的账号凭据，并自行承担风险。
+
+**强烈建议使用一个专门的小号，不要用你的主账号。**
+
+## 部署服务
+
+进入 [控制台 → 应用](https://platform.acedata.cloud/console/applications)，找到 Discord Agent Proxy 并创建应用。创建后进入配置页，填入你的 Discord 账号凭据并部署。
+
+部署完成后，配置页会显示两项信息：
+
+| 项目 | 示例 | 用途 |
+|---|---|---|
+| MCP 接入地址 | `https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp` | 配置到 AI 客户端 |
+| 访问令牌 | `V0p7kAWY...` | 鉴权用，见下 |
+
+### 如何获取 Discord 账号凭据
+
+1. 在电脑浏览器中登录 Discord（[discord.com/app](https://discord.com/app)）
+2. 按 `F12` 打开开发者工具，切换到 **Network（网络）** 面板
+3. 在 Discord 中随意点击一个频道，观察请求列表
+4. 点开任意一个发往 `discord.com/api` 的请求，在 **Request Headers（请求头）** 中找到 `authorization` 字段
+5. 复制它的值
+
+这串凭据等同于你的账号登录态，**不要分享给任何人**。如果泄露，在 Discord 中修改密码即可使其立即失效。
+
+## 鉴权方式
+
+除 `/health` 外，所有接口都需要在**请求头**中携带访问令牌：
+
+```
+Authorization: Bearer <你的访问令牌>
+```
+
+> **注意：本服务只接受请求头鉴权，不支持 `?token=xxx` 这种在网址后面拼接令牌的方式。** 直接在浏览器里打开接口地址会返回 `401 unauthorized`，这是正常现象，不代表部署失败。想确认服务是否正常，请访问 `/health`（该接口无需鉴权）。
+
+## 检查服务状态
+
+```bash
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+```
+
+正常返回：
+
+```json
+{ "status": "ok", "gateway_ready": true }
+```
+
+其中 `gateway_ready` 表示与 Discord 的连接是否已建立：
+
+- `true` — 一切正常，可以开始调用
+- `false` — 服务已启动但尚未连上 Discord。刚部署后需要等待几秒；如果持续为 `false`，通常是账号凭据无效或已过期，请重新获取并重新部署
+
+当 `gateway_ready` 为 `false` 时，其他接口会返回 `503`。
+
+## 在 AI 客户端中使用（MCP）
+
+以 Claude Code 为例：
+
+```bash
+claude mcp add --transport http discord \
+  https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp \
+  --header "Authorization: Bearer <你的访问令牌>"
+```
+
+其他支持 MCP 的客户端（Cursor、Claude Desktop 等）通常使用如下配置：
+
+```json
+{
+  "mcpServers": {
+    "discord": {
+      "type": "http",
+      "url": "https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {
+        "Authorization": "Bearer <你的访问令牌>"
+      }
+    }
+  }
+}
+```
+
+配置完成后，就可以直接用自然语言指挥 AI 操作 Discord，例如：
+
+> 看一下我在「项目讨论」频道有没有新消息，如果有人问到发布时间，帮我回复说这周五。
+
+### 可用工具
+
+| MCP 工具 | 作用 |
+|---|---|
+| `discord_whoami` | 查看当前代理的是哪个账号 |
+| `discord_list_guilds` | 列出账号加入的所有服务器 |
+| `discord_list_channels` | 列出某个服务器下的频道 |
+| `discord_create_text_channel` | 创建文字频道 |
+| `discord_list_members` | 列出服务器成员 |
+| `discord_send_message` | 发送消息（可指定回复某条消息） |
+| `discord_read_messages` | 读取频道最近的消息 |
+| `discord_edit_message` | 编辑自己发过的消息 |
+| `discord_delete_message` | 删除消息 |
+| `discord_search_messages` | 在频道内搜索消息 |
+| `discord_add_reaction` | 给消息添加表情回应 |
+| `discord_pin_message` | 置顶消息 |
+| `discord_create_dm` | 开启一对一私聊，返回频道 ID |
+| `discord_send_dm` | 给某个用户发私信 |
+
+## 在程序中使用（REST API）
+
+所有 REST 接口挂载在 `/api` 下，返回体统一为 `{"data": ...}`，出错时为 `{"error": "..."}`。
+
+### 查看当前账号
+
+```bash
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer <你的访问令牌>"
+```
+
+### 发送消息
+
+```bash
+curl -X POST https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer <你的访问令牌>" \
+  -H "Content-Type: application/json" \
+  -d '{"channel_id": "1234567890", "content": "你好"}'
+```
+
+可选参数 `reply_to` 用于回复指定消息：
+
+```json
+{ "channel_id": "1234567890", "content": "收到", "reply_to": "9876543210" }
+```
+
+### 读取消息
+
+```bash
+curl "https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/channels/1234567890/messages?limit=20" \
+  -H "Authorization: Bearer <你的访问令牌>"
+```
+
+### 完整接口列表
+
+| 方法与路径 | 参数 | 作用 |
+|---|---|---|
+| `GET /api/whoami` | — | 当前代理的账号信息 |
+| `GET /api/guilds` | — | 账号加入的服务器列表 |
+| `GET /api/guilds/{guild_id}/channels` | — | 服务器下的频道列表 |
+| `POST /api/guilds/{guild_id}/channels` | `{name}` | 创建文字频道 |
+| `GET /api/guilds/{guild_id}/members` | `?limit=`（默认 100） | 服务器成员列表 |
+| `POST /api/messages` | `{channel_id, content, reply_to?}` | 发送消息 |
+| `GET /api/channels/{channel_id}/messages` | `?limit=`（默认 50，上限 100） | 读取最近消息 |
+| `GET /api/channels/{channel_id}/messages/search` | `?q=`（必填）`&limit=`（默认 25） | 搜索消息 |
+| `PATCH /api/channels/{channel_id}/messages/{message_id}` | `{content}` | 编辑消息 |
+| `DELETE /api/channels/{channel_id}/messages/{message_id}` | — | 删除消息 |
+| `POST /api/channels/{channel_id}/messages/{message_id}/reactions` | `{emoji}` | 添加表情回应 |
+| `POST /api/channels/{channel_id}/messages/{message_id}/pin` | — | 置顶消息 |
+| `POST /api/dms` | `{recipient_id}` | 开启私聊，返回频道 ID |
+| `POST /api/dms/send` | `{recipient_id, content}` | 发送私信 |
+
+### 如何获取频道 ID 和用户 ID
+
+在 Discord 客户端中依次打开 **用户设置 → 高级设置**，开启 **开发者模式**。之后右键点击任意频道或用户，菜单中会出现「复制 ID」。
+
+也可以直接调用 `GET /api/guilds` 和 `GET /api/guilds/{guild_id}/channels` 来枚举。
+
+## 常见问题
+
+**返回 `401 unauthorized`**
+
+访问令牌不正确，或者使用了 `?token=` 的方式传递。请确认令牌通过请求头 `Authorization: Bearer &lt;令牌>` 传递，且与控制台显示的一致。
+
+**返回 `503`**
+
+与 Discord 的连接尚未建立。先访问 `/health` 查看 `gateway_ready`，若长时间为 `false`，多为账号凭据失效，请重新获取并重新部署。
+
+**返回 `403` 或 `404`**
+
+账号本身没有对应权限（例如不在该服务器中、无权在该频道发言），或者 ID 填错了。这类错误来自 Discord，不是代理服务的问题。
+
+**返回 `429`**
+
+触发了 Discord 的频率限制，响应中的 `retry_after` 字段给出建议的等待秒数。请降低调用频率。
+
+**消息发送后账号被封禁**
+
+如前所述，自动化操作个人账号违反 Discord 服务条款。请使用专用小号，并控制操作频率、避免群发等敏感行为。
