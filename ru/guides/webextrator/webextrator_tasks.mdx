@@ -1,63 +1,217 @@
 ---
-title: "WebExtrator API запроса задач"
+title: "WebExtrator Задача Запрос API Интеграция Руководство"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` (**бесплатно**)
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-Запрос истории задач `render` / `extract` (хранится 7 дней).
+WebExtrator Задача Запрос API используется для запроса исторических результатов `render` / `extract` задач. Общие
+применения:
 
-## Запрос одной задачи
+- **Проверка** полного envelope после завершения асинхронной задачи (кроме `callback_url` уведомлений или активного опроса).
+- **Аудит** того, что было отправлено — записи задач одновременно хранят оригинальный `request` и окончательный `response`.
+- **Пакетное заполнение** — получение нескольких записей по `id` или `trace_id` за один раз.
+
+Записи задач хранятся в Redis **7 дней**.
+
+Интерфейс запроса задач **бесплатный** (не учитывается в использовании Credits).
+
+## Аутентификация
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+Можно запросить только задачи, принадлежащие вашему аккаунту AceDataCloud.
+
+## Параметры запроса
+
+Тело запроса разделяется по `action` на два действия:
+
+### `action: "retrieve"` — Запрос одной записи
+
+| Поле         | Тип     | Обязательное | Описание                                                   |
+| ---------- | ------ | :-: | ---------------------------------------------------- |
+| `action`   | const  |  ✅  | Фиксированное значение `"retrieve"`。                                     |
+| `id`       | string | Один из двух | ID задачи (появляется в каждом envelope render/extract в поле `task_id`). |
+| `trace_id` | string | Один из двух | ID цепочки вызовов (поле `trace_id` в envelope).                    |
+
+`id` и `trace_id` передаются один из двух.
+
+### `action: "retrieve_batch"` — Пакетный запрос
+
+| Поле          | Тип       | Обязательное | Описание                     |
+| ----------- | -------- | :-: | ---------------------- |
+| `action`    | const    |  ✅  | Фиксированное значение `"retrieve_batch"`。 |
+| `ids`       | string[] | Один из двух | Список ID задач.              |
+| `trace_ids` | string[] | Один из двух | Список ID цепочек вызовов.             |
+| `offset`    | number   |  ❌  | Смещение для постраничного вывода (по умолчанию 0).            |
+| `limit`     | number   |  ❌  | Размер страницы, 1–100 (по умолчанию 50).     |
+
+`ids` и `trace_ids` передаются один из двух.
+
+## Ответ на одиночный запрос
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* Полный extract envelope */ }
+    }
+  }
 }
 ```
 
-Или по `trace_id`:
+Если ничего не найдено, возвращается `{ "task": null }` (HTTP 200, не 404).
+
+Поля времени объекта `task` описаны ниже.
+
+- `created_at` — время создания задачи, Unix временная метка (секунды, с плавающей точкой).
+- `started_at` — время начала выполнения задачи, Unix временная метка (секунды, с плавающей точкой). Если задача еще не началась, то `null`.
+- `finished_at` — время завершения задачи, Unix временная метка (секунды, с плавающей точкой). Если задача не завершена, то `null`.
+- `elapsed` — время выполнения задачи, в секундах (с плавающей точкой, с 3 знаками после запятой). Если задача не завершена, то `null`.
+
+## Ответ на пакетный запрос
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* Структура такая же, как у одиночной .task */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-Возвращает один объект задачи (включая поля `request` / `response` / `started_at` / `finished_at` и др.).
+Несуществующие ID не вызовут ошибку, просто будут отсутствовать в `tasks`.
 
-## Пакетный запрос
+## Примеры
+
+### Запрос одной записи по task_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### Запрос одной записи по trace_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### Пакетный запрос
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) — Опрос до завершения
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) Отправка асинхронного извлечения
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) Использование Tasks API для опроса до завершения задачи
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("Время выполнения", task["elapsed"], "секунд")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) — Получение полного envelope после получения уведомления
+
+```js
+// В вашем обработчике callback_url:
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // Быстрый ack
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('Полный envelope:', task.response.data);
+});
+```
+
+## Ошибки в ответе
+
+| HTTP | `error.code`   | Значение                                        |
+| ---- | -------------- | ----------------------------------------- |
+| 400  | `bad_request`  | Ошибка валидации (отсутствует `action`, одновременно переданы `id` и `trace_id` и т.д.). |
+| 401  | `unauthorized` | Отсутствует или недействителен `Authorization: Bearer …`。         |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-Или с использованием `trace_ids`, либо без передачи этих параметров для постраничного получения своей истории задач.
-
-Возвращает:
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## Определение полей
-
-| Поле | Описание |
-|------|----------|
-| `id` / `task_id` | Уникальный ID задачи |
-| `trace_id` | ID цепочки вызовов (согласован с PlatformGateway / CLS) |
-| `type` | `render` или `extract` |
-| `request` | Исходное тело запроса |
-| `response` | Результат рендеринга / извлечения (аналогично `data` в sync response) |
-| `started_at` / `finished_at` / `elapsed` | Метки времени и продолжительность (в секундах) |
-
-> Этот интерфейс бесплатен и не учитывается в расходах.
+## Подсказки и ловушки
+- **Можете настроить `trace_id`, если это необходимо.** В оригинальном запросе render/extract загрузите
+  `?trace_id=…` (QueryString), сопоставьте его с вашим собственным бизнес ID (например, ID выполнения рабочего процесса и т.д.),
+  после этого вы сможете использовать бизнес ID для поиска задач. Если не передан, сервер автоматически сгенерирует UUID.
+- **Срок хранения 7 дней.** Более ранние задачи возвращают `task: null` — для долгосрочного архивирования, пожалуйста, сохраняйте данные самостоятельно.
+- **Запросы задач бесплатны.** Запрашивайте столько раз, сколько хотите, плата за оригинальные вызовы render/extract уже была оплачена.
+- **Предпочитайте асинхронный подход + обратные вызовы, а не опрос.** Если бизнес позволяет, передайте
+  `callback_url` в оригинальном запросе, чтобы платформа могла отправить вам envelope, это будет более эффективно, чем опрашивать каждые 2 секунды.

@@ -1,63 +1,213 @@
 ---
-title: "API de requête des tâches WebExtrator"
+title: "WebExtrator Guide d'intégration de l'API de requête de tâches"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` (**Gratuit**)
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-Interroger les tâches historiques `render` / `extract` (conservées pendant 7 jours).
+L'API de requête de tâches WebExtrator est utilisée pour interroger les résultats des tâches `render` / `extract` historiques. Usages courants :
 
-## Requête unique
+- **Vérification** de l'enveloppe complète après la fin d'une tâche asynchrone (en plus de la notification par `callback_url` ou du polling actif).
+- **Audit** de ce qui a été soumis — les enregistrements de tâches conservent à la fois la `request` originale et la `response` finale.
+- **Remplissage par lot** — récupérer plusieurs entrées par `id` ou `trace_id` en une seule fois.
+
+Les enregistrements de tâches sont conservés dans Redis pendant **7 jours**.
+
+L'interface de requête de tâches est **gratuite** (ne compte pas dans l'utilisation des crédits).
+
+## Authentification
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+Il est seulement possible de consulter les tâches sous son propre compte AceDataCloud.
+
+## Paramètres de requête
+
+Le corps de la requête est une union discriminante selon `action`, avec deux types d'actions :
+
+### `action: "retrieve"` — Requête unique
+
+| Champ       | Type     | Obligatoire | Description                                               |
+| ----------- | -------- | :---------: | ------------------------------------------------------- |
+| `action`    | const    |  ✅        | Fixe `"retrieve"`.                                      |
+| `id`        | string   | Un des deux | ID de la tâche (apparaît dans le champ `task_id` de chaque enveloppe render/extract). |
+| `trace_id`  | string   | Un des deux | ID de la chaîne d'appels (champ `trace_id` de l'enveloppe). |
+
+`id` et `trace_id` doivent être fournis l'un ou l'autre.
+
+### `action: "retrieve_batch"` — Requête par lot
+
+| Champ         | Type       | Obligatoire | Description                  |
+| ------------- | ---------- | :---------: | --------------------------- |
+| `action`      | const      |  ✅        | Fixe `"retrieve_batch"`.    |
+| `ids`        | string[]   | Un des deux | Liste des ID de tâches.      |
+| `trace_ids`  | string[]   | Un des deux | Liste des ID de chaînes d'appels. |
+| `offset`      | number     |  ❌        | Décalage de pagination (0 par défaut). |
+| `limit`       | number     |  ❌        | Taille de la page, 1–100 (50 par défaut). |
+
+`ids` et `trace_ids` doivent être fournis l'un ou l'autre.
+
+## Réponse unique
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* enveloppe extract complète */ }
+    }
+  }
 }
 ```
 
-Ou via `trace_id` :
+Si aucune tâche n'est trouvée, retourne `{ "task": null }` (HTTP 200, pas 404).
+
+Les champs de temps de l'objet `task` sont décrits comme suit.
+
+- `created_at`, date de création de la tâche, timestamp Unix (secondes, flottant).
+- `started_at`, date de début d'exécution de la tâche, timestamp Unix (secondes, flottant). `null` si la tâche n'a pas encore commencé.
+- `finished_at`, date de fin de la tâche, timestamp Unix (secondes, flottant). `null` si la tâche n'est pas terminée.
+- `elapsed`, temps d'exécution de la tâche, en secondes (flottant, 3 décimales). `null` si la tâche n'est pas terminée.
+
+## Réponse par lot
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* même structure que .task */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-Retourne un objet tâche unique (incluant les champs `request` / `response` / `started_at` / `finished_at`, etc.).
+Les ID inexistants ne génèrent pas d'erreur, ils sont simplement absents de `tasks`.
 
-## Requête en lot
+## Exemples
+
+### Requête unique par task_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### Requête unique par trace_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### Requête par lot
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) — Polling jusqu'à la fin
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) Soumettre une extraction asynchrone
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) Utiliser l'API Tasks pour faire du polling jusqu'à ce que la tâche soit terminée
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("Temps écoulé", task["elapsed"], "secondes")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) — Récupérer l'enveloppe complète après réception du callback
+
+```js
+// Dans votre fonction de traitement de callback_url :
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // Accusé de réception rapide
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('Enveloppe complète :', task.response.data);
+});
+```
+
+## Réponses d'erreur
+
+| HTTP | `error.code`   | Signification                                   |
+| ---- | -------------- | ----------------------------------------------- |
+| 400  | `bad_request`  | Échec de la validation (manque `action`, `id` et `trace_id` fournis simultanément, etc.). |
+| 401  | `unauthorized` | `Authorization: Bearer …` manquant ou invalide. |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-Ou avec `trace_ids`, ou sans transmettre ni l’un ni l’autre pour paginer l’historique de ses propres tâches.
-
-Retour :
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## Définition des champs
-
-| Champ | Description |
-|-------|-------------|
-| `id` / `task_id` | ID unique de la tâche |
-| `trace_id` | ID de la chaîne d’appel (aligné avec PlatformGateway / CLS) |
-| `type` | `render` ou `extract` |
-| `request` | Corps de la requête d’origine |
-| `response` | Résultat du rendu / extraction (identique au champ `data` de la réponse sync) |
-| `started_at` / `finished_at` / `elapsed` | Horodatages et durée (en secondes) |
-
-> Cette API est gratuite et ne compte pas dans la consommation.
+## Conseils et pièges
+- **Vous pouvez personnaliser `trace_id`.** Dans la requête render/extract d'origine, téléchargez `?trace_id=…` (QueryString), alignez-le avec votre propre ID d'entreprise (ID de run de workflow, etc.), puis vous pourrez rechercher des tâches avec l'ID d'entreprise. Si non transmis, le serveur génère automatiquement un UUID.
+- **Durée de conservation de 7 jours.** Les tâches plus anciennes renvoient `task: null` — si vous avez besoin d'archivage à long terme, veuillez le stocker vous-même.
+- **La recherche de tâches est gratuite.** Vous pouvez rechercher autant de fois que vous le souhaitez, les frais pour l'appel render/extract d'origine ont déjà été payés.
+- **Privilégiez l'asynchrone + le rappel, plutôt que le polling.** Si votre entreprise le permet, transmettez `callback_url` dans la requête d'origine, afin que la plateforme vous pousse l'enveloppe, ce qui est plus efficace que de faire un polling toutes les 2 secondes.

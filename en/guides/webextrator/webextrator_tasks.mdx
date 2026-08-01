@@ -1,63 +1,213 @@
 ---
-title: "WebExtrator Task Query API"
+title: "WebExtrator Task Query API Integration Guide"
 description: "WebExtrator Web Render & Extract integration guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` (**Free**)
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-Query historical `render` / `extract` tasks (retained for 7 days).
+The WebExtrator Task Query API is used to query the results of historical `render` / `extract` tasks. Common usages include:
 
-## Single Query
+- **Callback** to check the complete envelope after an asynchronous task is completed (besides `callback_url` push or active polling).
+- **Audit** what has been submitted — task records store both the original `request` and the final `response`.
+- **Batch refill** — pull multiple records at once by `id` or `trace_id`.
+
+Task records are retained in Redis for **7 days**.
+
+The task query interface is **free** (not counted towards Credits usage).
+
+## Authentication
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+You can only query tasks under your own AceDataCloud account.
+
+## Request Parameters
+
+The request body is a discriminative union based on `action`, with two types of actions:
+
+### `action: "retrieve"` — Single Query
+
+| Field       | Type     | Required | Description                                               |
+| ----------- | -------- | :------: | ------------------------------------------------------- |
+| `action`    | const    |   ✅    | Fixed `"retrieve"`.                                      |
+| `id`        | string   | One of   | Task ID (appears in the `task_id` field of each render/extract envelope). |
+| `trace_id`  | string   | One of   | Call chain ID (the `trace_id` field of the envelope).  |
+
+Either `id` or `trace_id` must be provided.
+
+### `action: "retrieve_batch"` — Batch Query
+
+| Field         | Type       | Required | Description                 |
+| --------------| --------- | :------: | --------------------------- |
+| `action`      | const     |   ✅    | Fixed `"retrieve_batch"`.   |
+| `ids`         | string[]  | One of   | List of task IDs.           |
+| `trace_ids`   | string[]  | One of   | List of call chain IDs.     |
+| `offset`      | number    |   ❌    | Pagination offset (default 0). |
+| `limit`       | number    |   ❌    | Page size, 1–100 (default 50). |
+
+Either `ids` or `trace_ids` must be provided.
+
+## Single Response
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* complete extract envelope */ }
+    }
+  }
 }
 ```
 
-Or by `trace_id`:
+If not found, it returns `{ "task": null }` (HTTP 200, not 404).
+
+The timing fields of the `task` object are described as follows.
+
+- `created_at`, task creation time, Unix timestamp (seconds, float).
+- `started_at`, task execution start time, Unix timestamp (seconds, float). It is `null` when the task has not started.
+- `finished_at`, task completion time, Unix timestamp (seconds, float). It is `null` when the task is not completed.
+- `elapsed`, task execution duration, in seconds (float, rounded to 3 decimal places). It is `null` when the task is not completed.
+
+## Batch Response
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* same structure as single .task */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-Returns a single task object (including fields such as `request` / `response` / `started_at` / `finished_at`).
+Non-existent IDs will not cause an error, they will simply be missing from `tasks`.
 
-## Batch Query
+## Examples
+
+### Query Single by task_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### Query Single by trace_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### Batch Query
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) — Polling Until Completion
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) Submit asynchronous extraction
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) Use Tasks API to poll until the task is completed
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("Elapsed time", task["elapsed"], "seconds")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) — Pull Complete Envelope After Receiving Callback
+
+```js
+// In your callback_url handler:
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // Quick ack first
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('Complete envelope:', task.response.data);
+});
+```
+
+## Error Responses
+
+| HTTP | `error.code`   | Meaning                                      |
+| ---- | -------------- | ------------------------------------------- |
+| 400  | `bad_request`  | Validation failed (missing `action`, both `id` and `trace_id` provided, etc.). |
+| 401  | `unauthorized` | Missing or invalid `Authorization: Bearer …`. |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-Or use `trace_ids`, or omit both to paginate through your own task history.
-
-Returns:
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## Field Definitions
-
-| Field | Description |
-|-------|-------------|
-| `id` / `task_id` | Unique task ID |
-| `trace_id` | Trace chain ID (aligned with PlatformGateway / CLS) |
-| `type` | `render` or `extract` |
-| `request` | Original request body |
-| `response` | Render / extract result (same as sync response `data`) |
-| `started_at` / `finished_at` / `elapsed` | Timestamps and elapsed time (seconds) |
-
-> This API is free and does not count towards usage.
+## Tips and Pitfalls
+- **If you can customize `trace_id`, then do so.** Upload it in the original render/extract request `?trace_id=…` (QueryString), aligning it with your own business ID (workflow run id, etc.), and then you can query tasks using the business ID. If not provided, the server will automatically generate a UUID.
+- **Retention period is 7 days.** Tasks older than this will return `task: null` — if long-term archiving is needed, please store it in your own database.
+- **Task queries are free.** You can query as many times as you want; the fees for the original render/extract calls have already been paid.
+- **Prefer using asynchronous + callbacks instead of polling.** If business allows, pass `callback_url` in the original request, allowing the platform to push the envelope to you, which is more efficient than polling every 2 seconds.

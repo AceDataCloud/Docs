@@ -1,63 +1,216 @@
 ---
-title: "واجهة برمجة تطبيقات استعلام مهام WebExtrator"
+title: "دليل تكامل واجهة برمجة تطبيقات استعلام مهام WebExtrator"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` （**مجاني**）
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-استعلام عن مهام `render` / `extract` التاريخية (تُحتفظ بها لمدة 7 أيام).
+تستخدم واجهة برمجة تطبيقات استعلام مهام WebExtrator لاستعلام نتائج مهام `render` / `extract` التاريخية. الاستخدامات الشائعة:
 
-## استعلام فردي
+- **التحقق** من envelope الكامل بعد انتهاء المهمة غير المتزامنة (بخلاف دفع `callback_url` أو الاستعلام النشط).
+- **تدقيق** ما تم تقديمه من قبل — تسجل سجلات المهام كل من `request` الأصلية و `response` النهائية.
+- **إعادة تعبئة جماعية** — سحب عدة سجلات مرة واحدة حسب `id` أو `trace_id`.
+
+تحتفظ Redis بسجلات المهام لمدة **7 أيام**.
+
+واجهة استعلام المهام **مجانية** (لا تُحتسب ضمن استخدام الائتمانات).
+
+## المصادقة
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+يمكن فقط استعلام المهام الموجودة تحت حساب AceDataCloud الخاص بك.
+
+## معلمات الطلب
+
+جسم الطلب مقسم حسب `action` إلى نوعين من الإجراءات:
+
+### `action: "retrieve"` — استعلام فردي
+
+| الحقل       | النوع     | مطلوب | الشرح                                                   |
+| ---------- | ------ | :-: | ---------------------------------------------------- |
+| `action`   | ثابت   |  ✅  | ثابت `"retrieve"`。                                     |
+| `id`       | سلسلة  | اختيار واحد | معرف المهمة (يظهر في كل envelope render/extract في حقل `task_id`)。 |
+| `trace_id` | سلسلة  | اختيار واحد | معرف سلسلة الاستدعاء (حقل `trace_id` في envelope)。                    |
+
+يتم تمرير `id` أو `trace_id` كاختيار واحد.
+
+### `action: "retrieve_batch"` — استعلام جماعي
+
+| الحقل          | النوع       | مطلوب | الشرح                     |
+| ----------- | -------- | :-: | ---------------------- |
+| `action`    | ثابت    |  ✅  | ثابت `"retrieve_batch"`。 |
+| `ids`       | سلسلة[] | اختيار واحد | قائمة معرفات المهام。              |
+| `trace_ids` | سلسلة[] | اختيار واحد | قائمة معرفات سلسلة الاستدعاء。             |
+| `offset`    | رقم     |  ❌  | إزاحة الصفحات (افتراضي 0)。            |
+| `limit`     | رقم     |  ❌  | حجم الصفحة الواحدة، 1–100 (افتراضي 50)。     |
+
+يتم تمرير `ids` أو `trace_ids` كاختيار واحد.
+
+## استجابة فردية
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* envelope extract الكامل */ }
+    }
+  }
 }
 ```
 
-أو عبر `trace_id`:
+عند عدم العثور على شيء، يتم إرجاع `{ "task": null }` (HTTP 200، وليس 404).
+
+توضح حقول التوقيت في كائن `task` كما يلي.
+
+- `created_at`، وقت إنشاء المهمة، طابع زمني Unix (ثوانٍ، عائم).
+- `started_at`، وقت بدء تنفيذ المهمة، طابع زمني Unix (ثوانٍ، عائم). يكون `null` عندما لا تبدأ المهمة بعد.
+- `finished_at`، وقت انتهاء المهمة، طابع زمني Unix (ثوانٍ، عائم). يكون `null` عندما لا تكتمل المهمة.
+- `elapsed`، الوقت المستغرق لتنفيذ المهمة، بوحدة الثواني (عائم، يحتفظ بـ 3 أرقام عشرية). يكون `null` عندما لا تكتمل المهمة.
+
+## استجابة جماعية
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* نفس هيكل .task الفردي */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-يرجع كائن مهمة واحد (يحتوي على حقول مثل `request` / `response` / `started_at` / `finished_at`).
+لن يتم الإبلاغ عن أخطاء للمعرفات غير الموجودة، بل ستفقد فقط من `tasks`.
 
-## استعلام جماعي
+## أمثلة
+
+### استعلام فردي حسب task_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### استعلام فردي حسب trace_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### استعلام جماعي
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### بايثون (requests) — الاستعلام حتى الاكتمال
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) تقديم استخراج غير متزامن
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) استخدام واجهة API للمهام للاستعلام حتى تكتمل المهمة
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("الوقت المستغرق", task["elapsed"], "ثانية")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) — استعلام envelope الكامل بعد تلقي الاستدعاء
+
+```js
+// في دالة معالجة callback_url الخاصة بك:
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // أقر بسرعة أولاً
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('envelope الكامل:', task.response.data);
+});
+```
+
+## استجابة الخطأ
+
+| HTTP | `error.code`   | المعنى                                        |
+| ---- | -------------- | ----------------------------------------- |
+| 400  | `bad_request`  | فشل التحقق (يفتقر إلى `action`، أو تمرير `id` و `trace_id` معًا، إلخ). |
+| 401  | `unauthorized` | مفقود أو غير صالح `Authorization: Bearer …`。         |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-أو باستخدام `trace_ids`، أو بدون إرسال أي منهما لجلب سجل المهام الخاص بك بشكل مجزأ.
-
-يرجع:
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## تعريف الحقول
-
-| الحقل | الوصف |
-|------|------|
-| `id` / `task_id` | معرف المهمة الفريد |
-| `trace_id` | معرف سلسلة الاستدعاء (متوافق مع PlatformGateway / CLS) |
-| `type` | `render` أو `extract` |
-| `request` | جسم الطلب الأصلي |
-| `response` | نتائج العرض / الاستخراج (مطابقة لحقل `data` في الاستجابة المتزامنة) |
-| `started_at` / `finished_at` / `elapsed` | الطوابع الزمنية والمدة (بالثواني) |
-
-> هذه الواجهة مجانية ولا تُحتسب ضمن الاستخدام.
+## نصائح ومشاكل
+- **يمكنك تخصيص `trace_id` إذا كنت ترغب في ذلك.** في طلب render/extract الأصلي، قم بتحميل 
+  `?trace_id=…` (QueryString)، واجعله متوافقًا مع معرف عملك (مثل معرف تشغيل سير العمل)، 
+  وبعد ذلك يمكنك استخدام معرف العمل للبحث عن المهام. إذا لم يتم تمريره، سيتم إنشاء UUID تلقائيًا بواسطة الخادم.
+- **مدة الاحتفاظ 7 أيام.** المهام الأقدم ستعيد `task: null` — إذا كنت بحاجة إلى أرشفة طويلة الأمد، يرجى تخزينها بنفسك.
+- **استعلام المهام مجاني.** يمكنك الاستعلام عن عدد المرات التي تريدها، فقد تم دفع الرسوم بالفعل عند استدعاء render/extract الأصلي.
+- **يفضل استخدام الأسلوب غير المتزامن + رد الاتصال، بدلاً من الاستطلاع.** إذا كان العمل يسمح بذلك، قم بتمرير 
+  `callback_url` في الطلب الأصلي، ليقوم النظام بدفع envelope إليك، مما يكون أكثر كفاءة من الاستطلاع كل 2 ثانية.
