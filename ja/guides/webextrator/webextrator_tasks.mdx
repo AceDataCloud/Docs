@@ -1,63 +1,213 @@
 ---
-title: "WebExtrator タスク照会 API"
+title: "WebExtrator タスククエリ API 統合ガイド"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` （**無料**）
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-過去の `render` / `extract` タスクを照会（7日間保存）。
+WebExtrator タスククエリ API は、過去の `render` / `extract` タスク結果を照会するために使用されます。一般的な使用法：
 
-## 単一照会
+- 非同期タスク完了後に**再照会**して完全なエンベロープを取得（`callback_url` プッシュまたは手動ポーリングを除く）。
+- **監査**自分が提出した内容を確認する —— タスク記録は元の `request` と最終 `response` を同時に保存します。
+- **バッチ回填** —— 一度に `id` または `trace_id` で複数のレコードを取得。
+
+タスク記録は Redis に **7 日間**保持されます。
+
+タスククエリインターフェースは**無料**（クレジット使用量にはカウントされません）。
+
+## 認証
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+自分の AceDataCloud アカウント下のタスクのみを照会できます。
+
+## リクエストパラメータ
+
+リクエストボディは `action` によって区別される判別式の組み合わせで、2 つのアクションがあります：
+
+### `action: "retrieve"` —— 単一照会
+
+| フィールド     | タイプ     | 必須  | 説明                                                   |
+| ---------- | ------ | :-: | ---------------------------------------------------- |
+| `action`   | const  |  ✅  | 固定 `"retrieve"`。                                     |
+| `id`       | string | 二者択一 | タスク ID（各 render/extract エンベロープの `task_id` フィールドに表示されます）。 |
+| `trace_id` | string | 二者択一 | 呼び出しチェーン ID（エンベロープの `trace_id` フィールド）。                    |
+
+`id` と `trace_id` は二者択一で渡します。
+
+### `action: "retrieve_batch"` —— バッチ照会
+
+| フィールド          | タイプ       | 必須  | 説明                     |
+| ----------- | -------- | :-: | ---------------------- |
+| `action`    | const    |  ✅  | 固定 `"retrieve_batch"`。 |
+| `ids`       | string[] | 二者択一 | タスク ID リスト。              |
+| `trace_ids` | string[] | 二者択一 | 呼び出しチェーン ID リスト。             |
+| `offset`    | number   |  ❌  | ページオフセット（デフォルト 0）。            |
+| `limit`     | number   |  ❌  | 単ページサイズ、1–100（デフォルト 50）。     |
+
+`ids` と `trace_ids` は二者択一で渡します。
+
+## 単一レスポンス
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* 完全な extract エンベロープ */ }
+    }
+  }
 }
 ```
 
-または `trace_id` で：
+見つからない場合は `{ "task": null }` を返します（HTTP 200、404 ではありません）。
+
+`task` オブジェクトのタイミングフィールドの説明は以下の通りです。
+
+- `created_at`、タスク作成時間、Unix タイムスタンプ（秒、浮動小数点）。
+- `started_at`、タスク開始実行時間、Unix タイムスタンプ（秒、浮動小数点）。タスクがまだ開始されていない場合は `null`。
+- `finished_at`、タスク完了時間、Unix タイムスタンプ（秒、浮動小数点）。タスクが未完了の場合は `null`。
+- `elapsed`、タスク実行にかかった時間、単位は秒（浮動小数点、3 桁の小数点以下を保持）。タスクが未完了の場合は `null`。
+
+## バッチレスポンス
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* 単一の .task 構造と同じ */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-単一のタスクオブジェクトを返します（`request` / `response` / `started_at` / `finished_at` などのフィールドを含む）。
+存在しない ID はエラーにならず、単に `tasks` から欠落します。
 
-## 複数照会
+## 例
+
+### task_id による単一照会
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### trace_id による単一照会
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### バッチ照会
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) —— 完了するまでポーリング
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) 非同期抽出を提出
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) タスク API を使用してタスクが完了するまでポーリング
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("経過時間", task["elapsed"], "秒")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) —— コールバックを受け取った後に完全なエンベロープを取得
+
+```js
+// あなたの callback_url 処理関数内で：
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // 先に迅速に ack
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('完全なエンベロープ:', task.response.data);
+});
+```
+
+## エラーレスポンス
+
+| HTTP | `error.code`   | 意味                                        |
+| ---- | -------------- | ----------------------------------------- |
+| 400  | `bad_request`  | 検証失敗（`action` が欠如、`id` と `trace_id` を同時に送信など）。 |
+| 401  | `unauthorized` | 欠如または無効な `Authorization: Bearer …`。         |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-または `trace_ids` を使うか、両方を渡さずに自分のタスク履歴をページングで取得。
-
-返却：
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## フィールド定義
-
-| フィールド | 説明 |
-|------|------|
-| `id` / `task_id` | タスクの一意ID |
-| `trace_id` | 呼び出しチェーンID（PlatformGateway / CLS と整合） |
-| `type` | `render` または `extract` |
-| `request` | 元のリクエストボディ |
-| `response` | レンダリング / 抽出結果（sync response の `data` と同じ） |
-| `started_at` / `finished_at` / `elapsed` | タイムスタンプと経過時間（秒） |
-
-> 本APIは無料で、使用量にカウントされません。
+## ヒントと落とし穴
+- **`trace_id` をカスタマイズ可能であればカスタマイズしてください。** 原始の render/extract リクエストで `?trace_id=…`（クエリストリング）をアップロードし、それを自分のビジネス ID（ワークフローの run id など）に合わせてください。そうすれば、ビジネス ID でタスクを検索できます。送信しなかった場合、サーバーは自動的に UUID を生成します。
+- **保持期間は 7 日です。** それ以前のタスクは `task: null` を返します —— 長期的なアーカイブが必要な場合は、自分でデータベースに保存してください。
+- **タスクのクエリは無料です。** 何回でも調べたいだけ調べてください。原始の render/extract 呼び出し時に費用はすでに支払われています。
+- **非同期 + コールバックを優先し、ポーリングではなく。** ビジネスが許可する場合、元のリクエストに `callback_url` を渡し、プラットフォームがエンベロープをあなたにプッシュするようにしてください。2 秒ごとにポーリングするよりも効率的です。

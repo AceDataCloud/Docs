@@ -1,63 +1,216 @@
 ---
-title: "WebExtrator 작업 조회 API"
+title: "WebExtrator 작업 조회 API 통합 가이드"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` （**무료**）
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-과거 `render` / `extract` 작업 조회 (7일간 보관).
+WebExtrator 작업 조회 API는 과거의 `render` / `extract` 작업 결과를 조회하는 데 사용됩니다. 일반적인 용도:
 
-## 단일 조회
+- 비동기 작업 완료 후 **재조회** 전체 envelope( `callback_url` 푸시 또는 수동 폴링 제외).
+- **감사** 자신이 제출한 내용 확인 — 작업 기록은 원본 `request`와 최종 `response`를 동시에 저장합니다.
+- **배치 회수** — 한 번에 `id` 또는 `trace_id`로 여러 항목을 가져옵니다.
+
+작업 기록은 Redis에 **7일** 동안 보관됩니다.
+
+작업 조회 인터페이스는 **무료**입니다(크레딧 사용량에 포함되지 않음).
+
+## 인증
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+자신의 AceDataCloud 계정 하의 작업만 조회할 수 있습니다.
+
+## 요청 매개변수
+
+요청 본문은 `action`에 따라 구분되는 판별식 조합으로, 두 가지 동작이 있습니다:
+
+### `action: "retrieve"` — 단일 조회
+
+| 필드         | 유형     | 필수  | 설명                                                   |
+| ---------- | ------ | :-: | ---------------------------------------------------- |
+| `action`   | const  |  ✅  | 고정 `"retrieve"`입니다.                                     |
+| `id`       | string | 선택  | 작업 ID(각 render/extract envelope의 `task_id` 필드에 나타남). |
+| `trace_id` | string | 선택  | 호출 체인 ID(envelope의 `trace_id` 필드).                    |
+
+`id`와 `trace_id` 중 하나를 선택하여 전달합니다.
+
+### `action: "retrieve_batch"` — 배치 조회
+
+| 필드          | 유형       | 필수  | 설명                     |
+| ----------- | -------- | :-: | ---------------------- |
+| `action`    | const    |  ✅  | 고정 `"retrieve_batch"`입니다. |
+| `ids`       | string[] | 선택  | 작업 ID 목록.              |
+| `trace_ids` | string[] | 선택  | 호출 체인 ID 목록.             |
+| `offset`    | number   |  ❌  | 페이지 오프셋(기본값 0).            |
+| `limit`     | number   |  ❌  | 단일 페이지 크기, 1–100(기본값 50).     |
+
+`ids`와 `trace_ids` 중 하나를 선택하여 전달합니다.
+
+## 단일 응답
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* 전체 extract envelope */ }
+    }
+  }
 }
 ```
 
-또는 `trace_id`로 조회:
+조회할 수 없을 경우 `{ "task": null }`을 반환합니다(HTTP 200, 404가 아님).
+
+`task` 객체의 타이밍 필드는 다음과 같습니다.
+
+- `created_at`, 작업 생성 시간, Unix 타임스탬프(초, 부동 소수점).
+- `started_at`, 작업 시작 실행 시간, Unix 타임스탬프(초, 부동 소수점). 작업이 시작되지 않았을 경우 `null`입니다.
+- `finished_at`, 작업 완료 시간, Unix 타임스탬프(초, 부동 소수점). 작업이 완료되지 않았을 경우 `null`입니다.
+- `elapsed`, 작업 실행 소요 시간, 단위는 초(부동 소수점, 소수점 3자리). 작업이 완료되지 않았을 경우 `null`입니다.
+
+## 배치 응답
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* 단일 .task 구조와 동일 */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-단일 작업 객체 반환 (`request` / `response` / `started_at` / `finished_at` 등 필드 포함).
+존재하지 않는 ID는 오류를 발생시키지 않으며, 단지 `tasks`에서 누락됩니다.
 
-## 다중 조회
+## 예시
+
+### task_id로 단일 조회
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### trace_id로 단일 조회
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### 배치 조회
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) — 완료될 때까지 폴링
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) 비동기 추출 제출
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) Tasks API를 사용하여 작업이 완료될 때까지 폴링
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("소요 시간", task["elapsed"], "초")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) — 콜백 수신 후 전체 envelope 가져오기
+
+```js
+// 당신의 callback_url 처리 함수에서:
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // 먼저 빠르게 ack
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('전체 envelope:', task.response.data);
+});
+```
+
+## 오류 응답
+
+| HTTP | `error.code`   | 의미                                        |
+| ---- | -------------- | ----------------------------------------- |
+| 400  | `bad_request`  | 검증 실패( `action` 누락, `id`와 `trace_id` 동시 전달 등). |
+| 401  | `unauthorized` | 누락되었거나 유효하지 않은 `Authorization: Bearer …`.         |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-또는 `trace_ids` 사용, 혹은 둘 다 전달하지 않고 페이징하여 자신의 작업 기록을 가져옴.
-
-반환:
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## 필드 정의
-
-| 필드 | 설명 |
-|------|------|
-| `id` / `task_id` | 작업 고유 ID |
-| `trace_id` | 호출 체인 ID (PlatformGateway / CLS와 일치) |
-| `type` | `render` 또는 `extract` |
-| `request` | 원본 요청 본문 |
-| `response` | 렌더링 / 추출 결과 (sync response의 `data`와 동일) |
-| `started_at` / `finished_at` / `elapsed` | 타임스탬프 및 소요 시간(초) |
-
-> 이 API는 무료이며 사용량에 포함되지 않습니다.
+## 팁 및 주의사항
+- **`trace_id`를 자주 정의할 수 있습니다.** 원래의 render/extract 요청에 업로드할 때
+  `?trace_id=…`(QueryString)을 사용하여 자신의 비즈니스 ID(작업 흐름 run id 등)와 일치시킵니다.
+  이후에는 비즈니스 ID로 작업을 조회할 수 있습니다. 전달하지 않으면 서버가 자동으로 UUID를 생성합니다.
+- **보존 기간 7일.** 더 이전의 작업은 `task: null`을 반환합니다 —— 장기 보관이 필요하면 직접 데이터베이스에 저장하세요.
+- **작업 조회는 무료입니다.** 원하는 만큼 조회할 수 있으며, 원래의 render/extract 호출 시 비용은 이미 지불되었습니다.
+- **비동기 + 콜백을 우선 사용하고, 폴링은 피하세요.** 비즈니스가 허용된다면, 원 요청에
+  `callback_url`을 전달하여 플랫폼이 envelope을 당신에게 푸시하도록 하세요. 2초마다 폴링하는 것보다 더 효율적입니다.

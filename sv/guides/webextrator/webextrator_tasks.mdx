@@ -1,63 +1,216 @@
 ---
-title: "WebExtrator Uppgiftsfråge-API"
+title: "WebExtrator uppgiftsfråge-API integrationsguide"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` (**Gratis**)
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-Fråga historiska `render` / `extract` uppgifter (sparas i 7 dagar).
+WebExtrator uppgiftsfråge-API används för att fråga historiska `render` / `extract` uppgiftsresultat. Vanliga användningsområden:
 
-## Enstaka förfrågan
+- **Återfråga** det kompletta kuvertet efter att den asynkrona uppgiften har slutförts (förutom `callback_url` push eller aktiv polling).
+- **Granska** vad man själv har skickat in - uppgiftsregister lagrar både den ursprungliga `request` och det slutliga `response`.
+- **Batchåterfyllning** - hämta flera poster åt gången baserat på `id` eller `trace_id`.
+
+Uppgiftsregister behålls i Redis i **7 dagar**.
+
+Uppgiftsfrågegränssnittet är **gratis** (räknas inte in i Credits-användning).
+
+## Auktorisering
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+Man kan endast se uppgifter under sitt eget AceDataCloud-konto.
+
+## Begärningsparametrar
+
+Begärningskroppen är en diskriminant som delas in efter `action`, med två typer av åtgärder:
+
+### `action: "retrieve"` —— Enstaka fråga
+
+| Fält        | Typ     | Obligatoriskt | Beskrivning                                                   |
+| ----------- | ------- | :-----------: | ----------------------------------------------------------- |
+| `action`    | const   |      ✅      | Fast `"retrieve"` .                                          |
+| `id`        | string  | valfritt     | Uppgiftens ID (finns i varje render/extract kuvertets `task_id` fält). |
+| `trace_id`  | string  | valfritt     | Anropskedje-ID (kuvertets `trace_id` fält).                |
+
+`id` och `trace_id` ska skickas in som valfritt.
+
+### `action: "retrieve_batch"` —— Batchfråga
+
+| Fält          | Typ       | Obligatoriskt | Beskrivning                     |
+| ------------- | --------- | :-----------: | ------------------------------- |
+| `action`      | const     |      ✅      | Fast `"retrieve_batch"` .       |
+| `ids`         | string[]  | valfritt     | Lista över uppgifts-ID.         |
+| `trace_ids`   | string[]  | valfritt     | Lista över anropskedje-ID.      |
+| `offset`      | number    |      ❌      | Sidoffset (standard 0).         |
+| `limit`       | number    |      ❌      | Sidstorlek, 1–100 (standard 50).|
+
+`ids` och `trace_ids` ska skickas in som valfritt.
+
+## Enstaka svar
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* Komplett extract kuvert */ }
+    }
+  }
 }
 ```
 
-Eller via `trace_id`:
+Om ingen uppgift hittas returneras `{ "task": null }` (HTTP 200, inte 404).
+
+Tidsfälten i `task`-objektet förklaras nedan.
+
+- `created_at`, tidpunkt för uppgiftens skapande, Unix-tidsstämpel (sekunder, flyttal).
+- `started_at`, tidpunkt för när uppgiften började köras, Unix-tidsstämpel (sekunder, flyttal). Om uppgiften inte har påbörjats är det `null`.
+- `finished_at`, tidpunkt för när uppgiften slutfördes, Unix-tidsstämpel (sekunder, flyttal). Om uppgiften inte är slutförd är det `null`.
+- `elapsed`, tid som uppgiften tog att utföra, i sekunder (flyttal, med 3 decimaler). Om uppgiften inte är slutförd är det `null`.
+
+## Batchsvar
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* Samma struktur som enstaka .task */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-Returnerar ett enskilt uppgiftsobjekt (inklusive fält som `request` / `response` / `started_at` / `finished_at`).
+Icke-existerande ID:n kommer inte att ge fel, de kommer bara att saknas i `tasks`.
 
-## Batchförfrågan
+## Exempel
+
+### Fråga enstaka post efter task_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### Fråga enstaka post efter trace_id
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### Batchfråga
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) —— Polling tills slutförd
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) Skicka in asynkron extraktion
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) Använd Tasks API för att pollinga tills uppgiften är slutförd
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("Tid", task["elapsed"], "sekunder")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) —— Hämta komplett kuvert efter att ha fått callback
+
+```js
+// I din callback_url hanteringsfunktion:
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // Snabbt ack
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('Komplett kuvert:', task.response.data);
+});
+```
+
+## Fel svar
+
+| HTTP | `error.code`   | Betydelse                                        |
+| ---- | -------------- | ----------------------------------------------- |
+| 400  | `bad_request`  | Validering misslyckades (saknar `action`, skickar både `id` och `trace_id` etc.). |
+| 401  | `unauthorized` | Saknad eller ogiltig `Authorization: Bearer …` . |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-Eller med `trace_ids`, eller utan båda för att hämta din egen uppgiftshistorik med paginering.
-
-Returnerar:
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## Fältdefinitioner
-
-| Fält | Beskrivning |
-|------|-------------|
-| `id` / `task_id` | Unikt ID för uppgiften |
-| `trace_id` | Spårnings-ID (i linje med PlatformGateway / CLS) |
-| `type` | `render` eller `extract` |
-| `request` | Ursprunglig förfrågningskropp |
-| `response` | Renderings- / extraktionsresultat (samma som `data` i sync response) |
-| `started_at` / `finished_at` / `elapsed` | Tidsstämplar och förfluten tid (sekunder) |
-
-> Detta API är gratis och räknas inte mot användningskvoten.
+## Tips och fallgropar
+- **Kan anpassa `trace_id`, gör det.** Vid den ursprungliga render/extract begäran ladda upp
+  `?trace_id=…` (QueryString), synkronisera det med ditt eget affärs-ID (arbetsflöde run id osv.),
+  därefter kan du använda affärs-ID för att söka efter uppgifter. Om det inte skickas genererar servern automatiskt en UUID.
+- **Bevarandeperiod 7 dagar.** Tidigare uppgifter returnerar `task: null` — för långsiktig arkivering, vänligen spara i egen databas.
+- **Uppgiftsfrågor är gratis.** Vill du fråga hur många gånger som helst, den ursprungliga render/extract anropet har redan betalats för.
+- **Prioritera asynkront + callback, istället för polling.** Om affären tillåter, skicka
+  `callback_url` i den ursprungliga begäran, så att plattformen kan skicka envelope till dig, vilket är mer effektivt än att pollera var 2:a sekund.

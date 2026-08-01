@@ -1,63 +1,217 @@
 ---
-title: "WebExtrator 任務查詢 API"
+title: "WebExtrator 任務查詢 API 整合指南"
 description: "WebExtrator Web Render & Extract 整合指南 - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` （**免費**）
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-查詢歷史 `render` / `extract` 任務（保留 7 天）。
+WebExtrator 任務查詢 API 用於查詢歷史的 `render` / `extract` 任務結果。常見
+用法：
 
-## 單條查詢
+- 異步任務完成後**回查**完整 envelope（除了 `callback_url` 推送或主動輪詢）。
+- **審計**自己提交過什麼 —— 任務記錄同時存了原始 `request` 與最終 `response`。
+- **批量回填** —— 一次按 `id` 或 `trace_id` 拉多條。
+
+任務記錄在 Redis 中保留 **7 天**。
+
+任務查詢接口**免費**（不計入 Credits 用量）。
+
+## 鑑權
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+只能查到自己 AceDataCloud 帳戶下的任務。
+
+## 請求參數
+
+請求體是按 `action` 區分的判別式聯合，共兩種動作：
+
+### `action: "retrieve"` —— 單條查詢
+
+| 字段         | 類型     | 必填  | 說明                                                   |
+| ---------- | ------ | :-: | ---------------------------------------------------- |
+| `action`   | const  |  ✅  | 固定 `"retrieve"`。                                     |
+| `id`       | string | 二選一 | 任務 ID（出現在每次 render/extract envelope 的 `task_id` 字段）。 |
+| `trace_id` | string | 二選一 | 調用鏈 ID（envelope 的 `trace_id` 字段）。                    |
+
+`id` 與 `trace_id` 二選一傳入。
+
+### `action: "retrieve_batch"` —— 批量查詢
+
+| 字段          | 類型       | 必填  | 說明                     |
+| ----------- | -------- | :-: | ---------------------- |
+| `action`    | const    |  ✅  | 固定 `"retrieve_batch"`。 |
+| `ids`       | string[] | 二選一 | 任務 ID 列表。              |
+| `trace_ids` | string[] | 二選一 | 調用鏈 ID 列表。             |
+| `offset`    | number   |  ❌  | 分頁偏移（默認 0）。            |
+| `limit`     | number   |  ❌  | 單頁大小，1–100（默認 50）。     |
+
+`ids` 與 `trace_ids` 二選一傳入。
+
+## 單條響應
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* 完整 extract envelope */ }
+    }
+  }
 }
 ```
 
-或者透過 `trace_id`：
+查不到時返回 `{ "task": null }`（HTTP 200，不是 404）。
+
+`task` 對象的計時字段說明如下。
+
+- `created_at`，任務創建時間，Unix 時間戳（秒，浮點）。
+- `started_at`，任務開始執行時間，Unix 時間戳（秒，浮點）。任務尚未開始時為 `null`。
+- `finished_at`，任務完成時間，Unix 時間戳（秒，浮點）。任務未完成時為 `null`。
+- `elapsed`，任務執行耗時，單位為秒（浮點，保留 3 位小數）。任務未完成時為 `null`。
+
+## 批量響應
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* 同單條 .task 結構 */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-返回單個任務物件（包含 `request` / `response` / `started_at` / `finished_at` 等欄位）。
+不存在的 ID 不會報錯，只是從 `tasks` 中缺失。
 
-## 批量查詢
+## 示例
+
+### 按 task_id 查詢單條
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### 按 trace_id 查詢單條
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### 批量查詢
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) —— 轮询直到完成
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) 提交異步抽取
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) 用 Tasks API 轮询直到任務完成
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("耗時", task["elapsed"], "秒")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) —— 收到回調後再拉完整 envelope
+
+```js
+// 在你的 callback_url 處理函數裡：
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // 先快速 ack
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('完整 envelope:', task.response.data);
+});
+```
+
+## 錯誤響應
+
+| HTTP | `error.code`   | 含義                                        |
+| ---- | -------------- | ----------------------------------------- |
+| 400  | `bad_request`  | 驗證失敗（缺 `action`、同時傳 `id` 與 `trace_id` 等）。 |
+| 401  | `unauthorized` | 缺失或無效的 `Authorization: Bearer …`。         |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-或者用 `trace_ids`，或兩者都不傳以分頁拉取自己的任務歷史。
-
-返回：
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## 欄位定義
-
-| 欄位 | 說明 |
-|------|------|
-| `id` / `task_id` | 任務唯一 ID |
-| `trace_id` | 調用鏈 ID（與 PlatformGateway / CLS 對齊） |
-| `type` | `render` 或 `extract` |
-| `request` | 原始請求體 |
-| `response` | 渲染 / 抽取結果（同 sync response 的 `data`） |
-| `started_at` / `finished_at` / `elapsed` | 時間戳與耗時（秒） |
-
-> 該介面免費、不計入用量。
+## 提示與坑
+- **能自定义 `trace_id` 就自定义。** 在原始 render/extract 请求上传
+  `?trace_id=…`（QueryString），把它跟你自己的业务 ID（工作流 run id 等）对齐，
+  之后就能用业务 ID 查任务。没传时服务器自动生成 UUID。
+- **保留期 7 天。** 更早的任务返回 `task: null` —— 需要长期归档请自行落库。
+- **任务查询免费。** 想查多少次就查多少次，原始 render/extract 调用时费用已经付过。
+- **优先用异步 + 回调，而不是轮询。** 业务允许的话，在原请求里传
+  `callback_url`，让平台把 envelope 推送给你，比每 2 秒轮一次更高效。
