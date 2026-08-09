@@ -1,4 +1,3 @@
-import hashlib
 import importlib.util
 import tempfile
 import unittest
@@ -90,39 +89,212 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertEqual(sync.guide_description("en", "Gemini"), "Gemini integration guide - Ace Data Cloud")
         self.assertEqual(sync.guide_description("ja", "Gemini"), "Gemini API guide - Ace Data Cloud")
 
-    def test_sanitize_generated_content_rehosts_managed_media_by_type(self) -> None:
-        identifier = "private-route"
-        original = sync.BLOCKED_IDENTIFIER_FINGERPRINTS
-        sync.BLOCKED_IDENTIFIER_FINGERPRINTS = {hashlib.sha256(identifier.encode()).hexdigest()}
-        self.addCleanup(setattr, sync, "BLOCKED_IDENTIFIER_FINGERPRINTS", original)
+    def test_response_blocks_include_commonmark_containers(self) -> None:
         content = (
-            '{"image_url": "https://private-route.invalid/image.jpg", '
-            '"video_url": "https://private-route.invalid/video.mp4", '
-            '"file_url": "https://private-route.invalid/audio.wav"}'
+            "Response:\n> ```json\n> {\"error\":\"restricted source\"}\n> ```\n"
+            "Result:\n- ~~~yaml\n  error: restricted source\n  ~~~\n"
         )
+        blocks = sync.response_blocks(content)
+        self.assertEqual(len(blocks), 2)
+        self.assertTrue(all("restricted source" in block for block in blocks))
 
-        sanitized = sync.sanitize_generated_content(content)
+    def test_structured_response_artifacts_are_sanitized_deterministically(self) -> None:
+        content = (
+            "Response:\n```json\n"
+            '{"image_url":"https://media.invalid/a.png","video_urls":["https://media.invalid/a.mp4","https://media.invalid/b.mp4"]}'
+            "\n```\n"
+        )
+        result = sync.neutralize_response_terms(content, ())
+        self.assertIn("image-placeholder.png?example=image-001", result)
+        self.assertIn("video-placeholder.mp4?example=video-001", result)
+        self.assertIn("video-placeholder.mp4?example=video-002", result)
+        self.assertEqual(sync.neutralize_response_terms(content, (), sanitize_artifacts=False), content)
 
-        self.assertIn(sync.PLATFORM_MEDIA_EXAMPLES["image"], sanitized)
-        self.assertIn(sync.PLATFORM_MEDIA_EXAMPLES["video"], sanitized)
-        self.assertIn(sync.PLATFORM_MEDIA_EXAMPLES["wav"], sanitized)
-        self.assertNotIn(identifier, sanitized)
+    def test_neutralize_terms_only_in_response_fence(self) -> None:
+        content = (
+            "Background restricted source.\n"
+            "Request:\n```json\n{\"note\":\"restricted source\"}\n```\n"
+            "Response:\n```json\n{\"error\":\"restricted source\"}\n```\n"
+        )
+        result = sync.neutralize_response_terms(content, ("restricted source",))
+        self.assertEqual(result.count("restricted source"), 2)
+        self.assertIn("model service", result)
 
-    def test_sanitize_generated_content_keeps_external_reference_link(self) -> None:
-        content = "[Reference](https://docs.example.org/standard)"
+    def test_validate_generated_tree_detects_nested_and_overencoded_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            nested = root / "en" / "guides"
+            nested.mkdir(parents=True)
+            (nested / "guide.mdx").write_text("private%252Droute", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                sync.validate_generated_tree(root, (("private-route",), (), ()))
 
-        self.assertEqual(sync.sanitize_generated_content(content), content)
+            (nested / "guide.mdx").write_text("private%2525252Droute", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                sync.validate_generated_tree(root, (("private-route",), (), ()))
 
-    def test_sanitize_generated_content_error_does_not_echo_identifier(self) -> None:
-        identifier = "private-route"
-        original = sync.BLOCKED_IDENTIFIER_FINGERPRINTS
-        sync.BLOCKED_IDENTIFIER_FINGERPRINTS = {hashlib.sha256(identifier.encode()).hexdigest()}
-        self.addCleanup(setattr, sync, "BLOCKED_IDENTIFIER_FINGERPRINTS", original)
+    def test_managed_paths_only_owns_generated_mcp_locale(self) -> None:
+        paths = sync.managed_paths(["zh-Hans", "en"])
+        self.assertIn(Path("zh-Hans/mcp"), paths)
+        self.assertNotIn(Path("en/mcp"), paths)
 
-        with self.assertRaises(RuntimeError) as context:
-            sync.sanitize_generated_content(f'{{"route": "{identifier}"}}')
+    def test_clear_managed_paths_removes_stale_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            stale = root / "en" / "guides" / "stale.mdx"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale", encoding="utf-8")
 
-        self.assertNotIn(identifier, str(context.exception))
+            sync.clear_managed_paths(root, [Path("en/guides")])
+
+            self.assertFalse(stale.exists())
+
+    def test_publish_cleans_manifest_and_backup_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output = root / "output"
+            staging = root / "staging"
+            for base, value in ((output, "old"), (staging, "new")):
+                path = base / "openapi"
+                path.mkdir(parents=True)
+                (path / "value.txt").write_text(value, encoding="utf-8")
+
+            sync.publish_generated_tree(staging, output, [Path("openapi")])
+
+            manifest, backup = sync.transaction_paths(output)
+            self.assertEqual((output / "openapi/value.txt").read_text(), "new")
+            self.assertFalse(manifest.exists())
+            self.assertFalse(backup.exists())
+
+    def test_baseexception_mid_publish_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output = root / "output"
+            staging = root / "staging"
+            managed = [Path("openapi"), Path("en/guides")]
+            for base, value in ((output, "old"), (staging, "new")):
+                for relative in managed:
+                    path = base / relative
+                    path.mkdir(parents=True)
+                    (path / "value.txt").write_text(value, encoding="utf-8")
+            original_replace = sync.os.replace
+            staged_swaps = 0
+
+            def interrupting_replace(source, target):
+                nonlocal staged_swaps
+                if Path(source).is_relative_to(staging):
+                    staged_swaps += 1
+                    if staged_swaps == 2:
+                        raise KeyboardInterrupt()
+                return original_replace(source, target)
+
+            sync.os.replace = interrupting_replace
+            self.addCleanup(setattr, sync.os, "replace", original_replace)
+            with self.assertRaises(KeyboardInterrupt):
+                sync.publish_generated_tree(staging, output, managed)
+
+            for relative in managed:
+                self.assertEqual((output / relative / "value.txt").read_text(), "old")
+
+    def test_next_run_recovers_unfinished_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output = root / "output"
+            target = output / "openapi"
+            target.mkdir(parents=True)
+            (target / "value.txt").write_text("new", encoding="utf-8")
+            manifest_path, backup_root = sync.transaction_paths(output)
+            backup = backup_root / "openapi"
+            backup.mkdir(parents=True)
+            (backup / "value.txt").write_text("old", encoding="utf-8")
+            sync.atomic_write_json(
+                manifest_path,
+                {"phase": "publishing", "items": [{"relative": "openapi", "had_target": True, "state": "published"}]},
+            )
+
+            sync.restore_transaction(output)
+
+            self.assertEqual((target / "value.txt").read_text(), "old")
+            self.assertFalse(manifest_path.exists())
+            self.assertFalse(backup_root.exists())
+
+    def test_orphan_empty_backup_is_cleaned_on_next_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "output"
+            output.mkdir()
+            _manifest, backup = sync.transaction_paths(output)
+            backup.mkdir()
+            sync.restore_transaction(output)
+            self.assertFalse(backup.exists())
+
+    def test_orphan_nonempty_backup_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "output"
+            output.mkdir()
+            _manifest, backup = sync.transaction_paths(output)
+            backup.mkdir()
+            (backup / "evidence").write_text("old", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                sync.restore_transaction(output)
+            self.assertTrue(backup.exists())
+
+    def test_invalid_manifest_path_and_state_fail_closed(self) -> None:
+        for item in (
+            {"relative": "../outside", "had_target": True, "state": "published"},
+            {"relative": "openapi", "had_target": True, "state": "unknown"},
+        ):
+            with self.assertRaises(RuntimeError):
+                sync.validate_manifest({"phase": "publishing", "items": [item]})
+
+    def test_restoring_state_completes_after_backup_rename_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "output"
+            target = output / "openapi"
+            target.mkdir(parents=True)
+            (target / "value.txt").write_text("old", encoding="utf-8")
+            manifest, backup = sync.transaction_paths(output)
+            backup.mkdir()
+            sync.atomic_write_json(
+                manifest,
+                {"phase": "publishing", "items": [{"relative": "openapi", "had_target": True, "state": "restoring"}]},
+            )
+            sync.restore_transaction(output)
+            self.assertEqual((target / "value.txt").read_text(), "old")
+            self.assertFalse(manifest.exists())
+
+    def test_published_state_without_backup_never_accepts_current_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "output"
+            target = output / "openapi"
+            target.mkdir(parents=True)
+            (target / "value.txt").write_text("new", encoding="utf-8")
+            manifest, backup = sync.transaction_paths(output)
+            backup.mkdir()
+            sync.atomic_write_json(
+                manifest,
+                {"phase": "publishing", "items": [{"relative": "openapi", "had_target": True, "state": "published"}]},
+            )
+            with self.assertRaises(RuntimeError):
+                sync.restore_transaction(output)
+            self.assertTrue(manifest.exists())
+            self.assertEqual((target / "value.txt").read_text(), "new")
+
+    def test_incomplete_recovery_keeps_manifest_and_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "output"
+            output.mkdir()
+            manifest_path, backup_root = sync.transaction_paths(output)
+            backup_root.mkdir()
+            sync.atomic_write_json(
+                manifest_path,
+                {"phase": "publishing", "items": [{"relative": "openapi", "had_target": True, "state": "published"}]},
+            )
+
+            with self.assertRaises(RuntimeError):
+                sync.restore_transaction(output)
+
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(backup_root.exists())
 
 
 if __name__ == "__main__":
