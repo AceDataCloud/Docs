@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import tempfile
 import unittest
@@ -88,6 +89,40 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertEqual(sync.guide_description("zh-Hans", "Gemini"), "Gemini 集成指南 - Ace Data Cloud")
         self.assertEqual(sync.guide_description("en", "Gemini"), "Gemini integration guide - Ace Data Cloud")
         self.assertEqual(sync.guide_description("ja", "Gemini"), "Gemini API guide - Ace Data Cloud")
+
+    def test_sanitize_generated_content_rehosts_managed_media_by_type(self) -> None:
+        identifier = "private-route"
+        original = sync.BLOCKED_IDENTIFIER_FINGERPRINTS
+        sync.BLOCKED_IDENTIFIER_FINGERPRINTS = {hashlib.sha256(identifier.encode()).hexdigest()}
+        self.addCleanup(setattr, sync, "BLOCKED_IDENTIFIER_FINGERPRINTS", original)
+        content = (
+            '{"image_url": "https://private-route.invalid/image.jpg", '
+            '"video_url": "https://private-route.invalid/video.mp4", '
+            '"file_url": "https://private-route.invalid/audio.wav"}'
+        )
+
+        sanitized = sync.sanitize_generated_content(content)
+
+        self.assertIn(sync.PLATFORM_MEDIA_EXAMPLES["image"], sanitized)
+        self.assertIn(sync.PLATFORM_MEDIA_EXAMPLES["video"], sanitized)
+        self.assertIn(sync.PLATFORM_MEDIA_EXAMPLES["wav"], sanitized)
+        self.assertNotIn(identifier, sanitized)
+
+    def test_sanitize_generated_content_keeps_external_reference_link(self) -> None:
+        content = "[Reference](https://docs.example.org/standard)"
+
+        self.assertEqual(sync.sanitize_generated_content(content), content)
+
+    def test_sanitize_generated_content_error_does_not_echo_identifier(self) -> None:
+        identifier = "private-route"
+        original = sync.BLOCKED_IDENTIFIER_FINGERPRINTS
+        sync.BLOCKED_IDENTIFIER_FINGERPRINTS = {hashlib.sha256(identifier.encode()).hexdigest()}
+        self.addCleanup(setattr, sync, "BLOCKED_IDENTIFIER_FINGERPRINTS", original)
+
+        with self.assertRaises(RuntimeError) as context:
+            sync.sanitize_generated_content(f'{{"route": "{identifier}"}}')
+
+        self.assertNotIn(identifier, str(context.exception))
 
 
 if __name__ == "__main__":

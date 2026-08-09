@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import re
 import time
@@ -23,6 +24,32 @@ START = time.time()
 
 BASE_URL = "https://api.acedata.cloud"
 DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/?limit=1000"
+PLATFORM_MEDIA_EXAMPLES = {
+    "audio": "https://platform2.cdn.acedata.cloud/fish/5ade0339-5f11-487e-aacc-06a908271706.mp3",
+    "image": "https://cdn.acedata.cloud/e724d7f13d.png",
+    "video": "https://platform2.cdn.acedata.cloud/gemini/04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4",
+    "wav": "https://platform2.cdn.acedata.cloud/fish/64adc04b-c196-4a0f-9070-222ba101ce6c.wav",
+}
+BLOCKED_IDENTIFIER_FINGERPRINTS = {
+    "0e6370ee89882426e954c31c5d6b215bdde33bcdff0049a814c8f5737e37b3e3",
+    "16d74232d666243e3dd9711daaef2b7538f849efaa62cf19f91a97e82c420e34",
+    "1ee11af4ed5d63caf142a30a96ba124b1dde039d93b15b69858251295d4a92a6",
+    "61a075257ab537927cb1345edbab11e57d6a9590842a229c02923fb487bccef1",
+    "64a857b93bd1b997f0fa012dd724c6081a3782f7069155c3c017ff2f5ac9ac00",
+    "71ff0311daa553e5f49375128532da9db85d954b2c07167dbb57c6d6ca2dbd92",
+    "72d6d8ec6b9ff9adf63c83849d59ddd43a33efecd111c3fa5a68ce6af4eb01db",
+    "a41b8ac8aefc814effabd46207d5848115af4ac8139a7565088b86e545d7bce0",
+    "aecb13249d3e7abf44a6018794cf3306c0567faf345887438668476fdbe27720",
+    "b3d77391e34fa669e6231746e2c14be2a1e8c0ac236177b2b2e5e0d612ed3f18",
+    "ea4b01b4304d9c7254a37e8ef25f825f6fb53487e7d69753fa62036948b7c230",
+    "f0fcb361391aff82e53c8a433fd94c02fad253b0410533f002b498eb13479fb2",
+}
+MEDIA_URL_RE = re.compile(
+    r'(?P<prefix>["\'](?:audio_url|download_url|file_url|image_url|video_url)["\']\s*:\s*["\'])'
+    r'(?P<url>https?://[^"\']+)',
+    re.IGNORECASE,
+)
+TOKEN_RE = re.compile(r"[\w.-]+", re.UNICODE)
 GUIDE_DESCRIPTIONS = {
     "zh-Hans": "{service} 集成指南 - Ace Data Cloud",
     "zh-Hant": "{service} 整合指南 - Ace Data Cloud",
@@ -125,14 +152,49 @@ def load_json(path: Path) -> Any:
         return json.load(file)
 
 
+def fingerprint(value: str) -> str:
+    return hashlib.sha256(value.casefold().encode()).hexdigest()
+
+
+def contains_blocked_identifier(value: str) -> bool:
+    for token in TOKEN_RE.findall(value):
+        for candidate in {token, *re.split(r"[._]", token)}:
+            if candidate and fingerprint(candidate) in BLOCKED_IDENTIFIER_FINGERPRINTS:
+                return True
+    return False
+
+
+def sanitize_generated_content(content: str) -> str:
+    def replace_media_url(match: re.Match[str]) -> str:
+        if not contains_blocked_identifier(match.group("url")):
+            return match.group(0)
+        field = match.group("prefix").split(":", 1)[0].casefold()
+        suffix = Path(match.group("url").split("?", 1)[0]).suffix.casefold()
+        if "image" in field:
+            media_type = "image"
+        elif "video" in field:
+            media_type = "video"
+        elif suffix == ".wav":
+            media_type = "wav"
+        else:
+            media_type = "audio"
+        return match.group("prefix") + PLATFORM_MEDIA_EXAMPLES[media_type]
+
+    sanitized = MEDIA_URL_RE.sub(replace_media_url, content)
+    if contains_blocked_identifier(sanitized):
+        raise RuntimeError("Generated customer-facing content contains a managed identifier")
+    return sanitized
+
+
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_text(sanitize_generated_content(content), encoding="utf-8")
 
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    path.write_text(sanitize_generated_content(content), encoding="utf-8")
 
 
 def normalize(value: str) -> str:
@@ -540,7 +602,7 @@ def sanitize_html_for_mdx(content: str) -> str:
             continue
         part = re.sub(r"(<[a-zA-Z][^>]*)\bclass=", r"\1className=", part)
         for tag in ("img", "br", "hr", "input", "source", "meta", "link"):
-            part = re.sub(rf"(<{tag}\b[^>]*?)(?<!/)>", rf"\1 />", part)
+            part = re.sub(rf"(<{tag}\b[^>]*?)(?<!/)>", r"\1 />", part)
         part = re.sub(r"<(https?://[^>]+)>", r"[\1](\1)", part)
         part = re.sub(r"<(?![a-zA-Z/!])", r"&lt;", part)
         parts[index] = part
