@@ -35,9 +35,9 @@ export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
 
 - **模型（model）**：`MiniMax-H3`
 - **输入结构**：通过 `content` 统一传入文本、图片、视频和音频
-- **输出模式**：固定为异步任务；创建成功后立即返回 `task_id`
-- **结果查询**：通过 [MiniMax H3 任务查询 API](/documents/minimax-tasks-integration) 获取状态和成片
-- **异步回调**：可选，通过 `callback_url` 接收任务状态变化通知
+- **输出模式**：默认同步等待生成完成并返回完整 `task`；传 `async: true` 或 `callback_url` 时改为异步
+- **结果查询**：异步模式或历史任务可通过 [MiniMax H3 任务查询 API](/documents/minimax-tasks-integration) 获取状态和成片
+- **异步回调**：可选，通过 `callback_url` 接收最终任务结果
 
 你不需要传 `action` 来选择生成模式，接口会根据 `content` 中的素材类型和 `role` 自动判断用途。
 
@@ -52,8 +52,12 @@ export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
 
 ## 调用流程
 
-1. 调用 `/minimax/videos` 创建任务，保存响应中的 `task_id`。
-2. 每隔约 10 秒调用 `/minimax/tasks` 查询一次，避免过于频繁地轮询。
+默认同步模式下，调用 `/minimax/videos` 后保持连接；生成完成时直接从响应的 `task.content.url` 获取视频。
+
+需要立即释放连接时，传 `async: true` 或 `callback_url`：
+
+1. 保存立即响应中的 `task_id` 和 `trace_id`。
+2. 未配置回调时，每隔约 10 秒调用 `/minimax/tasks` 查询一次。
 3. 当 `task.status` 变为 `succeeded` 时，从 `task.content.url` 获取视频。
 4. 当状态为 `failed` 或 `cancelled` 时停止轮询，并读取 `task.error`。
 
@@ -66,7 +70,8 @@ export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
 | `resolution` | string | 是 | - | `768P` 或 `2K` |
 | `duration` | integer | 是 | - | 生成时长，4-15 秒整数 |
 | `ratio` | string | 条件必填 | `adaptive` | `adaptive`、`21:9`、`16:9`、`4:3`、`1:1`、`3:4`、`9:16` |
-| `callback_url` | string | 否 | - | 接收任务状态变化的公网可访问回调 URL |
+| `async` | boolean | 否 | `false` | `false` 时同步返回完整结果；`true` 时立即返回任务标识，随后通过任务查询接口获取结果 |
+| `callback_url` | string | 否 | - | 接收最终任务结果的公网回调 URL；提供后自动启用异步模式 |
 
 `ratio` 的规则取决于工作流：
 
@@ -74,7 +79,7 @@ export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
 - **首帧、尾帧或首尾帧视频**：画幅由输入图片决定，建议省略或传 `adaptive`。
 - **多模态参考生视频**：可省略，默认 `adaptive`；也可以明确指定一个固定比例。
 
-接口不接受旧版或兼容字段，例如 `prompt`、`image_urls`、`audio_urls`、`messages`、`first_frame_image` 和 `async`。收到这类参数错误时，请删除旧字段并迁移到 `content`；例如把 `"prompt": "一只猫挥手"` 改为 `"content": [{"type": "text", "text": "一只猫挥手"}]`。不要同时发送新旧两种格式。
+接口不接受旧版或兼容字段，例如 `prompt`、`image_urls`、`audio_urls`、`messages` 和 `first_frame_image`。收到这类参数错误时，请删除旧字段并迁移到 `content`；例如把 `"prompt": "一只猫挥手"` 改为 `"content": [{"type": "text", "text": "一只猫挥手"}]`。不要同时发送新旧两种格式。
 
 ## content 内容项参数
 
@@ -228,11 +233,38 @@ curl -X POST 'https://api.acedata.cloud/minimax/videos' \
   }'
 ```
 
-创建响应：
+默认同步响应：
 
 ```json
 {
-  "task_id": "f5977217-ed2c-40da-adbe-93d08235618f"
+  "task": {
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f",
+    "model": "MiniMax-H3",
+    "status": "succeeded",
+    "content": {
+      "url": "https://cdn.acedata.cloud/minimax/f5977217-ed2c-40da-adbe-93d08235618f.mp4"
+    },
+    "resolution": "2K",
+    "duration": 15,
+    "usage": {
+      "total_seconds": 15,
+      "input_seconds": 0,
+      "output_seconds": 15,
+      "input_image_count": 0
+    },
+    "ratio": "16:9",
+    "task_type": "generation",
+    "modality": "video"
+  }
+}
+```
+
+如果请求中传入 `"async": true`，接口立即返回：
+
+```json
+{
+  "task_id": "f5977217-ed2c-40da-adbe-93d08235618f",
+  "trace_id": "trace_7f8c2b1a"
 }
 ```
 
@@ -329,12 +361,9 @@ curl -X POST 'https://api.acedata.cloud/minimax/videos' \
 
 ## 回调通知
 
-传入 `callback_url` 后，回调服务需要处理两个阶段：
+传入 `callback_url` 会自动启用异步模式：创建接口立即返回 `task_id` 和 `trace_id`，任务完成后向该地址 POST 最终结果，结构与任务查询响应一致。
 
-1. **地址验证**：平台先发送带 `challenge` 的 POST 请求。你的服务必须在 3 秒内原样返回该 `challenge`。
-2. **状态通知**：验证通过后，任务状态变化时会向该地址 POST 数据，结构与任务查询响应一致。
-
-回调中的状态包括 `queued`、`running`、`succeeded`、`failed` 和 `cancelled`。即使使用回调，也建议保存 `task_id`，以便主动查询或补偿漏掉的通知。
+回调中的最终状态为 `succeeded`、`failed` 或 `cancelled`。即使使用回调，也建议保存 `task_id`，以便主动查询或补偿漏掉的通知。
 
 ## 常见错误
 
@@ -347,4 +376,4 @@ curl -X POST 'https://api.acedata.cloud/minimax/videos' \
 | `429` | 请求过于频繁 | 指数退避后重试；任务轮询建议间隔约 10 秒 |
 | `500` | 服务暂时不可用 | 保留请求信息，稍后重试 |
 
-创建接口只代表任务已成功进入队列，不代表视频已经生成。只有任务最终为 `succeeded` 时才会计费；查询任务本身免费，不会重复扣费。
+同步响应中的 `task.status: succeeded` 表示视频已生成；异步确认只代表任务已进入队列。只有任务最终成功时才会计费，查询任务本身免费，不会重复扣费。
