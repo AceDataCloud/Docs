@@ -150,6 +150,22 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             self.assertNotIn("private.invalid", message)
             self.assertNotIn("restricted source", message)
 
+    def test_openapi_artifact_validation_only_checks_responses(self) -> None:
+        request_only = {
+            "paths": {
+                "/items": {
+                    "post": {
+                        "requestBody": {"content": {"application/json": {"example": {"product_url": "https://input.example/item"}}}},
+                        "responses": {"200": {"content": {"application/json": {"example": {"video_url": "https://platform2.cdn.acedata.cloud/video.mp4"}}}}},
+                    }
+                }
+            }
+        }
+        self.assertFalse(sync.invalid_openapi_response_artifact_urls(request_only))
+
+        request_only["paths"]["/items"]["post"]["responses"]["200"]["content"]["application/json"]["example"]["video_url"] = "https://media.invalid/video.mp4"
+        self.assertTrue(sync.invalid_openapi_response_artifact_urls(request_only))
+
     def test_managed_paths_only_owns_generated_mcp_locale(self) -> None:
         paths = sync.managed_paths(["zh-Hans", "en"])
         self.assertIn(Path("zh-Hans/mcp"), paths)

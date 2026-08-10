@@ -268,6 +268,18 @@ def invalid_artifact_urls(value: Any, field: str | None = None) -> bool:
     return "/examples/" in parsed.path.casefold()
 
 
+def invalid_openapi_response_artifact_urls(spec: Any) -> bool:
+    if not isinstance(spec, dict):
+        return True
+    for path_item in spec.get("paths", {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if isinstance(operation, dict) and invalid_artifact_urls(operation.get("responses", {})):
+                return True
+    return False
+
+
 def find_generated_tree_violations(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> list[str]:
     findings: list[str] = []
     for path in sorted(root.rglob("*")):
@@ -295,7 +307,7 @@ def find_generated_tree_violations(root: Path, denylist: tuple[tuple[str, ...], 
         invalid_url = False
         if path.suffix.casefold() == ".json" and relative.startswith("openapi/"):
             try:
-                invalid_url = invalid_artifact_urls(json.loads(raw_content))
+                invalid_url = invalid_openapi_response_artifact_urls(json.loads(raw_content))
             except json.JSONDecodeError:
                 invalid_url = True
         elif not any(name in relative for name in ("serp_google", "tw_comments", "tw_posts", "tw_users")):
