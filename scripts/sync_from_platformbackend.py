@@ -268,47 +268,67 @@ def invalid_artifact_urls(value: Any, field: str | None = None) -> bool:
     return "/examples/" in parsed.path.casefold()
 
 
+def invalid_openapi_response_artifact_urls(spec: Any) -> bool:
+    if not isinstance(spec, dict):
+        return True
+    for path_item in spec.get("paths", {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for operation in path_item.values():
+            if isinstance(operation, dict) and invalid_artifact_urls(operation.get("responses", {})):
+                return True
+    return False
+
+
 def find_generated_tree_violations(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> list[str]:
     findings: list[str] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.casefold() not in {".json", ".md", ".mdx"}:
             continue
+        relative = str(path.relative_to(root))
         try:
-            content = decode_layers(path.read_text(encoding="utf-8")).casefold()
+            raw_content = path.read_text(encoding="utf-8")
+            content = decode_layers(raw_content).casefold()
         except ValueError:
-            findings.append(str(path.relative_to(root)))
+            findings.append(f"{relative} [undecodable]")
             continue
         identifiers, hosts, terms = denylist
-        managed = any(re.search(rf"(?<![\w-]){re.escape(value)}(?![\w-])", content) for value in identifiers)
-        managed = managed or contains_host(content, hosts)
-        relative = str(path.relative_to(root))
+        categories: list[str] = []
+        if any(re.search(rf"(?<![\w-]){re.escape(value)}(?![\w-])", content) for value in identifiers):
+            categories.append("identifier")
+        if contains_host(content, hosts):
+            categories.append("host")
         if path.suffix.casefold() == ".json" and relative.startswith("openapi/"):
-            managed = managed or any(term in content for term in terms)
+            has_term = any(term in content for term in terms)
         else:
-            managed = managed or any(term in block.casefold() for block in response_blocks(content) for term in terms)
-        relative = str(path.relative_to(root))
+            has_term = any(term in block.casefold() for block in response_blocks(content) for term in terms)
+        if has_term:
+            categories.append("term")
         invalid_url = False
         if path.suffix.casefold() == ".json" and relative.startswith("openapi/"):
             try:
-                invalid_url = invalid_artifact_urls(json.loads(path.read_text(encoding="utf-8")))
+                invalid_url = invalid_openapi_response_artifact_urls(json.loads(raw_content))
             except json.JSONDecodeError:
                 invalid_url = True
         elif not any(name in relative for name in ("serp_google", "tw_comments", "tw_posts", "tw_users")):
-            for block in response_blocks(path.read_text(encoding="utf-8")):
+            for block in response_blocks(raw_content):
                 try:
                     payload = json.loads(block)
                 except json.JSONDecodeError:
                     continue
                 invalid_url = invalid_url or invalid_artifact_urls(payload)
-        if managed or invalid_url:
-            findings.append(relative)
+        if invalid_url:
+            categories.append("artifact-url")
+        if categories:
+            findings.append(f"{relative} [{','.join(categories)}]")
     return findings
 
 
 def validate_generated_tree(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> None:
     findings = find_generated_tree_violations(root, denylist)
     if findings:
-        raise RuntimeError(f"Generated customer-facing tree contains managed values in {len(findings)} file(s)")
+        details = "\n".join(f"  - {finding}" for finding in findings)
+        raise RuntimeError(f"Generated customer-facing tree contains managed values in {len(findings)} file(s):\n{details}")
 
 
 def write_text(path: Path, content: str) -> None:
