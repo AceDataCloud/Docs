@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import argparse
 import copy
+import html
 import json
+import os
 import re
+import shutil
+import tempfile
 import time
+from http.client import RemoteDisconnected
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -23,6 +28,8 @@ START = time.time()
 
 BASE_URL = "https://api.acedata.cloud"
 DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/?limit=1000"
+TRANSACTION_FILE = ".docs-sync-transaction.json"
+BACKUP_DIR = ".docs-sync-backup"
 GUIDE_DESCRIPTIONS = {
     "zh-Hans": "{service} 集成指南 - Ace Data Cloud",
     "zh-Hant": "{service} 整合指南 - Ace Data Cloud",
@@ -125,6 +132,185 @@ def load_json(path: Path) -> Any:
         return json.load(file)
 
 
+def load_denylist(*, required: bool = False) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    groups: dict[str, list[str]] = {"identifier": [], "host": [], "term": []}
+    for raw in os.environ.get("PUBLIC_EXAMPLE_DENYLIST", "").splitlines():
+        kind, separator, value = raw.strip().partition(":")
+        if separator and kind in groups and value.strip():
+            groups[kind].append(value.strip().casefold().removeprefix("*."))
+    result = tuple(groups["identifier"]), tuple(groups["host"]), tuple(groups["term"])
+    if required and any(not values for values in result):
+        raise RuntimeError("PUBLIC_EXAMPLE_DENYLIST is required")
+    return result
+
+
+def decode_layers(value: str, limit: int = 3) -> str:
+    decoded = value
+    for _ in range(limit):
+        next_value = html.unescape(unquote(decoded))
+        if next_value == decoded:
+            return decoded
+        decoded = next_value
+    if html.unescape(unquote(decoded)) != decoded:
+        raise ValueError("encoding depth exceeds limit")
+    return decoded
+
+
+def response_blocks(content: str) -> list[str]:
+    blocks: list[str] = []
+    fence_re = re.compile(r"^(?P<prefix>(?:\s*>\s?|\s*(?:[-+*]|\d+[.)])\s+)*\s{0,3})(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+    opened = None
+    body: list[str] = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        match = fence_re.match(line.rstrip("\r\n"))
+        if opened is None:
+            if match:
+                opened = (match.group("fence")[0], len(match.group("fence")), offset, match.group("prefix"))
+                body = []
+        else:
+            marker, length, start, prefix = opened
+            continuation = line[: len(prefix)]
+            same = not prefix or continuation == prefix or continuation.isspace()
+            if match and same and match.group("fence")[0] == marker and len(match.group("fence")) >= length and not match.group("info").strip():
+                context = content[max(0, start - 200) : start]
+                if re.search(r"(?:response|result|output|返回|响应|结果)", context, re.IGNORECASE):
+                    blocks.append("".join(body))
+                opened = None
+                body = []
+            else:
+                body.append(line[len(prefix) :] if prefix and (line.startswith(prefix) or continuation.isspace()) else line)
+        offset += len(line)
+    return blocks
+
+
+def contains_host(content: str, hosts: tuple[str, ...]) -> bool:
+    for url in re.findall(r"https?://[^\s\"'<>]+", content, re.IGNORECASE):
+        try:
+            hostname = (urlsplit(url).hostname or "").rstrip(".").casefold()
+        except ValueError:
+            continue
+        if any(hostname == host or hostname.endswith(f".{host}") for host in hosts):
+            return True
+    return False
+
+
+def sanitize_artifact_values(value: Any, counters: dict[str, int], field: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {key: sanitize_artifact_values(item, counters, key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_artifact_values(item, counters, field) for item in value]
+    if not isinstance(value, str) or not field or not invalid_artifact_urls(value, field):
+        return value
+    lowered = field.casefold()
+    kind = "video" if "video" in lowered else "audio" if "audio" in lowered or "voice" in lowered else "image"
+    counters[kind] += 1
+    bases = {
+        "image": "https://cdn.acedata.cloud/e724d7f13d.png",
+        "video": "https://platform2.cdn.acedata.cloud/gemini/04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4",
+        "audio": "https://platform2.cdn.acedata.cloud/fish/5ade0339-5f11-487e-aacc-06a908271706.mp3",
+    }
+    return f"{bases[kind]}?example={kind}-{counters[kind]:03d}"
+
+
+def neutralize_response_terms(content: str, terms: tuple[str, ...], sanitize_artifacts: bool = True) -> str:
+    pattern = re.compile(r"^(`{3,}|~{3,})[^\n]*\n(.*?)^\1\s*$", re.MULTILINE | re.DOTALL)
+    pieces: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(content):
+        context = content[max(0, match.start() - 200) : match.start()]
+        body = match.group(2)
+        if re.search(r"(?:response|result|output|返回|响应|结果)", context, re.IGNORECASE):
+            for term in terms:
+                body = re.sub(re.escape(term), "model service", body, flags=re.IGNORECASE)
+            if sanitize_artifacts:
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    payload = sanitize_artifact_values(payload, {"image": 0, "video": 0, "audio": 0})
+                    body = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        pieces.extend((content[cursor : match.start(2)], body))
+        cursor = match.end(2)
+    pieces.append(content[cursor:])
+    return "".join(pieces)
+
+
+def neutralize_generated_tree(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> None:
+    terms = denylist[2]
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix.casefold() in {".md", ".mdx"}:
+            content = path.read_text(encoding="utf-8")
+            relative = str(path.relative_to(root))
+            content_result = any(name in relative for name in ("serp_google", "tw_comments", "tw_posts", "tw_users"))
+            updated = neutralize_response_terms(content, terms, sanitize_artifacts=not content_result)
+            if updated != content:
+                path.write_text(updated, encoding="utf-8")
+
+
+def invalid_artifact_urls(value: Any, field: str | None = None) -> bool:
+    if isinstance(value, dict):
+        return any(invalid_artifact_urls(item, key) for key, item in value.items())
+    if isinstance(value, list):
+        return any(invalid_artifact_urls(item, field) for item in value)
+    if not isinstance(value, str) or not field or not field.casefold().endswith(("_url", "_urls")):
+        return False
+    if field.casefold() in {"callback_url", "webhook_url", "payment_url", "expanded_url", "display_url", "site_url"} or not value.strip():
+        return False
+    try:
+        parsed = urlsplit(decode_layers(value))
+    except ValueError:
+        return True
+    host = (parsed.hostname or "").rstrip(".").casefold()
+    if parsed.scheme.casefold() != "https" or host not in {"cdn.acedata.cloud", "platform.cdn.acedata.cloud", "platform2.cdn.acedata.cloud", "suro.id"}:
+        return True
+    return "/examples/" in parsed.path.casefold()
+
+
+def find_generated_tree_violations(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> list[str]:
+    findings: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.casefold() not in {".json", ".md", ".mdx"}:
+            continue
+        try:
+            content = decode_layers(path.read_text(encoding="utf-8")).casefold()
+        except ValueError:
+            findings.append(str(path.relative_to(root)))
+            continue
+        identifiers, hosts, terms = denylist
+        managed = any(re.search(rf"(?<![\w-]){re.escape(value)}(?![\w-])", content) for value in identifiers)
+        managed = managed or contains_host(content, hosts)
+        relative = str(path.relative_to(root))
+        if path.suffix.casefold() == ".json" and relative.startswith("openapi/"):
+            managed = managed or any(term in content for term in terms)
+        else:
+            managed = managed or any(term in block.casefold() for block in response_blocks(content) for term in terms)
+        relative = str(path.relative_to(root))
+        invalid_url = False
+        if path.suffix.casefold() == ".json" and relative.startswith("openapi/"):
+            try:
+                invalid_url = invalid_artifact_urls(json.loads(path.read_text(encoding="utf-8")))
+            except json.JSONDecodeError:
+                invalid_url = True
+        elif not any(name in relative for name in ("serp_google", "tw_comments", "tw_posts", "tw_users")):
+            for block in response_blocks(path.read_text(encoding="utf-8")):
+                try:
+                    payload = json.loads(block)
+                except json.JSONDecodeError:
+                    continue
+                invalid_url = invalid_url or invalid_artifact_urls(payload)
+        if managed or invalid_url:
+            findings.append(relative)
+    return findings
+
+
+def validate_generated_tree(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> None:
+    findings = find_generated_tree_violations(root, denylist)
+    if findings:
+        raise RuntimeError(f"Generated customer-facing tree contains managed values in {len(findings)} file(s)")
+
+
 def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -133,6 +319,148 @@ def write_text(path: Path, content: str) -> None:
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write_json(path: Path, data: Any) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, path)
+    fsync_dir(path.parent)
+
+
+def transaction_paths(output_dir: Path) -> tuple[Path, Path]:
+    return output_dir.parent / TRANSACTION_FILE, output_dir.parent / BACKUP_DIR
+
+
+def validate_manifest(manifest: Any) -> None:
+    phases = {"initializing", "publishing", "committed"}
+    states = {"pending", "backing_up", "backed_up", "publishing", "published", "restoring", "restored"}
+    if not isinstance(manifest, dict) or manifest.get("phase") not in phases or not isinstance(manifest.get("items"), list):
+        raise RuntimeError("Invalid Docs sync transaction manifest")
+    seen: set[str] = set()
+    for item in manifest["items"]:
+        if not isinstance(item, dict) or not isinstance(item.get("relative"), str) or not isinstance(item.get("had_target"), bool) or item.get("state") not in states:
+            raise RuntimeError("Invalid Docs sync transaction item")
+        relative = Path(item["relative"])
+        parts = relative.parts
+        allowed = relative == Path("openapi") or (len(parts) == 2 and parts[1] == "guides") or relative == Path("zh-Hans/mcp")
+        if relative.is_absolute() or ".." in parts or not allowed or item["relative"] in seen:
+            raise RuntimeError("Unsafe Docs sync transaction path")
+        seen.add(item["relative"])
+
+
+def restore_transaction(output_dir: Path) -> None:
+    manifest_path, backup_root = transaction_paths(output_dir)
+    if not manifest_path.exists():
+        if backup_root.exists():
+            if any(backup_root.iterdir()):
+                raise RuntimeError("Docs sync recovery found backup without manifest")
+            backup_root.rmdir()
+        return
+    manifest = load_json(manifest_path)
+    validate_manifest(manifest)
+    if manifest.get("phase") == "committed":
+        shutil.rmtree(backup_root, ignore_errors=True)
+        fsync_dir(backup_root.parent)
+        manifest_path.unlink(missing_ok=True)
+        fsync_dir(manifest_path.parent)
+        return
+    errors: list[str] = []
+    for item in reversed(manifest.get("items", [])):
+        target = output_dir / item["relative"]
+        backup = backup_root / item["relative"]
+        try:
+            if item.get("had_target"):
+                if backup.exists():
+                    item["state"] = "restoring"
+                    atomic_write_json(manifest_path, manifest)
+                    if target.exists():
+                        shutil.rmtree(target) if target.is_dir() else target.unlink()
+                        fsync_dir(target.parent)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(backup, target)
+                    fsync_dir(target.parent)
+                elif item.get("state") == "restoring" and target.exists():
+                    pass
+                elif item.get("state") in {"backed_up", "publishing", "published", "restoring"}:
+                    raise FileNotFoundError(str(backup))
+                elif not target.exists():
+                    raise FileNotFoundError(str(target))
+            elif item.get("state") in {"publishing", "published", "restoring"} and target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+                fsync_dir(target.parent)
+            item["state"] = "restored"
+            atomic_write_json(manifest_path, manifest)
+        except (OSError, ValueError) as exc:
+            errors.append(type(exc).__name__)
+    if errors:
+        raise RuntimeError(f"Docs sync recovery incomplete for {len(errors)} item(s)")
+    shutil.rmtree(backup_root, ignore_errors=True)
+    fsync_dir(backup_root.parent)
+    manifest_path.unlink(missing_ok=True)
+    fsync_dir(manifest_path.parent)
+
+
+def publish_generated_tree(staging_dir: Path, output_dir: Path, managed: list[Path]) -> None:
+    restore_transaction(output_dir)
+    manifest_path, backup_root = transaction_paths(output_dir)
+    manifest = {
+        "phase": "initializing",
+        "items": [
+            {"relative": str(path), "had_target": (output_dir / path).exists(), "state": "pending"}
+            for path in managed
+        ]
+    }
+    atomic_write_json(manifest_path, manifest)
+    backup_root.mkdir(parents=True, exist_ok=False)
+    fsync_dir(backup_root.parent)
+    manifest["phase"] = "publishing"
+    atomic_write_json(manifest_path, manifest)
+    try:
+        for item in manifest["items"]:
+            relative = Path(item["relative"])
+            target = output_dir / relative
+            staged = staging_dir / relative
+            backup = backup_root / relative
+            if item["had_target"]:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                fsync_dir(backup.parent.parent if backup.parent != backup_root else backup_root)
+                item["state"] = "backing_up"
+                atomic_write_json(manifest_path, manifest)
+                os.replace(target, backup)
+                fsync_dir(target.parent)
+                fsync_dir(backup.parent)
+                item["state"] = "backed_up"
+                atomic_write_json(manifest_path, manifest)
+            if staged.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                item["state"] = "publishing"
+                atomic_write_json(manifest_path, manifest)
+                os.replace(staged, target)
+                fsync_dir(staged.parent)
+                fsync_dir(target.parent)
+                item["state"] = "published"
+                atomic_write_json(manifest_path, manifest)
+        manifest["phase"] = "committed"
+        atomic_write_json(manifest_path, manifest)
+        shutil.rmtree(backup_root)
+        fsync_dir(backup_root.parent)
+        manifest_path.unlink()
+        fsync_dir(manifest_path.parent)
+    except BaseException:
+        restore_transaction(output_dir)
+        raise
 
 
 def normalize(value: str) -> str:
@@ -521,7 +849,7 @@ def load_localized_guides(language: str) -> dict[str, dict[str, str]]:
             with urlopen(request, timeout=60) as response:
                 payload = json.load(response)
             return index_localized_guides(payload, language)
-        except (HTTPError, URLError, OSError, RuntimeError, json.JSONDecodeError):
+        except (HTTPError, URLError, RemoteDisconnected, OSError, RuntimeError, json.JSONDecodeError):
             if attempt == 2:
                 raise
             time.sleep(2**attempt)
@@ -540,7 +868,7 @@ def sanitize_html_for_mdx(content: str) -> str:
             continue
         part = re.sub(r"(<[a-zA-Z][^>]*)\bclass=", r"\1className=", part)
         for tag in ("img", "br", "hr", "input", "source", "meta", "link"):
-            part = re.sub(rf"(<{tag}\b[^>]*?)(?<!/)>", rf"\1 />", part)
+            part = re.sub(rf"(<{tag}\b[^>]*?)(?<!/)>", r"\1 />", part)
         part = re.sub(r"<(https?://[^>]+)>", r"[\1](\1)", part)
         part = re.sub(r"<(?![a-zA-Z/!])", r"&lt;", part)
         parts[index] = part
@@ -583,6 +911,7 @@ def sync_guides(
     services_by_alias: dict[str, dict[str, Any]],
     doc_service_map: dict[str, str | None],
     languages: list[str],
+    fallback_root: Path | None = None,
 ) -> None:
     log("Syncing localized guides")
     total = 0
@@ -609,6 +938,13 @@ def sync_guides(
             localized_guide = localized_guides.get(normalize(doc_key)) if localized_guides else None
             if localized_guides and not localized_guide:
                 missing_guides.append(doc_key)
+                fallback = fallback_root / output_language / "guides" / service_alias / f"{doc_key}.mdx" if fallback_root else None
+                if fallback and fallback.exists():
+                    target = output_dir / output_language / "guides" / service_alias / f"{doc_key}.mdx"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(fallback, target)
+                    total += 1
+                    language_total += 1
                 continue
             content = localized_guide["content"] if localized_guide else markdown_file.read_text(encoding="utf-8")
             fallback_title = localized_guide["title"] if localized_guide else doc_key.replace("_", " ").title()
@@ -669,14 +1005,37 @@ def get_docs_languages(output_dir: Path) -> list[str]:
     return [language for language in languages if language in LANGUAGE_SOURCE_DIRS]
 
 
+def managed_paths(languages: list[str]) -> list[Path]:
+    paths = [Path("openapi"), Path("zh-Hans") / "mcp"]
+    paths.extend(Path(language) / "guides" for language in languages)
+    return paths
+
+
+def clear_managed_paths(root: Path, managed: list[Path]) -> None:
+    for relative in managed:
+        path = root / relative
+        if path.exists():
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync Docs generated content from PlatformBackend")
-    parser.add_argument("--backend-dir", required=True, type=Path)
+    parser.add_argument("--backend-dir", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--require-denylist", action="store_true")
     args = parser.parse_args()
 
-    backend_dir = args.backend_dir.resolve()
     output_dir = args.output_dir.resolve()
+    restore_transaction(output_dir)
+    denylist = load_denylist(required=args.require_denylist or not args.validate_only)
+    if args.validate_only:
+        validate_generated_tree(output_dir, denylist)
+        log("Generated tree validation passed")
+        return 0
+    if args.backend_dir is None:
+        raise SystemExit("--backend-dir is required unless --validate-only is used")
+    backend_dir = args.backend_dir.resolve()
     if not (backend_dir / "cost" / "service_api_mapping.json").exists():
         raise SystemExit(f"Invalid PlatformBackend directory: {backend_dir}")
     if not (output_dir / "docs.json").exists():
@@ -689,9 +1048,17 @@ def main() -> int:
     languages = get_docs_languages(output_dir)
     log(f"Languages: {', '.join(languages)}")
 
-    sync_openapi(backend_dir, output_dir, services)
-    sync_guides(backend_dir, output_dir, services_by_alias, doc_service_map, languages)
-    sync_mcp_docs(backend_dir, output_dir, languages)
+    managed = managed_paths(languages)
+    with tempfile.TemporaryDirectory(prefix="docs-sync-", dir=output_dir.parent) as temporary_directory:
+        staging_dir = Path(temporary_directory) / "output"
+        shutil.copytree(output_dir, staging_dir, ignore=shutil.ignore_patterns(".git"))
+        clear_managed_paths(staging_dir, managed)
+        sync_openapi(backend_dir, staging_dir, services)
+        sync_guides(backend_dir, staging_dir, services_by_alias, doc_service_map, languages, output_dir)
+        sync_mcp_docs(backend_dir, staging_dir, languages)
+        neutralize_generated_tree(staging_dir, denylist)
+        validate_generated_tree(staging_dir, denylist)
+        publish_generated_tree(staging_dir, output_dir, managed)
     log("Done")
     return 0
 
