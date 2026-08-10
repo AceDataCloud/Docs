@@ -125,13 +125,30 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             root = Path(temporary_directory)
             nested = root / "en" / "guides"
             nested.mkdir(parents=True)
-            (nested / "guide.mdx").write_text("private%252Droute", encoding="utf-8")
-            with self.assertRaises(RuntimeError):
+            target = nested / "guide.mdx"
+            target.write_text("private%252Droute", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, r"en/guides/guide\.mdx \[identifier\]") as raised:
+                sync.validate_generated_tree(root, (("private-route",), (), ()))
+            self.assertNotIn("private-route", str(raised.exception))
+
+            target.write_text("private%2525252Droute", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, r"en/guides/guide\.mdx \[undecodable\]"):
                 sync.validate_generated_tree(root, (("private-route",), (), ()))
 
-            (nested / "guide.mdx").write_text("private%2525252Droute", encoding="utf-8")
-            with self.assertRaises(RuntimeError):
-                sync.validate_generated_tree(root, (("private-route",), (), ()))
+    def test_validate_generated_tree_reports_categories_without_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            target = root / "openapi" / "service.json"
+            target.parent.mkdir(parents=True)
+            target.write_text('{"description":"restricted source","url":"https://private.invalid/a"}', encoding="utf-8")
+
+            with self.assertRaises(RuntimeError) as raised:
+                sync.validate_generated_tree(root, ((), ("private.invalid",), ("restricted source",)))
+
+            message = str(raised.exception)
+            self.assertIn("openapi/service.json [host,term]", message)
+            self.assertNotIn("private.invalid", message)
+            self.assertNotIn("restricted source", message)
 
     def test_managed_paths_only_owns_generated_mcp_locale(self) -> None:
         paths = sync.managed_paths(["zh-Hans", "en"])
