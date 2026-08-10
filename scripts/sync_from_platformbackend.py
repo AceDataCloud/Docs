@@ -206,9 +206,9 @@ def sanitize_artifact_values(value: Any, counters: dict[str, int], field: str | 
     kind = "video" if "video" in lowered else "audio" if "audio" in lowered or "voice" in lowered else "image"
     counters[kind] += 1
     bases = {
-        "image": "https://cdn.acedata.cloud/examples/image-placeholder.png",
-        "video": "https://platform2.cdn.acedata.cloud/examples/video-placeholder.mp4",
-        "audio": "https://platform2.cdn.acedata.cloud/examples/audio-placeholder.mp3",
+        "image": "https://cdn.acedata.cloud/e724d7f13d.png",
+        "video": "https://platform2.cdn.acedata.cloud/gemini/04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4",
+        "audio": "https://platform2.cdn.acedata.cloud/fish/5ade0339-5f11-487e-aacc-06a908271706.mp3",
     }
     return f"{bases[kind]}?example={kind}-{counters[kind]:03d}"
 
@@ -265,8 +265,7 @@ def invalid_artifact_urls(value: Any, field: str | None = None) -> bool:
     host = (parsed.hostname or "").rstrip(".").casefold()
     if parsed.scheme.casefold() != "https" or host not in {"cdn.acedata.cloud", "platform.cdn.acedata.cloud", "platform2.cdn.acedata.cloud", "suro.id"}:
         return True
-    basename = Path(parsed.path).name.rsplit(".", 1)[0]
-    return "/examples/" in parsed.path and bool(re.fullmatch(r"[0-9a-f]{6,}", basename))
+    return "/examples/" in parsed.path.casefold()
 
 
 def find_generated_tree_violations(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> list[str]:

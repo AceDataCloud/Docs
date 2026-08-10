@@ -105,9 +105,9 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             "\n```\n"
         )
         result = sync.neutralize_response_terms(content, ())
-        self.assertIn("image-placeholder.png?example=image-001", result)
-        self.assertIn("video-placeholder.mp4?example=video-001", result)
-        self.assertIn("video-placeholder.mp4?example=video-002", result)
+        self.assertIn("e724d7f13d.png?example=image-001", result)
+        self.assertIn("04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4?example=video-001", result)
+        self.assertIn("04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4?example=video-002", result)
         self.assertEqual(sync.neutralize_response_terms(content, (), sanitize_artifacts=False), content)
 
     def test_neutralize_terms_only_in_response_fence(self) -> None:
