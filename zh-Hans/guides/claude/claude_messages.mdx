@@ -37,6 +37,7 @@ Claude Messages API 的请求路径为 `/v1/messages`，与 Anthropic 官方 API
 - `top_k`：仅从概率最高的 K 个选项中采样。
 - `tools`：工具定义，用于让模型调用外部函数。
 - `tool_choice`：控制模型如何使用提供的工具。
+- `cache_control`：在请求的最后一个可缓存内容块处自动创建缓存断点；也可写在具体内容块上。
 
 ### cURL 示例
 
@@ -112,9 +113,10 @@ print(response.json())
 - `role`：始终为 `assistant`。
 - `content`：回复内容数组，每个元素包含 `type`（如 `text`）和对应的内容。
 - `model`：处理请求的模型名称。
-- `stop_reason`：停止原因，可能的值包括 `end_turn`（正常结束）、`max_tokens`（达到最大长度）、`stop_sequence`（遇到停止序列）、`tool_use`（工具调用）。
+- `stop_reason`：停止原因。稳定取值包括 `end_turn`、`max_tokens`、`stop_sequence`、`tool_use`、`pause_turn`（可把当前 assistant 内容原样回传以继续）、`refusal` 和 `model_context_window_exceeded`。
 - `stop_sequence`：如果因自定义停止序列而停止，显示匹配的停止序列文本。
-- `usage`：token 使用统计，包含 `input_tokens`（输入 token 数）和 `output_tokens`（输出 token 数）。
+- `stop_details`：当 `stop_reason` 为 `refusal` 时，可能包含拒绝类别和说明。
+- `usage`：token 使用统计。`input_tokens` 是未缓存输入；`cache_creation_input_tokens` 和 `cache_read_input_tokens` 分别是缓存写入与读取；`output_tokens` 是输出 token 数。非流式响应还可能包含 Ace Data Cloud 记录的 `cost`。
 
 ## 系统提示词
 
@@ -497,6 +499,55 @@ curl -X POST 'https://api.acedata.cloud/v1/messages' \
 
 支持的图片格式包括：`image/jpeg`、`image/png`、`image/gif`、`image/webp`。
 
+## 文档与 PDF
+
+PDF 使用 `document` 内容块，支持 Base64 与 URL 两种稳定来源。Base64 来源必须使用 `application/pdf`：
+
+```python
+import base64
+
+with open("report.pdf", "rb") as f:
+    pdf_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+payload = {
+    "model": "claude-opus-4-8",
+    "max_tokens": 1024,
+    "messages": [{
+        "role": "user",
+        "content": [
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": pdf_data
+                },
+                "title": "Quarterly report"
+            },
+            {"type": "text", "text": "Summarize this PDF."}
+        ]
+    }]
+}
+```
+
+URL 来源写作 `{"type":"url","url":"https://example.com/report.pdf"}`。`document` 还支持 `text/plain` 与由 text/image 块组成的 `content` 来源；可选字段包括 `title`、`context` 和 `citations`。Files API 的 `file_id` 来源属于独立 beta 功能，不在本接口的稳定契约内。
+
+## 提示缓存
+
+顶层 `cache_control` 会自动把缓存断点放在最后一个可缓存块上：
+
+```python
+payload = {
+    "model": "claude-opus-4-8",
+    "max_tokens": 1024,
+    "cache_control": {"type": "ephemeral", "ttl": "5m"},
+    "system": "You are an expert on this reference material.",
+    "messages": [{"role": "user", "content": "Summarize the key points."}]
+}
+```
+
+需要精确控制位置时，也可把同样的 `cache_control` 写在 text、image、document、tool_use、tool_result 内容块或工具定义上。`ttl` 支持 `5m`（默认）与 `1h`；请通过 `usage.cache_creation_input_tokens` 和 `usage.cache_read_input_tokens` 判断缓存写入与命中。
+
 返回结果示例：
 
 ```json
@@ -666,19 +717,20 @@ Messages API 的 `usage.input_tokens` 仅表示未缓存输入，`cache_read_inp
 
 ## 错误处理
 
-在调用 API 时，如果遇到错误，API 会返回相应的错误代码和信息。例如：
+公开接口的错误响应使用 Ace Data Cloud 平台 envelope：`error.code` 是稳定错误码，`error.message` 是说明，`trace_id` 用于排查请求。常见 HTTP 状态包括：
 
-- `400 token_mismatched`：Bad request, possibly due to missing or invalid parameters.
-- `400 api_not_implemented`：Bad request, possibly due to missing or invalid parameters.
-- `401 invalid_token`：Unauthorized, invalid or missing authorization token.
-- `429 too_many_requests`：Too many requests, you have exceeded the rate limit.
-- `500 api_error`：Internal server error, something went wrong on the server.
+- `400`：请求参数或协议内容无效。
+- `401`：授权令牌无效、缺失或过期。
+- `403`：禁止访问、余额不足或配额受限。
+- `404`：API 或模型不存在。
+- `413`：请求体过大。
+- `429`：请求过多。
+- `500` / `503` / `504`：服务错误、暂时不可用或处理超时。
 
 ### 错误响应示例
 
 ```json
 {
-  "success": false,
   "error": {
     "code": "api_error",
     "message": "fetch failed"
@@ -687,6 +739,8 @@ Messages API 的 `usage.input_tokens` 仅表示未缓存输入，`cache_read_inp
 }
 ```
 
+该错误结构是 Ace Data Cloud 的运行时契约，不等同于 Anthropic 官方错误 envelope；请按 HTTP 状态与 `error.code` 处理。
+
 ## 结论
 
-通过本文档，您已经了解了如何使用 Claude Messages API 以 Anthropic 原生格式调用 Claude 的对话功能。Messages API 支持基本对话、系统提示词、流式响应、多轮对话、深度思考、视觉理解和工具调用等丰富功能。如有任何问题，请随时联系我们的技术支持团队。
+通过本文档，您已经了解了如何使用 Claude Messages API 以 Anthropic 原生格式调用 Claude 的对话功能。Messages API 支持基本对话、系统提示词、流式响应、多轮对话、深度思考、视觉理解、PDF、提示缓存和工具调用等丰富功能。如有任何问题，请随时联系我们的技术支持团队。

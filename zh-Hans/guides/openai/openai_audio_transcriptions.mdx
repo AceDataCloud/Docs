@@ -3,7 +3,7 @@ title: "OpenAI 语音识别 API（/v1/audio/transcriptions）"
 description: "OpenAI generation 集成指南 - Ace Data Cloud"
 ---
 
-将音频转写为文字，**完全兼容 OpenAI 的 `/v1/audio/transcriptions`**。任何 OpenAI SDK 只需把 `base_url` 指向 `https://api.acedata.cloud`、把密钥换成你的 AceData Token 即可直接使用。接口同步返回转写结果。
+将音频转写为文字，**完全兼容 OpenAI 的 `/v1/audio/transcriptions`**。任何 OpenAI SDK 只需把 `base_url` 指向 `https://api.acedata.cloud`、把密钥换成你的 AceData Token 即可直接使用。支持普通完整响应，也支持 `gpt-transcribe` 的 SSE 增量转写。
 
 - **请求地址**：`POST https://api.acedata.cloud/v1/audio/transcriptions`（别名 `POST /openai/audio/transcriptions`）
 - **鉴权**：请求头 `Authorization: Bearer {token}`
@@ -23,7 +23,7 @@ description: "OpenAI generation 集成指南 - Ace Data Cloud"
 | `timestamp_granularities[]` | array | 否 | 时间戳粒度，`word` 或 `segment`，需配合 `response_format=verbose_json` 使用。 |
 | `languages[]` | array | 否 | 候选语种（ISO-639-1），**仅 `gpt-transcribe`**。与 `language` 互斥，不要同时传。 |
 | `keywords[]` | array | 否 | 专有名词/术语提示，**仅 `gpt-transcribe`**，可显著提升品牌名、人名的识别准确率。 |
-| `stream` | boolean | 否 | 不支持流式，传入会被忽略并返回完整结果（与 OpenAI 官方行为一致）。 |
+| `stream` | boolean | 否 | `gpt-transcribe` 设为 `true` 时返回 SSE 增量事件；`whisper-1` 会忽略该参数并返回完整结果（与 OpenAI 官方行为一致）。 |
 
 ## 选哪个模型
 
@@ -35,6 +35,7 @@ description: "OpenAI generation 集成指南 - Ace Data Cloud"
 | 词级时间戳 | ✅ | ❌ |
 | `languages[]` / `keywords[]` | ❌ | ✅ |
 | 返回检测到的语种 | 需 `verbose_json` | 默认返回 |
+| SSE 增量返回 | ❌（`stream` 被忽略） | ✅ |
 
 **需要字幕或词级时间戳 → `whisper-1`；其余场景推荐 `gpt-transcribe`**（更准且更便宜）。
 
@@ -117,6 +118,29 @@ curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
 }
 ```
 
+### 流式转写
+
+`gpt-transcribe` 可通过 `stream=true` 返回 `Content-Type: text/event-stream`。服务会原样发送 OpenAI 兼容事件：
+`transcript.text.delta` 携带增量文字，`transcript.text.done` 携带完整文字和 `usage` 并表示正常完成。
+
+```shell
+curl -N -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=gpt-transcribe \
+  -F stream=true
+```
+
+事件流示例：
+
+```text
+data: {"type":"transcript.text.delta","delta":"Hello"}
+
+data: {"type":"transcript.text.done","text":"Hello world","usage":{"type":"tokens","input_tokens":14,"output_tokens":3,"total_tokens":17}}
+```
+
+收到 `transcript.text.done` 才表示正常完成。若流建立后处理失败，连接会在 `event: error` 事件后结束；客户端主动断开会取消本次处理，不会继续在后台生成。`whisper-1` 即使传入 `stream=true` 也仍按普通非流式响应返回。
+
 ### 使用官方 SDK
 
 ```python
@@ -140,7 +164,7 @@ print(result.text)
 ## 注意事项
 
 - 单个文件最大 **25 MB**。超过请先分段或压缩（降低码率通常即可，语音识别对音质要求不高）。
-- 该接口**不支持流式返回**（`stream` 参数会被忽略）。
+- `gpt-transcribe` 支持 `stream=true` SSE；`whisper-1` 会忽略 `stream` 并返回完整结果。
 - 参数与 OpenAI 官方 `/v1/audio/transcriptions` 保持一致，官方 SDK 只需改 `base_url` 即可使用。
 - `include[]`、`chunking_strategy`、`known_speaker_names[]`、`known_speaker_references[]` 属于我们未上架的
   转写模型，传入会返回 400 而不是静默忽略。模型专属参数（`timestamp_granularities[]` 之于 `whisper-1`、
