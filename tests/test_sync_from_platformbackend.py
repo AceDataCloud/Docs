@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,113 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             ]
 
             self.assertEqual(sync.build_doc_service_map(services, backend_dir), {"gemini_videos": "gemini"})
+
+    def test_exact_records_override_heuristic_service_and_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backend = root / "backend"
+            docs = backend / "docs"
+            docs.mkdir(parents=True)
+            (docs / "development_tool_route.md").write_text("# Tool", encoding="utf-8")
+            records = [
+                {
+                    "canonical_alias": "tool-route",
+                    "source_doc_key": "development_tool_route",
+                    "service_alias": "coding",
+                    "output_path": "guides/coding/custom_name.mdx",
+                }
+            ]
+            bundle = {
+                "schema_version": 1,
+                "records_sha256": sync.hashlib.sha256(sync.canonical_json_bytes(records)).hexdigest(),
+                "records": records,
+            }
+            bundle_path = root / "exact.json"
+            bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+            services = [{"alias": "coding", "apis": []}, {"alias": "tool", "apis": []}]
+
+            exact = sync.load_exact_doc_records(backend, services, bundle_path)
+            mapping = sync.build_doc_service_map(services, backend, exact)
+
+            self.assertEqual(mapping["tool_route"], "coding")
+            self.assertEqual(exact["tool_route"]["output_path"], "guides/coding/custom_name.mdx")
+
+    def test_sync_guides_writes_exact_output_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backend = root / "backend"
+            output = root / "output"
+            docs = backend / "docs"
+            docs.mkdir(parents=True)
+            (docs / "development_tool_route.md").write_text("# Exact tool\n\nBody", encoding="utf-8")
+            exact = {
+                "tool_route": {
+                    "source_doc_key": "development_tool_route",
+                    "service_alias": "coding",
+                    "output_path": "guides/coding/exact_name.mdx",
+                    "canonical_alias": "tool-route",
+                }
+            }
+
+            sync.sync_guides(
+                backend,
+                output,
+                {"coding": {"alias": "coding", "display_name": "Coding"}},
+                {"tool_route": "coding"},
+                ["zh-Hans"],
+                exact_records=exact,
+            )
+
+            self.assertTrue((output / "zh-Hans/guides/coding/exact_name.mdx").is_file())
+            self.assertFalse((output / "zh-Hans/guides/coding/tool_route.mdx").exists())
+
+    def test_exact_records_fail_closed_on_invalid_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backend = root / "backend"
+            docs = backend / "docs"
+            docs.mkdir(parents=True)
+            (docs / "development_route.md").write_text("# Route", encoding="utf-8")
+            services = [{"alias": "coding", "apis": []}]
+            base = {
+                "canonical_alias": "route",
+                "source_doc_key": "development_route",
+                "service_alias": "coding",
+                "output_path": "guides/coding/route.mdx",
+            }
+
+            for label, mutate, error in (
+                ("digest", lambda rows: rows, "digest mismatch"),
+                ("service", lambda rows: [{**rows[0], "service_alias": "missing"}], "Unknown"),
+                ("source", lambda rows: [{**rows[0], "source_doc_key": "development_missing"}], "Missing"),
+                ("traversal", lambda rows: [{**rows[0], "output_path": "guides/coding/../route.mdx"}], "Unsafe"),
+                ("duplicate", lambda rows: rows + [dict(rows[0])], "Duplicate"),
+            ):
+                rows = mutate([dict(base)])
+                digest = "invalid" if label == "digest" else sync.hashlib.sha256(sync.canonical_json_bytes(rows)).hexdigest()
+                path = root / f"{label}.json"
+                path.write_text(json.dumps({"schema_version": 1, "records_sha256": digest, "records": rows}), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, error):
+                    sync.load_exact_doc_records(backend, services, path)
+
+    def test_coding_nav_manifest_covers_all_locales_and_preserves_urls(self) -> None:
+        root = Path(__file__).parents[1]
+        nav = json.loads((root / "scripts/data/coding-nav.generated.json").read_text(encoding="utf-8"))
+        docs_json = json.loads((root / "docs.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(nav["locales"]), 15)
+        self.assertEqual(len(nav["routes"]), 25)
+        self.assertTrue(all(set(route["paths"]) == set(nav["locales"]) for route in nav["routes"]))
+        raw_nav = json.dumps(docs_json)
+        stable = {
+            "claude_code",
+            "claude_code_terminal",
+            "claude_code_vscode",
+            "claude_code_jetbrains",
+            "claude_code_github_actions",
+        }
+        for locale in nav["locales"]:
+            for name in stable:
+                self.assertIn(f"{locale}/guides/claude-code/{name}", raw_nav)
 
     def test_index_localized_guides_maps_alias_and_api_path(self) -> None:
         payload = {
