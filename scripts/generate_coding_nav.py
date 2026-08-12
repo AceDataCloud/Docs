@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXACT_MAP = ROOT / "scripts" / "data" / "coding-docs-exact-map.json"
+EXACT_MAP = ROOT / "scripts" / "data" / "coding-docs-map.json"
 OUTPUT = ROOT / "scripts" / "data" / "coding-nav.generated.json"
 LOCALES = ["zh-Hans", "zh-Hant", "en", "ja", "ko", "es", "fr", "de", "pt", "ru", "ar", "it", "sv", "uk", "pl"]
 
@@ -22,7 +22,6 @@ def generate() -> dict[str, object]:
     ]
     return {
         "schema_version": 1,
-        "owner_commit": bundle["owner"]["commit"],
         "locales": LOCALES,
         "routes": routes,
     }

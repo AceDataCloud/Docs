@@ -44,11 +44,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
                     "output_path": "guides/coding/custom_name.mdx",
                 }
             ]
-            bundle = {
-                "schema_version": 1,
-                "records_sha256": sync.hashlib.sha256(sync.canonical_json_bytes(records)).hexdigest(),
-                "records": records,
-            }
+            bundle = {"schema_version": 1, "records": records}
             bundle_path = root / "exact.json"
             bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
             services = [{"alias": "coding", "apis": []}, {"alias": "tool", "apis": []}]
@@ -104,16 +100,14 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             }
 
             for label, mutate, error in (
-                ("digest", lambda rows: rows, "digest mismatch"),
                 ("service", lambda rows: [{**rows[0], "service_alias": "missing"}], "Unknown"),
                 ("source", lambda rows: [{**rows[0], "source_doc_key": "development_missing"}], "Missing"),
                 ("traversal", lambda rows: [{**rows[0], "output_path": "guides/coding/../route.mdx"}], "Unsafe"),
                 ("duplicate", lambda rows: rows + [dict(rows[0])], "Duplicate"),
             ):
                 rows = mutate([dict(base)])
-                digest = "invalid" if label == "digest" else sync.hashlib.sha256(sync.canonical_json_bytes(rows)).hexdigest()
                 path = root / f"{label}.json"
-                path.write_text(json.dumps({"schema_version": 1, "records_sha256": digest, "records": rows}), encoding="utf-8")
+                path.write_text(json.dumps({"schema_version": 1, "records": rows}), encoding="utf-8")
                 with self.assertRaisesRegex(RuntimeError, error):
                     sync.load_exact_doc_records(backend, services, path)
 

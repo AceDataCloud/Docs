@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import html
 import json
 import os
@@ -31,7 +30,7 @@ BASE_URL = "https://api.acedata.cloud"
 DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/?limit=1000"
 TRANSACTION_FILE = ".docs-sync-transaction.json"
 BACKUP_DIR = ".docs-sync-backup"
-EXACT_MAP_PATH = Path(__file__).parent / "data" / "coding-docs-exact-map.json"
+EXACT_MAP_PATH = Path(__file__).parent / "data" / "coding-docs-map.json"
 GUIDE_DESCRIPTIONS = {
     "zh-Hans": "{service} 集成指南 - Ace Data Cloud",
     "zh-Hant": "{service} 整合指南 - Ace Data Cloud",
@@ -758,10 +757,6 @@ def merge_openapi_specs(backend_dir: Path, service: dict[str, Any]) -> dict[str,
     return clean_openapi_spec(merged)
 
 
-def canonical_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
-
-
 def load_exact_doc_records(
     backend_dir: Path,
     services: list[dict[str, Any]],
@@ -770,10 +765,7 @@ def load_exact_doc_records(
     bundle = load_json(path)
     records = bundle.get("records") if isinstance(bundle, dict) else None
     if bundle.get("schema_version") != 1 or not isinstance(records, list):
-        raise RuntimeError("Invalid Coding exact-map bundle")
-    digest = hashlib.sha256(canonical_json_bytes(records)).hexdigest()
-    if digest != bundle.get("records_sha256"):
-        raise RuntimeError("Coding exact-map digest mismatch")
+        raise RuntimeError("Invalid Coding document map")
 
     aliases = {service["alias"] for service in services}
     result: dict[str, dict[str, str]] = {}
