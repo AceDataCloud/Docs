@@ -30,6 +30,7 @@ BASE_URL = "https://api.acedata.cloud"
 DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/?limit=1000"
 TRANSACTION_FILE = ".docs-sync-transaction.json"
 BACKUP_DIR = ".docs-sync-backup"
+EXACT_MAP_PATH = Path(__file__).parent / "data" / "coding-docs-map.json"
 GUIDE_DESCRIPTIONS = {
     "zh-Hans": "{service} 集成指南 - Ace Data Cloud",
     "zh-Hant": "{service} 整合指南 - Ace Data Cloud",
@@ -756,7 +757,54 @@ def merge_openapi_specs(backend_dir: Path, service: dict[str, Any]) -> dict[str,
     return clean_openapi_spec(merged)
 
 
-def build_doc_service_map(services: list[dict[str, Any]], backend_dir: Path) -> dict[str, str | None]:
+def load_exact_doc_records(
+    backend_dir: Path,
+    services: list[dict[str, Any]],
+    path: Path = EXACT_MAP_PATH,
+) -> dict[str, dict[str, str]]:
+    bundle = load_json(path)
+    records = bundle.get("records") if isinstance(bundle, dict) else None
+    if bundle.get("schema_version") != 1 or not isinstance(records, list):
+        raise RuntimeError("Invalid Coding document map")
+
+    aliases = {service["alias"] for service in services}
+    result: dict[str, dict[str, str]] = {}
+    output_paths: set[str] = set()
+    for record in records:
+        source_key = record.get("source_doc_key")
+        service_alias = record.get("service_alias")
+        output_path = record.get("output_path")
+        if not all(isinstance(value, str) and value for value in (source_key, service_alias, output_path)):
+            raise RuntimeError("Invalid Coding exact-map record")
+        doc_key = source_key.removeprefix("development_")
+        source = backend_dir / "docs" / f"{source_key}.md"
+        relative = Path(output_path)
+        expected_prefix = Path("guides") / service_alias
+        if source_key in result or doc_key in result:
+            raise RuntimeError(f"Duplicate Coding exact-map source {source_key}")
+        if service_alias not in aliases:
+            raise RuntimeError(f"Unknown Coding exact-map service {service_alias}")
+        if not source.is_file():
+            raise RuntimeError(f"Missing Coding exact-map source {source_key}")
+        if relative.is_absolute() or ".." in relative.parts or relative.suffix != ".mdx" or not relative.is_relative_to(expected_prefix):
+            raise RuntimeError(f"Unsafe Coding exact-map output {output_path}")
+        if output_path in output_paths:
+            raise RuntimeError(f"Duplicate Coding exact-map output {output_path}")
+        output_paths.add(output_path)
+        result[doc_key] = {
+            "source_doc_key": source_key,
+            "service_alias": service_alias,
+            "output_path": output_path,
+            "canonical_alias": record["canonical_alias"],
+        }
+    return result
+
+
+def build_doc_service_map(
+    services: list[dict[str, Any]],
+    backend_dir: Path,
+    exact_records: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str | None]:
     path_to_alias: dict[str, str] = {}
     for service in services:
         alias = service["alias"]
@@ -780,6 +828,10 @@ def build_doc_service_map(services: list[dict[str, Any]], backend_dir: Path) -> 
             continue
         if doc_key in SKIP_DOC_KEYS:
             result[doc_key] = None
+            continue
+        exact = (exact_records or {}).get(doc_key)
+        if exact:
+            result[doc_key] = exact["service_alias"]
             continue
 
         normalized_key = normalize(doc_key)
@@ -932,6 +984,7 @@ def sync_guides(
     doc_service_map: dict[str, str | None],
     languages: list[str],
     fallback_root: Path | None = None,
+    exact_records: dict[str, dict[str, str]] | None = None,
 ) -> None:
     log("Syncing localized guides")
     total = 0
@@ -955,12 +1008,14 @@ def sync_guides(
                 continue
             service = services_by_alias.get(service_alias, {})
             service_name = service.get("display_name") or service_alias.replace("-", " ").title()
+            exact = (exact_records or {}).get(doc_key)
+            relative_output = Path(exact["output_path"]) if exact else Path("guides") / service_alias / f"{doc_key}.mdx"
             localized_guide = localized_guides.get(normalize(doc_key)) if localized_guides else None
             if localized_guides and not localized_guide:
                 missing_guides.append(doc_key)
-                fallback = fallback_root / output_language / "guides" / service_alias / f"{doc_key}.mdx" if fallback_root else None
+                fallback = fallback_root / output_language / relative_output if fallback_root else None
                 if fallback and fallback.exists():
-                    target = output_dir / output_language / "guides" / service_alias / f"{doc_key}.mdx"
+                    target = output_dir / output_language / relative_output
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(fallback, target)
                     total += 1
@@ -973,7 +1028,7 @@ def sync_guides(
                 fallback_title,
                 guide_description(output_language, service_name),
             )
-            write_text(output_dir / output_language / "guides" / service_alias / f"{doc_key}.mdx", mdx)
+            write_text(output_dir / output_language / relative_output, mdx)
             total += 1
             language_total += 1
 
@@ -1064,7 +1119,8 @@ def main() -> int:
     documented_aliases = get_documented_service_aliases(output_dir)
     services = load_services(backend_dir, documented_aliases)
     services_by_alias = {service["alias"]: service for service in services}
-    doc_service_map = build_doc_service_map(services, backend_dir)
+    exact_records = load_exact_doc_records(backend_dir, services)
+    doc_service_map = build_doc_service_map(services, backend_dir, exact_records)
     languages = get_docs_languages(output_dir)
     log(f"Languages: {', '.join(languages)}")
 
@@ -1074,7 +1130,7 @@ def main() -> int:
         shutil.copytree(output_dir, staging_dir, ignore=shutil.ignore_patterns(".git"))
         clear_managed_paths(staging_dir, managed)
         sync_openapi(backend_dir, staging_dir, services)
-        sync_guides(backend_dir, staging_dir, services_by_alias, doc_service_map, languages, output_dir)
+        sync_guides(backend_dir, staging_dir, services_by_alias, doc_service_map, languages, output_dir, exact_records)
         sync_mcp_docs(backend_dir, staging_dir, languages)
         neutralize_generated_tree(staging_dir, denylist)
         validate_generated_tree(staging_dir, denylist)
