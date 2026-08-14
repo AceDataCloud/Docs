@@ -63,6 +63,7 @@ EXCLUDED_SERVICES = {
     "udio",
 }
 DOC_ONLY_SERVICES = {"coding"}
+DOC_ONLY_SERVICES = {"coding"}
 
 SKIP_DOC_KEYS = {
     "acedataext",
