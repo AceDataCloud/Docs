@@ -118,17 +118,27 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertEqual(len(nav["locales"]), 15)
         self.assertEqual(len(nav["routes"]), 25)
         self.assertTrue(all(set(route["paths"]) == set(nav["locales"]) for route in nav["routes"]))
-        raw_nav = json.dumps(docs_json)
-        stable = {
-            "claude_code",
-            "claude_code_terminal",
-            "claude_code_vscode",
-            "claude_code_jetbrains",
-            "claude_code_github_actions",
+        language_by_id = {
+            language["language"]: language for language in docs_json["navigation"]["languages"]
         }
         for locale in nav["locales"]:
-            for name in stable:
-                self.assertIn(f"{locale}/guides/claude-code/{name}", raw_nav)
+            coding_groups = [
+                group
+                for group in language_by_id[locale]["tabs"][0]["groups"]
+                if group.get("group") == "Coding"
+            ]
+            self.assertEqual(len(coding_groups), 1)
+            expected = [
+                route["paths"][locale]
+                for route in nav["routes"]
+                if (root / f"{route['paths'][locale]}.mdx").is_file()
+            ]
+            self.assertEqual(coding_groups[0]["pages"], expected)
+            self.assertTrue(all((root / f"{page}.mdx").is_file() for page in expected))
+        self.assertEqual(
+            len(next(group for group in language_by_id["zh-Hans"]["tabs"][0]["groups"] if group["group"] == "Coding")["pages"]),
+            25,
+        )
 
     def test_index_localized_guides_maps_alias_and_api_path(self) -> None:
         payload = {
