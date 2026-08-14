@@ -47,7 +47,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             bundle = {"schema_version": 1, "records": records}
             bundle_path = root / "exact.json"
             bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
-            services = [{"alias": "coding", "apis": []}, {"alias": "tool", "apis": []}]
+            services = [{"alias": "tool", "apis": []}]
 
             exact = sync.load_exact_doc_records(backend, services, bundle_path)
             mapping = sync.build_doc_service_map(services, backend, exact)
@@ -91,7 +91,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             docs = backend / "docs"
             docs.mkdir(parents=True)
             (docs / "development_route.md").write_text("# Route", encoding="utf-8")
-            services = [{"alias": "coding", "apis": []}]
+            services: list[dict] = []
             base = {
                 "canonical_alias": "route",
                 "source_doc_key": "development_route",
