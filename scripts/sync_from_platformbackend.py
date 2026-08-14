@@ -62,6 +62,7 @@ EXCLUDED_SERVICES = {
     "riffusion",
     "udio",
 }
+DOC_ONLY_SERVICES = {"coding"}
 
 SKIP_DOC_KEYS = {
     "acedataext",
@@ -767,7 +768,7 @@ def load_exact_doc_records(
     if bundle.get("schema_version") != 1 or not isinstance(records, list):
         raise RuntimeError("Invalid Coding document map")
 
-    aliases = {service["alias"] for service in services}
+    aliases = {service["alias"] for service in services} | DOC_ONLY_SERVICES
     result: dict[str, dict[str, str]] = {}
     output_paths: set[str] = set()
     for record in records:
