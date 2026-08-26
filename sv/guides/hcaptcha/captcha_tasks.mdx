@@ -3,7 +3,7 @@ title: "Verifieringskodens uppgiftssökning API (asynkron polling) integrationsb
 description: "hCaptcha verification code recognition service API guide - Ace Data Cloud"
 ---
 
-Denna artikel beskriver det asynkrona uppgiftssökningsgränssnittet för verifieringskoder `POST /captcha/tasks`. När du anropar valfritt verifieringskodgränssnitt (token-serien eller recognition-serien) och skickar in `async: true`, kommer gränssnittet omedelbart att returnera ett `task_id`, som du sedan kan använda för att pollera detta gränssnitt för att få det slutgiltiga resultatet. Lämplig för scenarier som rotation av flera kodlösare (multi-solver rotation): efter att ha skickat in uppgiften får du omedelbart `task_id`, går först för att schemalägga andra kodlösare och kommer tillbaka senare för att hämta resultatet.
+Denna artikel beskriver det asynkrona uppgiftssökningsgränssnittet för verifieringskoder `POST /captcha/tasks`. När du anropar valfritt verifieringskodgränssnitt (token-serien eller recognition-serien) och skickar in `async: true`, kommer gränssnittet omedelbart att returnera ett `task_id`, som du sedan kan använda för att pollera detta gränssnitt för att få det slutgiltiga resultatet. Lämplig för scenarier som multi-solver rotation: efter att ha skickat in uppgiften får du omedelbart `task_id`, går först för att schemalägga andra verifieringskoder och kommer tillbaka senare för att hämta resultatet.
 
 > 📘 Fullständig interaktiv dokumentation (inklusive online testning): [Verifieringskodens uppgiftssökning API →](https://platform.acedata.cloud/documents/captcha-tasks)
 
@@ -15,7 +15,7 @@ För att använda detta gränssnitt, gå först till [Ace Data Cloud-konsolen](h
 
 ### Steg ett: Skapa uppgift asynkront
 
-I begärningskroppen för valfritt verifieringskodgränssnitt, skicka in `async: true`, gränssnittet kommer omedelbart att returnera `task_id` (HTTP 201) utan att blockera väntan:
+Skicka in `async: true` i begärningskroppen för valfritt verifieringskodgränssnitt, gränssnittet kommer omedelbart att returnera `task_id` (HTTP 201) utan att blockera väntan:
 
 ```shell
 curl -X POST 'https://api.acedata.cloud/captcha/token/recaptcha2' \
@@ -60,7 +60,7 @@ Under bearbetning kommer `status: processing` att returneras:
 }
 ```
 
-När bearbetningen är klar kommer `status: ready` att returneras tillsammans med motsvarande resultatfält - fältstrukturen är helt identisk med den synkrona modellen:
+När bearbetningen är klar kommer `status: ready` och motsvarande resultatfält att returneras - fältstrukturen är helt identisk med den synkrona modellen:
 
 - **token-serien** (hcaptcha, recaptcha2, recaptcha3) returnerar `token`:
 
@@ -80,23 +80,39 @@ När bearbetningen är klar kommer `status: ready` att returneras tillsammans me
 
 `/captcha/tasks` är gemensam för alla verifieringskodgränssnitt (token och recognition-serier), använd samma `task_id` för att pollera.
 
-Svaret med `status: ready` kommer också att innehålla tidsfält.
+Om uppgiften inte kan slutföras inom giltig tid kommer HTTP 504 att returneras. Detta tillstånd är ett slutligt tillstånd, klienten bör sluta pollera; att upprepade gånger fråga samma `task_id` kommer att stabilt returnera samma misslyckade resultat:
+
+```json
+{
+  "detail": "The captcha task timed out.",
+  "code": "timeout",
+  "success": false,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "failed",
+  "started_at": 1784885653.0,
+  "finished_at": 1784885765.4,
+  "elapsed": 112.4
+}
+```
+
+Både `status: ready` och HTTP 504:s slutliga svar kommer att innehålla tidsfält.
 
 - `started_at`, tidpunkten då uppgiften började bearbetas, Unix-tidsstämpel (sekunder, flyttal).
-- `finished_at`, tidpunkten då uppgiften producerade resultat, Unix-tidsstämpel (sekunder, flyttal). Detta fält returneras inte om det fortfarande bearbetas.
-- `elapsed`, tiden som uppgiften tog att bearbeta, enhet i sekunder (flyttal, behåll 3 decimaler). Detta fält returneras inte om det fortfarande bearbetas.
+- `finished_at`, tidpunkten då uppgiften producerade resultat, Unix-tidsstämpel (sekunder, flyttal). Detta fält returneras inte om den fortfarande är under bearbetning.
+- `elapsed`, tiden som uppgiften tog att bearbeta, enhet i sekunder (flyttal, med 3 decimaler). Detta fält returneras inte om den fortfarande är under bearbetning.
 
 ## Avgiftsbeskrivning
 
-I asynkront läge debiteras varken skapandet av uppgifter eller polling av "bearbetning"; **debiteras endast en gång när resultatet framgångsrikt hämtas** (samma pris som i synkront läge). Därför kommer avbokning av uppgifter som ännu inte är slutförda under rotationen inte att medföra kostnader.
+I asynkront läge debiteras varken skapande av uppgifter eller polling av "bearbetning"; **debiteras endast en gång när resultatet har hämtats framgångsrikt** (samma pris som i den synkrona modellen). HTTP 504 slutligt misslyckande debiteras inte heller. Därför, att avbryta uppgifter som inte har slutförts i rotationen, eller om uppgiften slutligen misslyckas, kommer inte att medföra kostnader.
 
 ## Felhantering
 
-När du anropar detta gränssnitt, om du stöter på ett fel, kommer motsvarande felkod och meddelande att returneras. Till exempel:
+När du anropar detta gränssnitt, om du stöter på fel, kommer motsvarande felkod och information att returneras. Till exempel:
 
-- `400 invalid_request`: Begäran saknar parameter `task_id`.
-- `401 invalid_token`: Ej auktoriserad, auktoriseringstoken ogiltig eller saknas.
+- `400 invalid_request`: Begäran saknar `task_id`-parameter.
+- `401 invalid_token`: Ej auktoriserad, auktoriseringstoken är ogiltig eller saknas.
 - `404 not_found`: `task_id` finns inte, eller tillhör inte det aktuella kontot.
+- `504 timeout`: Uppgiften har avbrutits och har inte producerat resultat; vänligen sluta pollera detta `task_id`. Detta misslyckande debiteras inte.
 
 ### Exempel på felrespons
 

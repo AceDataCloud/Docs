@@ -1,9 +1,9 @@
 ---
-title: "API do zapytania o zadania CAPTCHA (asynchroniczne polling)"
+title: "API do zapytania o zadania CAPTCHA (asynchroniczne sprawdzanie)"
 description: "hCaptcha verification code recognition service API guide - Ace Data Cloud"
 ---
 
-Niniejszy dokument przedstawia interfejs zapytania o asynchroniczne zadania CAPTCHA `POST /captcha/tasks`. Gdy wywołujesz dowolny interfejs CAPTCHA (seria tokenów lub seria rozpoznawania) z parametrem `async: true`, interfejs natychmiast zwraca `task_id`, a następnie możesz użyć tego `task_id` do pollingowania tego interfejsu w celu uzyskania ostatecznego wyniku. Odpowiedni do scenariuszy rotacji wielu rozwiązywaczy (multi-solver rotation): po złożeniu zadania natychmiast otrzymujesz `task_id`, aby najpierw zlecić inne rozwiązywacze, a później wrócić po wyniki.
+Niniejszy dokument przedstawia interfejs zapytania o asynchroniczne zadania CAPTCHA `POST /captcha/tasks`. Gdy wywołujesz dowolny interfejs CAPTCHA (seria tokenów lub seria rozpoznawania) z parametrem `async: true`, interfejs natychmiast zwraca `task_id`, a następnie możesz użyć tego `task_id` do sprawdzania wyników w tym interfejsie. Odpowiedni do scenariuszy rotacji wielu rozwiązywaczy (multi-solver rotation): po złożeniu zadania natychmiast otrzymujesz `task_id`, aby najpierw zlecić inne rozwiązywacze, a później wrócić po wyniki.
 
 > 📘 Pełna interaktywna dokumentacja (w tym online debugging): [API do zapytania o zadania CAPTCHA →](https://platform.acedata.cloud/documents/captcha-tasks)
 
@@ -36,9 +36,9 @@ curl -X POST 'https://api.acedata.cloud/captcha/token/recaptcha2' \
 }
 ```
 
-### Krok drugi: polling wyników za pomocą task_id
+### Krok drugi: sprawdzanie wyników za pomocą task_id
 
-Użyj `task_id` zwróconego w poprzednim kroku do pollingowania `POST /captcha/tasks` (zaleca się co 3-5 sekund):
+Użyj `task_id` zwróconego w poprzednim kroku do sprawdzania `POST /captcha/tasks` (zaleca się co 3-5 sekund):
 
 ```shell
 curl -X POST 'https://api.acedata.cloud/captcha/tasks' \
@@ -60,7 +60,7 @@ W trakcie przetwarzania zwróci `status: processing`:
 }
 ```
 
-Po zakończeniu przetwarzania zwróci `status: ready` oraz odpowiadające pola wynikowe — struktura pól jest całkowicie zgodna z trybem synchronicznym:
+Po zakończeniu przetwarzania zwróci `status: ready` oraz odpowiednie pole z wynikiem — struktura pól jest całkowicie zgodna z trybem synchronizacji:
 
 - **seria tokenów** (hcaptcha, recaptcha2, recaptcha3) zwraca `token`:
 
@@ -78,17 +78,32 @@ Po zakończeniu przetwarzania zwróci `status: ready` oraz odpowiadające pola w
 
 - **klasyfikacja rozpoznawania** (recognition/recaptcha2, recognition/hcaptcha) zwraca `solution`; **recognition/image2text** zwraca `text`.
 
-`/captcha/tasks` jest uniwersalne dla wszystkich interfejsów CAPTCHA (seria tokenów i rozpoznawania), można używać tego samego `task_id` do pollingowania.
+`/captcha/tasks` jest uniwersalne dla wszystkich interfejsów CAPTCHA (seria tokenów i rozpoznawania), można używać tego samego `task_id` do sprawdzania.
 
-Odpowiedź `status: ready` zawiera również pola czasowe.
+Jeśli zadanie nie może zostać zakończone w określonym czasie, zwróci HTTP 504. Ten status jest końcowy, klient powinien zaprzestać sprawdzania; powtarzające się zapytania o ten sam `task_id` będą stabilnie zwracać ten sam wynik błędu:
+
+```json
+{
+  "detail": "Zadanie CAPTCHA przekroczyło czas oczekiwania.",
+  "code": "timeout",
+  "success": false,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "failed",
+  "started_at": 1784885653.0,
+  "finished_at": 1784885765.4,
+  "elapsed": 112.4
+}
+```
+
+Zarówno odpowiedzi końcowe `status: ready`, jak i HTTP 504 będą zawierały pola czasowe.
 
 - `started_at`, czas rozpoczęcia przetwarzania zadania, znacznik czasu Unix (sekundy, liczba zmiennoprzecinkowa).
 - `finished_at`, czas uzyskania wyniku zadania, znacznik czasu Unix (sekundy, liczba zmiennoprzecinkowa). Nie jest zwracane, gdy nadal jest w trakcie przetwarzania.
 - `elapsed`, czas przetwarzania zadania, jednostka to sekundy (liczba zmiennoprzecinkowa, z dokładnością do 3 miejsc po przecinku). Nie jest zwracane, gdy nadal jest w trakcie przetwarzania.
 
-## Opis rozliczeń
+## Informacje o opłatach
 
-W trybie asynchronicznym, tworzenie zadań i polling „w trakcie przetwarzania” nie jest obciążane opłatami; **opłata jest naliczana tylko raz, gdy uzyskasz wynik** (cena jest zgodna z trybem synchronicznym). Dlatego anulowanie zadań, które nie zostały jeszcze zakończone w rotacji, nie generuje kosztów.
+W trybie asynchronicznym, tworzenie zadań i sprawdzanie „w trakcie przetwarzania” nie jest płatne; **opłata jest naliczana tylko raz, gdy uzyskasz wynik** (cena zgodna z trybem synchronizacji). Odpowiedź końcowa HTTP 504 również nie jest płatna. Dlatego w przypadku rotacji anulowanie zadań, które nie zostały jeszcze zakończone, lub ostateczne niepowodzenie zadania, nie generuje kosztów.
 
 ## Obsługa błędów
 
@@ -97,6 +112,7 @@ Podczas wywoływania tego interfejsu, jeśli napotkasz błąd, zwróci odpowiedn
 - `400 invalid_request`: Żądanie brakuje parametru `task_id`.
 - `401 invalid_token`: Brak autoryzacji, token autoryzacyjny jest nieprawidłowy lub brakujący.
 - `404 not_found`: `task_id` nie istnieje lub nie należy do bieżącego konta.
+- `504 timeout`: Zadanie zostało zakończone i nie wygenerowało wyniku; proszę zaprzestać sprawdzania tego `task_id`. Ta porażka nie będzie obciążona opłatą.
 
 ### Przykład odpowiedzi błędu
 
@@ -105,7 +121,7 @@ Podczas wywoływania tego interfejsu, jeśli napotkasz błąd, zwróci odpowiedn
   "success": false,
   "error": {
     "code": "not_found",
-    "message": "task not found"
+    "message": "zadanie nie znalezione"
   }
 }
 ```
