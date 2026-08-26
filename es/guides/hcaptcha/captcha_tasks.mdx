@@ -1,15 +1,15 @@
 ---
-title: "API de consulta de tareas de captcha (sondeo asíncrono) - Instrucciones de integración"
+title: "API de consulta de tareas de captcha (tarea asíncrona del servidor) - Instrucciones de integración"
 description: "hCaptcha verification code recognition service API guide - Ace Data Cloud"
 ---
 
-Este documento presenta la interfaz de consulta de tareas asíncronas de captcha `POST /captcha/tasks`. Cuando llames a cualquier interfaz de captcha (serie de token o serie de reconocimiento) pasando `async: true`, la interfaz devolverá inmediatamente un `task_id`, que luego podrás usar para sondear esta interfaz y obtener el resultado final. Es adecuado para escenarios de rotación de múltiples decodificadores (multi-solver rotation): después de enviar la tarea, obtienes inmediatamente el `task_id`, primero puedes programar otros decodificadores y luego volver más tarde para obtener el resultado.
+Este documento presenta la interfaz de consulta de tareas asíncronas de captcha `POST /captcha/tasks`. Cuando llamas a cualquier interfaz de captcha (serie de token o serie de reconocimiento) y pasas `async: true`, la interfaz devolverá inmediatamente un `task_id`, el servidor tomará el control y continuará procesando; puedes usar ese `task_id` para consultar el resultado final, pero la consulta no es un requisito para que la tarea continúe ejecutándose. Es adecuado para escenarios como la rotación de múltiples solucionadores (multi-solver rotation): después de enviar la tarea, obtienes inmediatamente el `task_id`, primero puedes programar otros solucionadores y luego volver más tarde para leer el resultado.
 
 > 📘 Documentación interactiva completa (incluida la depuración en línea): [API de consulta de tareas de captcha →](https://platform.acedata.cloud/documents/captcha-tasks)
 
 ## Proceso de solicitud
 
-Para usar esta interfaz, primero ve a [la consola de Ace Data Cloud](https://platform.acedata.cloud/console/applications) para obtener tu API Token, que debes guardar como respaldo. **Un API Token es suficiente para acceder a todos los servicios de la plataforma, no es necesario solicitar uno por cada servicio.**
+Para usar esta interfaz, primero ve a [la consola de Ace Data Cloud](https://platform.acedata.cloud/console/applications) para obtener tu API Token, que debes guardar como respaldo. **Un API Token es suficiente para llamar a todos los servicios de la plataforma, no es necesario solicitar uno por cada servicio.**
 
 ## Uso básico
 
@@ -36,9 +36,9 @@ curl -X POST 'https://api.acedata.cloud/captcha/token/recaptcha2' \
 }
 ```
 
-### Paso 2: Sondear resultados con task_id
+### Paso 2 (opcional): Consultar resultados con task_id
 
-Usa el `task_id` devuelto en el paso anterior para sondear `POST /captcha/tasks` (se recomienda cada 3~5 segundos):
+Si deseas ver el progreso de manera proactiva, puedes usar el `task_id` devuelto en el paso anterior para consultar `POST /captcha/tasks` (se recomienda cada 3 a 5 segundos). Esta interfaz no activará ni avanzará el procesamiento de la tarea; al leer los resultados listos, se mantiene el comportamiento de liquidación única existente:
 
 ```shell
 curl -X POST 'https://api.acedata.cloud/captcha/tasks' \
@@ -50,7 +50,7 @@ curl -X POST 'https://api.acedata.cloud/captcha/tasks' \
 }'
 ```
 
-Durante el procesamiento, se devolverá `status: processing`:
+Mientras se procesa, devolverá `status: processing`:
 
 ```json
 {
@@ -60,7 +60,7 @@ Durante el procesamiento, se devolverá `status: processing`:
 }
 ```
 
-Cuando el procesamiento esté completo, se devolverá `status: ready` y el campo de resultado correspondiente; la estructura del campo es completamente consistente con el modo sincrónico:
+Cuando se complete el procesamiento, devolverá `status: ready` y el campo de resultado correspondiente; la estructura del campo es completamente consistente con el modo sincrónico:
 
 - **Serie de token** (hcaptcha, recaptcha2, recaptcha3) devuelve `token`:
 
@@ -78,13 +78,13 @@ Cuando el procesamiento esté completo, se devolverá `status: ready` y el campo
 
 - **Clasificación de reconocimiento** (recognition/recaptcha2, recognition/hcaptcha) devuelve `solution`; **recognition/image2text** devuelve `text`.
 
-`/captcha/tasks` es común para todas las interfaces de captcha (serie de token y reconocimiento), puedes usar el mismo `task_id` para sondear.
+`/captcha/tasks` es común para todas las interfaces de captcha (serie de token y reconocimiento), se puede hacer polling con el mismo `task_id`.
 
-Si la tarea no puede completarse dentro del tiempo válido, se devolverá HTTP 504. Este estado es terminal, el cliente debe detener el sondeo; consultar repetidamente el mismo `task_id` devolverá consistentemente el mismo resultado de fallo:
+El servidor continuará procesando desde el momento de la creación, durante un máximo de 120 segundos. Si en la última consulta antes de la fecha límite aún no se obtiene un resultado, se persistirá un HTTP 504. Este estado es terminal, el cliente debe detener el polling; consultar repetidamente el mismo `task_id` devolverá de manera estable el mismo resultado de fallo:
 
 ```json
 {
-  "detail": "La tarea de captcha ha superado el tiempo de espera.",
+  "detail": "La tarea de captcha ha agotado el tiempo.",
   "code": "timeout",
   "success": false,
   "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
@@ -97,22 +97,22 @@ Si la tarea no puede completarse dentro del tiempo válido, se devolverá HTTP 5
 
 Las respuestas terminales de `status: ready` y HTTP 504 incluirán campos de temporización.
 
-- `started_at`, tiempo de inicio del procesamiento de la tarea, marca de tiempo Unix (segundos, flotante).
-- `finished_at`, tiempo de producción del resultado de la tarea, marca de tiempo Unix (segundos, flotante). No se devuelve este campo si aún se está procesando.
-- `elapsed`, tiempo de procesamiento de la tarea, en segundos (flotante, con 3 decimales). No se devuelve este campo si aún se está procesando.
+- `started_at`, hora de inicio del procesamiento de la tarea, marca de tiempo Unix (segundos, flotante).
+- `finished_at`, hora de producción del resultado de la tarea, marca de tiempo Unix (segundos, flotante). Este campo no se devuelve mientras se esté procesando.
+- `elapsed`, tiempo de procesamiento de la tarea, en segundos (flotante, con 3 decimales). Este campo no se devuelve mientras se esté procesando.
 
 ## Instrucciones de facturación
 
-En modo asíncrono, la creación de tareas y el sondeo "en procesamiento" no se facturan; **solo se factura una vez al obtener el resultado con éxito** (el mismo precio que en modo sincrónico). El estado de fallo terminal HTTP 504 tampoco se factura. Por lo tanto, cancelar tareas que aún no se han completado en la rotación, o que finalmente fallan, no generará costos.
+En modo asíncrono, la creación de tareas y la lectura del estado "en procesamiento" no se facturan; **se factura una vez al cliente cuando lee el resultado exitoso por primera vez** (consistente con el comportamiento existente y el precio del modo sincrónico). El servidor avanzará la tarea de forma autónoma, pero no cobrará anticipadamente porque el backend complete antes. Las tareas que no se completen dentro de los 120 segundos de la fecha límite se terminan con HTTP 504 y no se facturan.
 
 ## Manejo de errores
 
-Al llamar a esta interfaz, si encuentras un error, se devolverá el código y la información de error correspondiente. Por ejemplo:
+Al llamar a esta interfaz, si se encuentra con un error, se devolverá el código de error y la información correspondiente. Por ejemplo:
 
 - `400 invalid_request`: falta el parámetro `task_id` en la solicitud.
-- `401 invalid_token`: no autorizado, el Token de autorización es inválido o está ausente.
+- `401 invalid_token`: no autorizado, el token de autorización es inválido o está ausente.
 - `404 not_found`: `task_id` no existe o no pertenece a la cuenta actual.
-- `504 timeout`: la tarea ha sido terminada y no ha producido resultados; por favor, detén el sondeo de ese `task_id`. Este fallo no incurre en costos.
+- `504 timeout`: la tarea ha sido terminada y no ha producido resultados; por favor, detén el polling de ese `task_id`. Este fallo no generará cargos.
 
 ### Ejemplo de respuesta de error
 
