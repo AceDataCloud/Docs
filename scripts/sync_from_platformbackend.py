@@ -529,6 +529,10 @@ def clean_schema(value: Any) -> Any:
             cleaned["type"] = "integer"
         elif key == "const":
             cleaned["enum"] = [item]
+        elif key in {"exclusiveMinimum", "exclusiveMaximum"} and isinstance(item, (int, float)) and not isinstance(item, bool):
+            bound = "minimum" if key == "exclusiveMinimum" else "maximum"
+            cleaned[bound] = item
+            cleaned[key] = True
         elif key in {"items", "additionalProperties", "not"}:
             cleaned[key] = clean_schema(item)
         elif key == "properties" and isinstance(item, dict):
@@ -540,6 +544,26 @@ def clean_schema(value: Any) -> Any:
 
     if cleaned.get("required") == []:
         cleaned.pop("required")
+    return cleaned
+
+
+def clean_media_type(media_type: dict[str, Any], valid_keys: set[str]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    has_examples = isinstance(media_type.get("examples"), dict)
+    for key, item in media_type.items():
+        if key not in valid_keys or (key == "example" and has_examples):
+            continue
+        if key == "schema":
+            cleaned[key] = clean_schema(item)
+        elif key == "examples" and isinstance(item, dict):
+            cleaned[key] = {
+                name: example
+                if isinstance(example, dict) and any(field in example for field in ("value", "$ref", "externalValue", "summary", "description"))
+                else {"value": example}
+                for name, example in item.items()
+            }
+        else:
+            cleaned[key] = item
     return cleaned
 
 
@@ -568,11 +592,7 @@ def clean_openapi_spec(spec: dict[str, Any]) -> dict[str, Any]:
                 }
                 if isinstance(next_request_body.get("content"), dict):
                     next_request_body["content"] = {
-                        content_type: {
-                            key: clean_schema(item) if key == "schema" else item
-                            for key, item in media_type.items()
-                            if key in media_type_keys
-                        }
+                        content_type: clean_media_type(media_type, media_type_keys)
                         for content_type, media_type in next_request_body["content"].items()
                         if isinstance(media_type, dict)
                     }
@@ -589,11 +609,7 @@ def clean_openapi_spec(spec: dict[str, Any]) -> dict[str, Any]:
                     next_response.setdefault("description", "Response")
                     if isinstance(next_response.get("content"), dict):
                         next_response["content"] = {
-                            content_type: {
-                                key: clean_schema(item) if key == "schema" else item
-                                for key, item in media_type.items()
-                                if key in media_type_keys
-                            }
+                            content_type: clean_media_type(media_type, media_type_keys)
                             for content_type, media_type in next_response["content"].items()
                             if isinstance(media_type, dict)
                         }
@@ -612,6 +628,12 @@ def clean_openapi_spec(spec: dict[str, Any]) -> dict[str, Any]:
         cleaned_paths[path] = next_path_item
 
     cleaned["paths"] = cleaned_paths
+    components = cleaned.get("components")
+    if isinstance(components, dict) and isinstance(components.get("schemas"), dict):
+        cleaned["components"] = dict(components)
+        cleaned["components"]["schemas"] = {
+            name: clean_schema(schema) for name, schema in components["schemas"].items()
+        }
     return inline_path_refs(cleaned)
 
 
