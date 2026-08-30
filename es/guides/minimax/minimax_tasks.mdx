@@ -1,0 +1,296 @@
+---
+title: "MiniMax H3 Guía de integración de la API de consulta de tareas"
+description: "MiniMax H3 Video Generation API guide - Ace Data Cloud"
+---
+
+Este documento presenta la integración y el uso de la API de consulta de tareas de MiniMax H3. Esta interfaz se utiliza para consultar, listar en lote o eliminar tareas asíncronas creadas por la [API de generación de videos de MiniMax H3](/documents/minimax-videos-integration).
+
+## Proceso de solicitud
+
+Para utilizar la API de consulta de tareas de MiniMax H3, primero dirígete a la [Consola de Ace Data Cloud](https://platform.acedata.cloud/console/applications) para obtener tu Token de API, que debes guardar para uso futuro.
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Si aún no has iniciado sesión o registrado, serás redirigido automáticamente a la página de inicio de sesión que te invita a registrarte e iniciar sesión; una vez completado, serás devuelto automáticamente a la página actual.
+
+**Un Token de API es suficiente para acceder a todos los servicios de la plataforma, no es necesario solicitar uno por cada servicio.** La primera solicitud te otorgará un crédito gratuito para que puedas probarlo; si el crédito es insuficiente, puedes recargar el saldo general en la [consola](https://platform.acedata.cloud/console/coin).
+
+> 📘 Documentación completa: [API de consulta de tareas de MiniMax H3 →](https://platform.acedata.cloud/documents/minimax-tasks-integration)
+
+Al consultar tareas, debes usar el mismo Token que se utilizó para crear la tarea. Se recomienda guardar el Token como una variable de entorno y no escribirlo en el código fuente ni enviarlo al repositorio:
+
+```bash
+export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
+```
+
+## Resumen de la interfaz
+
+- **URL base**: `https://api.acedata.cloud`
+- **Endpoint**: `POST /minimax/tasks`
+- **Método de autenticación**: Incluir `authorization: Bearer {token}` en el encabezado HTTP
+- **Encabezados de solicitud**:
+  - `accept: application/json`
+  - `content-type: application/json`
+- **Consultar una tarea individual**: `action=retrieve`, pasar `id`
+- **Consultar tareas en lote**: `action=retrieve_batch`, se puede filtrar por ID de tarea, rango de tiempo y condiciones de paginación
+- **Eliminar tarea**: `action=delete`, pasar `id`
+- **Descripción de facturación**: La consulta de tareas es gratuita y no generará cargos duplicados
+
+Después de crear un video, debes guardar `task_id`. Se recomienda consultar aproximadamente cada 10 segundos hasta que la tarea entre en un estado terminal.
+
+## Parámetros de solicitud
+
+| Parámetro            | Tipo      | Requerido | Acción aplicable          | Descripción                                           |
+| ------------------- | --------- | --------- | ------------------------- | ---------------------------------------------------- |
+| `action`            | string    | No        | Todas                    | `retrieve`, `retrieve_batch` o `delete`; por defecto `retrieve` |
+| `id`                | string    | Requerido en condiciones | `retrieve`, `delete` | ID de tarea individual                                 |
+| `ids`               | string[]  | No        | `retrieve_batch`         | Solo devuelve los ID de tareas especificados; si se omite, se listan las tareas según otros criterios |
+| `limit`             | integer   | No        | `retrieve_batch`         | Número máximo de tareas a devolver en esta ocasión    |
+| `offset`            | integer   | No        | `retrieve_batch`         | Número de tareas a omitir de la lista de resultados, utilizado para paginación |
+| `created_at_min`    | number    | No        | `retrieve_batch`         | Límite inferior de tiempo de creación, marca de tiempo Unix, en segundos |
+| `created_at_max`    | number    | No        | `retrieve_batch`         | Límite superior de tiempo de creación, marca de tiempo Unix, en segundos |
+
+Los usos de las tres acciones son los siguientes:
+
+| `action`            | Uso                                   | Parámetros necesarios                  | Estructura de respuesta                          |
+| ------------------- | ------------------------------------- | -------------------------------------- | ------------------------------------------------ |
+| `retrieve`          | Consultar el estado y resultado de una tarea | `id`                                  | `{ "task": {...} }`                             |
+| `retrieve_batch`    | Consultar en lote por ID de tarea, tiempo y condiciones de paginación | Opcional `ids`, rango de tiempo, `offset`, `limit` | `{ "items": [...], "total": number }`          |
+| `delete`            | Cancelar o eliminar el registro de tarea según el estado actual de la tarea | `id`                                  | `{ "id": "...", "deleted": true }`             |
+
+## Consultar una tarea individual
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "action": "retrieve",
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f"
+  }'
+```
+
+A continuación se muestra una respuesta de una tarea exitosa real:
+
+```json
+{
+  "task": {
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f",
+    "model": "MiniMax-H3",
+    "status": "succeeded",
+    "created_at": 1786184658,
+    "updated_at": 1786184758,
+    "content": {
+      "url": "https://platform2.cdn.acedata.cloud/minimax/f5977217-ed2c-40da-adbe-93d08235618f.mp4"
+    },
+    "resolution": "768P",
+    "duration": 4,
+    "usage": {
+      "total_seconds": 4,
+      "input_seconds": 0,
+      "output_seconds": 4,
+      "input_image_count": 0
+    },
+    "ratio": "16:9",
+    "task_type": "generation",
+    "modality": "video"
+  }
+}
+```
+
+[Abre el resultado de video real de esta tarea](https://platform2.cdn.acedata.cloud/minimax/f5977217-ed2c-40da-adbe-93d08235618f.mp4)
+
+## Estado de la tarea
+
+| `status`     | Significado                     | Manejo del cliente                |
+| ------------ | ------------------------------- | --------------------------------- |
+| `queued`     | En cola, esperando ejecución    | Continuar consultando             |
+| `running`    | Generando                       | Continuar consultando             |
+| `succeeded`  | Generación exitosa              | Leer `task.content.url`, detener la consulta |
+| `failed`     | Generación fallida              | Leer `task.error`, detener la consulta |
+| `cancelled`  | Tarea cancelada                 | Detener la consulta               |
+
+`succeeded`, `failed` y `cancelled` son estados terminales. No continúes consultando después de entrar en un estado terminal.
+
+## Campos de respuesta de task
+
+| Campo                      | Tipo     | Descripción                                      |
+| ------------------------- | -------- | ------------------------------------------------ |
+| `id`                      | string   | ID de la tarea                                   |
+| `model`                   | string   | Modelo utilizado para la tarea, actualmente `MiniMax-H3` |
+| `status`                  | string   | Estado actual de la tarea                        |
+| `error.code`              | string   | Código de error en caso de fallo, solo se devuelve si falla |
+| `error.message`           | string   | Razón del fallo, solo se devuelve si falla      |
+| `created_at`              | integer  | Tiempo de creación, marca de tiempo Unix, en segundos |
+| `updated_at`              | integer  | Última vez que se actualizó el estado, marca de tiempo Unix, en segundos |
+| `content.url`             | string   | Dirección del video después de la generación exitosa |
+| `resolution`              | string   | Resolución de salida, `768P` o `2K`             |
+| `duration`                | integer  | Duración del video de salida, en segundos        |
+| `usage.total_seconds`     | integer  | Cantidad total de costos, igual a la suma de los segundos de video de entrada y salida |
+| `usage.input_seconds`     | integer  | Cantidad de costos generados por el video de entrada |
+| `usage.output_seconds`    | integer  | Cantidad de costos generados por el video de salida |
+| `usage.input_image_count` | integer  | Cantidad de imágenes de entrada en la estadística de costos |
+| `ratio`                   | string   | Relación de aspecto de salida real; cuando se usa `adaptive`, se basa en este resultado |
+| `task_type`               | string   | La tarea de generación de video es `generation`  |
+| `modality`                | string   | La tarea de video es `video`                     |
+
+## Ejemplo completo de Python para consulta en bucle
+以下代码从环境变量读取 Token，创建任务后每隔 10 秒查询一次：
+
+```python
+import os
+import time
+
+import requests
+
+BASE_URL = "https://api.acedata.cloud"
+HEADERS = {
+    "Authorization": f"Bearer {os.environ['ACEDATACLOUD_API_KEY']}",
+    "Content-Type": "application/json",
+}
+
+create_response = requests.post(
+    f"{BASE_URL}/minimax/videos",
+    headers=HEADERS,
+    json={
+        "model": "MiniMax-H3",
+        "content": [
+            {
+                "type": "text",
+                "text": "En la mañana, junto al mar, un velero blanco navega por la superficie tranquila del agua, la cámara se mueve lentamente de lado.",
+            }
+        ],
+        "resolution": "768P",
+        "duration": 4,
+        "ratio": "16:9",
+    },
+    timeout=30,
+)
+create_response.raise_for_status()
+task_id = create_response.json()["task_id"]
+
+while True:
+    time.sleep(10)
+    query_response = requests.post(
+        f"{BASE_URL}/minimax/tasks",
+        headers=HEADERS,
+        json={"action": "retrieve", "id": task_id},
+        timeout=30,
+    )
+    query_response.raise_for_status()
+    task = query_response.json()["task"]
+    print(f"task={task_id} status={task['status']}")
+
+    if task["status"] == "succeeded":
+        print(f"video_url={task['content']['url']}")
+        break
+    if task["status"] in ("failed", "cancelled"):
+        raise RuntimeError(task.get("error") or task["status"])
+```
+
+Producción debe establecer un tiempo de espera total para la consulta y usar retroceso exponencial para `429` y `5xx` temporales. Un tiempo de espera de red no equivale a un fallo en la generación, se puede seguir consultando con el mismo `task_id`.
+
+## Consulta por lotes
+
+Especificar múltiples IDs de tarea:
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": ["TASK_ID_1", "TASK_ID_2"],
+    "offset": 0,
+    "limit": 20
+  }'
+```
+
+Listar tareas paginadas por rango de tiempo:
+
+```json
+{
+  "action": "retrieve_batch",
+  "created_at_min": 1786000000,
+  "created_at_max": 1786200000,
+  "offset": 0,
+  "limit": 20
+}
+```
+
+En la respuesta por lotes, `items` utiliza los mismos campos de tarea que la consulta de una sola tarea, `total` es el número total de tareas que coinciden con los criterios de filtrado:
+
+```json
+{
+  "items": [
+    {
+      "id": "TASK_ID_1",
+      "model": "MiniMax-H3",
+      "status": "running",
+      "resolution": "2K",
+      "duration": 5,
+      "ratio": "adaptive",
+      "task_type": "generation",
+      "modality": "video"
+    }
+  ],
+  "total": 1
+}
+```
+
+La ventana de consulta de tareas es de los últimos 7 días. Los `task_id` que excedan esta ventana pueden devolver tareas no válidas; el sistema de negocio debe guardar el ID al crear la tarea y persistir la URL del resultado de manera oportuna después de que se complete con éxito.
+
+## Cancelar o eliminar tareas
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "action": "delete",
+    "id": "YOUR_TASK_ID"
+  }'
+```
+
+La acción depende del estado actual de la tarea:
+
+| Estado actual   | Comportamiento                     |
+| --------------- | ---------------------------------- |
+| `queued`       | Cancelar tareas que aún no han comenzado |
+| `succeeded`    | Eliminar el registro de la tarea   |
+| `failed`       | Eliminar el registro de la tarea   |
+| `running`      | No se permite eliminar o cancelar, devuelve un error |
+| `cancelled`    | No se permite repetir la operación, devuelve un error |
+
+Ejemplo de eliminación exitosa:
+
+```json
+{
+  "id": "YOUR_TASK_ID",
+  "deleted": true
+}
+```
+
+Eliminar el registro de la tarea no revoca la facturación ya completada, ni garantiza que las copias de video guardadas se eliminen simultáneamente.
+
+## Respuestas de error y diagnóstico
+
+Las tareas fallidas aún devuelven un objeto de tarea con HTTP 200, y la razón se da en `task.error`:
+
+```json
+{
+  "task": {
+    "id": "YOUR_TASK_ID",
+    "model": "MiniMax-H3",
+    "status": "failed",
+    "error": {
+      "code": "1026",
+      "message": "la descripción del video contiene contenido sensible"
+    },
+    "task_type": "generation",
+    "modality": "video"
+  }
+}
+```
+
+Si la interfaz devuelve `400`, se debe verificar `action` y los parámetros de condición; `401` indica que el Token es inválido, `429` indica que las consultas son demasiado frecuentes, `500` indica que el servicio está temporalmente no disponible. Las tareas que fallan en la generación no se facturan; las tareas exitosas registran el uso según el `usage` final.

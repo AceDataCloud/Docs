@@ -1,0 +1,192 @@
+---
+title: "OpenAI röstigenkänning API (/v1/audio/transcriptions)"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+Översätt ljud till text, **helt kompatibel med OpenAI:s `/v1/audio/transcriptions`**. Alla OpenAI SDK:er behöver bara peka `base_url` till `https://api.acedata.cloud` och byta ut nyckeln mot din AceData Token för att använda den direkt. Stöder både vanliga fullständiga svar och `gpt-transcribe` SSE inkrementell transkription.
+
+- **Begärningsadress**: `POST https://api.acedata.cloud/v1/audio/transcriptions` (alias `POST /openai/audio/transcriptions`)
+- **Autentisering**: Begärningshuvud `Authorization: Bearer {token}`
+- **Begärningsformat**: `multipart/form-data`
+- **Avgift**: Avgift baserat på ljudets längd (se tabellen nedan), mindre än 1 sekund räknas som 1 sekund.
+
+## Begärningsparametrar
+
+| Fält                          | Typ      | Obligatoriskt  | Beskrivning                                                                                         |
+| --------------------------- | ------- | --- | ------------------------------------------------------------------------------------------ |
+| `file`                      | fil     | Ja   | Ljudfilen som ska transkriberas, max 25 MB. Stöder `flac`, `mp3`, `mp4`, `mpeg`, `mpga`, `m4a`, `ogg`, `wav`, `webm`.            |
+| `model`                     | sträng  | Nej   | `whisper-1` (standard) eller `gpt-transcribe`, skillnader i kapacitet se tabellen nedan.                                                 |
+| `language`                  | sträng  | Nej   | Ljudets språk, ISO-639-1 kod (t.ex. `zh`, `en`). Att fylla i kan öka noggrannhet och hastighet; lämnas tomt för automatisk identifiering.                                        |
+| `prompt`                    | sträng  | Nej   | Promptord för att styra skrivstilen, eller ge specifika termer för att öka igenkänningens noggrannhet.                                                           |
+| `response_format`           | sträng  | Nej   | `whisper-1`: `json` (standard), `text`, `srt`, `verbose_json`, `vtt`; `gpt-transcribe`: endast `json`, `text`. |
+| `temperature`               | nummer  | Nej   | Samplings temperatur 0–1, standard 0.                                                                             |
+| `timestamp_granularities[]` | array   | Nej   | Tidsstämpel granularitet, `word` eller `segment`, måste användas med `response_format=verbose_json`.                            |
+| `languages[]`               | array   | Nej   | Kandidatspråk (ISO-639-1), **endast `gpt-transcribe`**. Ömsesidigt uteslutande med `language`, skicka inte båda samtidigt.                              |
+| `keywords[]`                | array   | Nej   | Specifika termer/prompt, **endast `gpt-transcribe`**, kan avsevärt öka noggrannheten för varumärken och personnamn.                                        |
+| `stream`                    | boolean | Nej   | När `gpt-transcribe` är inställt på `true` returneras SSE inkrementella händelser; `whisper-1` ignorerar denna parameter och returnerar fullständigt resultat (i enlighet med OpenAI:s officiella beteende).        |
+
+## Vilken modell ska väljas
+
+|                              | `whisper-1`      | `gpt-transcribe`      |
+| ---------------------------- | ---------------- | --------------------- |
+| Pris                           | $0.0078 / minut     | **$0.0059 / minut** (billigare) |
+| Noggrannhet i igenkänning                        | Bra               | **Bättre**, särskilt för varumärken och specifika termer    |
+| Undertextutdata (`srt`/`vtt`)            | ✅                | ❌                     |
+| Ord-nivå tidsstämplar                        | ✅                | ❌                     |
+| `languages[]` / `keywords[]` | ❌                | ✅                     |
+| Returnera det upptäckta språket                     | Kräver `verbose_json` | Returneras som standard                  |
+| SSE inkrementell återkomst                     | ❌ ( `stream` ignoreras)  | ✅                     |
+
+**Behöver undertexter eller ord-nivå tidsstämplar → `whisper-1`; för övriga scenarier rekommenderas `gpt-transcribe`** (mer exakt och billigare).
+
+## Exempel
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1
+```
+
+Svar:
+
+```json
+{
+  "text": "Ace Data Cloud Platform is testing the speech recognition endpoint. The quick brown fox jumps over the lazy dog."
+}
+```
+
+Kinesiska ljud stöds också, ingen språkidentifiering krävs:
+
+```json
+{
+  "text": "欢迎使用 AceData Cloud 平台,我们正在测试语音识别接口,今天是 7 月 31 号。"
+}
+```
+
+### Generera undertexter
+
+Sätt `response_format` till `srt` eller `vtt` för att direkt få en användbar undertextfil:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1 \
+  -F response_format=srt \
+  -o subtitle.srt
+```
+
+Returnerat innehåll (`Content-Type: text/plain`):
+
+```
+1
+00:00:00,000 --> 00:00:03,800
+Ace Data Cloud Platform is testing the speech recognition endpoint.
+
+2
+00:00:03,800 --> 00:00:06,280
+The quick brown fox jumps over the lazy dog.
+```
+
+### Ord-nivå tidsstämplar
+
+För att få start- och sluttider för varje ord, använd `verbose_json` tillsammans med `timestamp_granularities[]=word`:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1 \
+  -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word'
+```
+
+Svar:
+
+```json
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 6.29,
+  "text": "Ace Data Cloud Platform is testing the speech recognition endpoint. The quick brown fox jumps over the lazy dog.",
+  "words": [
+    {
+      "word": "Ace",
+      "start": 0.0,
+      "end": 0.32
+    },
+    {
+      "word": "Data",
+      "start": 0.32,
+      "end": 0.54
+    },
+    {
+      "word": "Cloud",
+      "start": 0.54,
+      "end": 0.86
+    }
+  ]
+}
+```
+
+### Strömmande transkription
+
+`gpt-transcribe` kan returnera `Content-Type: text/event-stream` genom att använda `stream=true`. Tjänsten skickar oförändrat OpenAI-kompatibla händelser:
+`transcript.text.delta` bär inkrementell text, `transcript.text.done` bär fullständig text och `usage` och indikerar normal avslutning.
+
+```shell
+curl -N -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=gpt-transcribe \
+  -F stream=true
+```
+
+Exempel på händelseflöde:
+
+```text
+data: {"type":"transcript.text.delta","delta":"Hello"}
+
+data: {"type":"transcript.text.done","text":"Hello world","usage":{"type":"tokens","input_tokens":14,"output_tokens":3,"total_tokens":17}}
+```
+
+Mottagandet av `transcript.text.done` indikerar att det har avslutats normalt. Om behandlingen misslyckas efter att strömmen har etablerats, avslutas anslutningen efter händelsen `event: error`; om klienten stänger av sig själv avbryts behandlingen och den fortsätter inte i bakgrunden. `whisper-1` returnerar fortfarande ett vanligt icke-strömmande svar även om `stream=true` anges.
+
+### Använda officiell SDK
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://api.acedata.cloud/v1", api_key="{token}")
+with open("audio.mp3", "rb") as f:
+    result = client.audio.transcriptions.create(model="whisper-1", file=f)
+print(result.text)
+```
+
+## Priser
+
+| Modell            | Vårt pris        |
+| ---------------- | ---------------- |
+| `whisper-1`      | $0.0078 / minut  |
+| `gpt-transcribe` | $0.0059 / minut  |
+
+> Avgiften baseras på den faktiska längden av ljudet, och om den är mindre än 1 sekund räknas den som 1 sekund, med en maximal längd på 1 timme per enskild transkription.
+
+## Viktiga punkter
+
+- Den maximala storleken för en enskild fil är **25 MB**. Om den överskrider detta, vänligen dela upp den eller komprimera (att sänka bithastigheten brukar vara tillräckligt, taligenkänning har inte höga krav på ljudkvalitet).
+- `gpt-transcribe` stöder `stream=true` SSE; `whisper-1` kommer att ignorera `stream` och returnera hela resultatet.
+- Parametrarna är i linje med OpenAI:s officiella `/v1/audio/transcriptions`, den officiella SDK:n behöver bara ändra `base_url` för att kunna användas.
+- `include[]`, `chunking_strategy`, `known_speaker_names[]`, `known_speaker_references[]` tillhör våra ännu inte lanserade transkriptionsmodeller, att skicka in dem kommer att returnera 400 istället för att tyst ignoreras. Modell-specifika parametrar (`timestamp_granularities[]` för `whisper-1`, `languages[]`/`keywords[]` för `gpt-transcribe`) kommer också att returnera 400 om de skickas till en modell som inte stöder dem.
+- Begärningar kan ta tid, det rekommenderas att klientens timeout-inställning inte är lägre än 300 sekunder.
+
+## Felkoder
+
+| Statuskod | kod                    | Beskrivning                                                                                                                                               |
+| --------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400       | `bad_request`         | `file` har inte angetts, filen kan inte tolkas, eller parametrarna är ogiltiga (`model`/`response_format` värden stöds inte, `temperature` över 0–1, `timestamp_granularities[]` utan `verbose_json`, skickade in parametrar som inte stöds av `whisper-1`). |
+| 401       | `authentication_failed` | Token är ogiltig.                                                                                                                                       |
+| 403       | `used_up`             | Otillräcklig balans.                                                                                                                                   |
+| 413       | `request_too_large`   | Ljudfilen överskrider 25 MB gränsen.                                                                                                                    |
+| 429       | `too_many_requests`    | Begärningarna är för frekventa, vänligen försök igen senare.                                                                                           |
+| 500       | `api_error`           | Intern serverfel, vänligen försök igen senare.                                                                                                          |

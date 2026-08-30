@@ -1,0 +1,360 @@
+---
+title: "Guía de integración de la API de generación de videos MiniMax H3"
+description: "MiniMax H3 Video Generation API guide - Ace Data Cloud"
+---
+
+Este documento presenta la integración y uso de la API de generación de videos MiniMax H3. Esta interfaz admite la generación de videos a partir de texto, control de fotogramas iniciales y finales, y videos generados a partir de referencias multimodales, utilizando una estructura unificada de `content` multimodal V2 para crear tareas.
+
+## Proceso de solicitud
+
+Para utilizar la API de generación de videos MiniMax H3, primero dirígete a [la consola de Ace Data Cloud](https://platform.acedata.cloud/console/applications) para obtener tu Token de API, que debes guardar como respaldo.
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Si aún no has iniciado sesión o registrado, serás redirigido automáticamente a la página de inicio de sesión que te invitará a registrarte e iniciar sesión; una vez completado, regresarás automáticamente a la página actual.
+
+**Un Token de API es suficiente para acceder a todos los servicios de la plataforma, no es necesario solicitar uno por cada servicio.** La primera solicitud incluirá un crédito gratuito para que puedas probarlo; si el crédito es insuficiente, puedes recargar el saldo general en [la consola](https://platform.acedata.cloud/console/coin).
+
+> 📘 Documentación completa: [API de generación de videos MiniMax H3 →](https://platform.acedata.cloud/documents/minimax-videos-integration)
+
+Se recomienda guardar el Token como una variable de entorno, no escribirlo en el código fuente ni enviarlo al repositorio:
+
+```bash
+export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
+```
+
+## Resumen de la interfaz
+
+- **Base URL**: `https://api.acedata.cloud`
+- **Endpoint**: `POST /minimax/videos`
+- **Método de autenticación**: Incluir `authorization: Bearer {token}` en el encabezado HTTP
+- **Encabezados de solicitud**:
+  - `accept: application/json`
+  - `content-type: application/json`
+- **Modelo (model)**: `MiniMax-H3`
+- **Estructura de entrada**: Transmitir texto, imágenes, videos y audio a través de `content`
+- **Modo de salida**: Por defecto, espera a que la generación se complete y devuelve la `task` completa; al pasar `async: true` o `callback_url`, devuelve inmediatamente `task_id` y `trace_id`
+- **Consulta de resultados**: Obtener estado y video final a través de [la API de consulta de tareas MiniMax H3](/documents/minimax-tasks-integration)
+- **Callback asíncrono**: Opcional, recibir el resultado final de la tarea a través de `callback_url`
+
+No necesitas pasar `action` para seleccionar el modo de generación, la interfaz determinará automáticamente el uso según el tipo de material en `content` y `role`.
+
+## Escenarios adecuados
+
+| Escenario         | Combinación de entrada      | Usos comunes                      |
+| ---------------- | --------------------------- | --------------------------------- |
+| Video a partir de texto | Texto                      | Creatividad publicitaria, previsualización de guiones, videos cortos, tomas de ambiente |
+| Video a partir de imagen inicial | Texto + Imagen inicial         | Hacer que imágenes de productos, carteles, fotos de personas o ilustraciones cobren vida |
+| Video de fotograma final / inicial y final | Texto + Fotograma final, o Texto + Fotograma inicial + Fotograma final | Controlar la introducción y conclusión, transiciones, cambios de crecimiento y comparaciones |
+| Video generado a partir de referencias multimodales | Texto + Imagen / Video / Audio de referencia | Mantener la coherencia de personajes y productos, replicar movimientos, encuadres, tonos de audio o ritmos de edición |
+
+## Proceso de llamada
+
+Por defecto, si no se pasa `async`, `/minimax/videos` esperará a que la generación se complete y devolverá directamente la `task` completa. Si necesitas liberar la conexión de inmediato, pasa `async: true` o `callback_url`:
+
+1. Guarda `task_id` y `trace_id` de la respuesta inmediata.
+2. Si no se ha configurado un callback, consulta `/minimax/tasks` aproximadamente cada 10 segundos.
+3. Cuando `task.status` cambie a `succeeded`, obtén el video desde `task.content.url`.
+4. Si el estado es `failed` o `cancelled`, detén la consulta y lee `task.error`.
+
+## Parámetros de solicitud de nivel superior
+
+| Parámetro         | Tipo       | Requerido | Valor por defecto | Descripción                                          |
+| ----------------- | ---------- | --------- | ----------------- | ---------------------------------------------------- |
+| `model`           | string     | Sí        | -                 | Fijo como `MiniMax-H3`                              |
+| `content`         | object[]   | Sí        | -                 | Array de contenido multimodal, debe contener un elemento `text` no vacío |
+| `resolution`      | string     | Sí        | -                 | `768P` o `2K`                                       |
+| `duration`        | integer    | Sí        | -                 | Duración de generación, número entero de 4 a 15 segundos |
+| `ratio`           | string     | Condicionalmente requerido | `adaptive` | `adaptive`, `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16` |
+| `async`           | boolean    | No        | `false`          | `true` devuelve inmediatamente el identificador de tarea, los resultados se obtienen a través de la interfaz de tarea |
+| `callback_url`    | string     | No        | -                 | URL pública de callback para recibir el resultado final de la tarea; si se proporciona, se activa automáticamente el modo asíncrono |
+
+Las reglas de `ratio` dependen del flujo de trabajo:
+
+- **Video a partir de texto**: Requerido y no puede ser `adaptive`.
+- **Video de fotograma inicial, final o inicial y final**: La relación de aspecto se determina por la imagen de entrada, se recomienda omitir o pasar `adaptive`.
+- **Video generado a partir de referencias multimodales**: Puede omitirse, por defecto es `adaptive`; también se puede especificar una proporción fija.
+
+La interfaz no acepta campos obsoletos o de compatibilidad, como `prompt`, `image_urls`, `audio_urls`, `messages` y `first_frame_image`. Al recibir parámetros de este tipo, elimina los campos antiguos y migra a `content`; por ejemplo, cambia `"prompt": "Un gato saludando"` a `"content": [{"type": "text", "text": "Un gato saludando"}]`. No envíes simultáneamente formatos nuevos y antiguos.
+
+## Parámetros de elementos de contenido
+
+Cada elemento de contenido debe tener `type`, los demás campos dependen del tipo:
+
+| `type`        | Campo de datos        | `role`            | Descripción                                 |
+| ------------- | --------------------- | ----------------- | ------------------------------------------- |
+| `text`        | `text`                | No enviar         | Cada solicitud debe incluir un elemento de texto no vacío, máximo 7000 caracteres |
+| `image_url`   | `image_url.url`       | `first_frame`     | Imagen de fotograma inicial; si hay solo una imagen y se omite `role`, también se trata como fotograma inicial |
+| `image_url`   | `image_url.url`       | `last_frame`      | Imagen de fotograma final; puede usarse por separado o combinarse con `first_frame` para controlar el inicio y el final |
+| `image_url`   | `image_url.url`       | `reference_image` | Imagen de referencia de sujeto, personaje, producto, vestimenta, escena o estilo |
+| `video_url`   | `video_url.url`       | `reference_video` | Video de referencia de acción, encuadre, actuación o estructura de edición |
+| `audio_url`   | `audio_url.url`       | `reference_audio` | Audio de referencia de tono, diálogo, música o ritmo |
+
+Las direcciones de los medios admiten tres formas:
+
+- URL HTTPS accesibles públicamente, recomendadas para archivos grandes.
+- `mm_file://{file_id}`, referencia a archivos ya subidos o resultados existentes.
+- URI de datos Base64 del tipo de medio correspondiente. Base64 aumentará el tamaño en aproximadamente un tercio, asegúrate de que el cuerpo de la solicitud no supere los 64 MB.
+
+## Especificaciones de material y límites de cantidad
+| Material | Formato                                      | Límite de archivo único | Tamaño / Duración                                                   | Límite de cantidad                  |
+| --- | ------------------------------------------- | --------- | --------------------------------------------------------------- | --------------------------- |
+| Imagen  | JPG, JPEG, PNG, WEBP, HEIC, HEIF                 | No más de 30 MB | Ancho y alto entre 256-5760 px; relación de aspecto 0.4-2.5                                    | Máximo 1 imagen de primer fotograma, máximo 1 imagen de último fotograma, máximo 9 imágenes de referencia |
+| Video   | MP4, MOV; H.264/AVC o H.265/HEVC; pista de audio AAC o MP3 | No más de 50 MB | Cada segmento de 2-15 segundos, total no más de 15 segundos; ancho y alto entre 256-5760 px; relación de aspecto 0.4-2.5; 23.976-60 fps | Máximo 3 segmentos de video de referencia                  |
+| Audio   | WAV, MP3                                     | No más de 15 MB | Cada segmento de 2-15 segundos, total no más de 15 segundos                                            | Máximo 3 segmentos de audio de referencia                  |
+
+En el escenario de referencia multimodal, el total de imágenes, videos y audios no debe exceder 12 archivos. Los escenarios de primer y último fotograma son mutuamente excluyentes: una vez que se utiliza `reference_image`, `reference_video` o `reference_audio`, no se puede usar `first_frame` o `last_frame`, y viceversa.
+
+## Demostración de capacidad de producción
+
+Lo siguiente no son imágenes conceptuales o materiales de marcador de posición, sino entradas de referencia reales y salidas de video de la muestra de capacidad de producción oficial de MiniMax H3. Tres grupos de casos cubren cortometrajes de marca, narración en vivo y comercio electrónico de moda, adecuados para evaluar las capacidades más críticas del modelo en la producción comercial.
+
+| Capacidad       | Observaciones clave                    |
+| -------- | --------------------------- |
+| Consistencia de personajes y rostros | Estabilidad de rasgos faciales, peinados, maquillaje y temperamento del personaje después de múltiples cambios de cámara     |
+| Actuación facial     | Expresiones oculares, microexpresiones, tensión emocional y movimiento natural de la cabeza en primer plano      |
+| Mantenimiento de la estructura del producto   | Contornos, materiales, relaciones de uso y reflejos de productos como gafas y bolsos    |
+| Ejecución visual de la marca   | Unidad en la atmósfera de la escena, grano cinematográfico, color, logo y ritmo de edición |
+| Narrativa cinematográfica    | Cambios de plano, disposición de personajes, movimiento de cámara, ritmo y sonido que pueden formar párrafos completos  |
+
+Aquí, la "capacidad facial" se refiere a la consistencia de la apariencia de los personajes, los detalles faciales y el control de la actuación en la generación de video, no a la identificación de identidad, comparación de rostros o interfaces de intercambio de rostros.
+
+### Cortometraje de marca de alta gama: Unificación de personajes, productos y activos de marca
+
+**Objetivo de producción:** Cortometraje de marca de moda de alta gama en formato 16:9. Establecer una atmósfera fría con una carretera desértica y un automóvil vintage, manteniendo la apariencia de la protagonista y la estructura del bolso negro, e incorporando el logo de la marca de manera natural al final. Este caso se centra en probar la consistencia de los personajes entre tomas, el mantenimiento del producto, la calidad cinematográfica y la capacidad de cierre de la marca.
+
+| Referencia de atmósfera y escena                                                                                                                | Referencia de personaje                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" alt="Referencia de atmósfera de cortometraje con carretera desértica y automóvil vintage" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/88d89cc3-e6cb-42b4-ab4c-1bbbf6c9f7c8" alt="Referencia de protagonista de cortometraje" width="420" /> |
+
+| Referencia de producto de bolso                                                                                                        | Referencia de logo de marca                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/e91f7fff-f8e3-4da5-b882-87edbc3c9473" alt="Referencia de producto de bolso negro" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/b68dac43-fb14-42b5-bf8b-fd4d65506520" alt="Referencia de logo de marca" width="420" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" style="display: block; width: 100%; max-width: 1080px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/6845b11d-1a58-4478-afd8-29e7e117772a"></video>
+
+[Abrir o descargar directamente el cortometraje de marca](https://cdn.acedata.cloud/uploads/6845b11d-1a58-4478-afd8-29e7e117772a)
+
+La organización correspondiente del `content`:
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "Cortometraje de 15 segundos, 16:9 de marca de moda de alta gama. Un automóvil vintage se detiene al lado de una carretera desértica, la protagonista saca un bolso negro del maletero y se aleja sola tras un breve intercambio de miradas con el protagonista masculino. Mantener la consistencia entre personajes, bolso y visual de la marca; frío y de alta gama, grano cinematográfico, edición ágil, y presentación natural del logo de la marca al final."
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/88d89cc3-e6cb-42b4-ab4c-1bbbf6c9f7c8" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/e91f7fff-f8e3-4da5-b882-87edbc3c9473" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/b68dac43-fb14-42b5-bf8b-fd4d65506520" },
+      "role": "reference_image"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 15,
+  "ratio": "16:9"
+}
+```
+
+### Cortometraje vertical en vivo: Consistencia facial y actuación emocional
+**Objetivo de producción:** Tráiler de 15 segundos, 9:16 de un cortometraje de romance oscuro. A través de las imágenes de referencia de los personajes principales, se fija la apariencia de los personajes, y se restringe el espacio con imágenes de referencia del castillo; se utilizan planos medios y primeros planos para mostrar el enfrentamiento de miradas, miedo, contención y sensación de peligro. Este caso es adecuado para observar la estabilidad de los rasgos faciales de los actores, microexpresiones, relaciones visuales y actuaciones continuas.
+
+| Referencias de los personajes principales                                                                                                          | Referencias de la escena del castillo                                                                                                        |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/f772a484-9ca5-46dd-b4a4-bb3b62d20086" alt="Referencia de los personajes principales del cortometraje" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/2305899b-8f5d-46e5-bba0-abd8d185691c" alt="Referencia de la escena del castillo oscuro" width="420" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/f772a484-9ca5-46dd-b4a4-bb3b62d20086" style="display: block; width: 100%; max-width: 520px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/0f3e9bf2-5073-46f4-9a2d-7d8d912391cf"></video>
+
+[Abre o descarga directamente el cortometraje](https://cdn.acedata.cloud/uploads/0f3e9bf2-5073-46f4-9a2d-7d8d912391cf)
+
+Las palabras clave deben aclarar las relaciones entre los personajes, las emociones y los planos, y no solo describir "diálogo entre hombres y mujeres":
+
+```text
+Tráiler de 15 segundos, 9:16 de un cortometraje de romance oscuro. La protagonista entra accidentalmente en un castillo prohibido, despertando a un noble vampiro dormido; él se acerca de manera peligrosa y contenida, ella siente miedo pero no se rinde. Mantener la consistencia en los rasgos faciales, peinados y vestimenta de ambos personajes, utilizando planos medios y primeros planos para mostrar el enfrentamiento de miradas y la tensión emocional, con iluminación cinematográfica oscura y un ritmo compacto.
+```
+
+### Anuncio de gafas de moda: mantener los detalles faciales y la estructura del producto
+
+**Objetivo de producción:** Anuncio de gafas de moda de alta gama en formato 9:16. La imagen de cuerpo entero del personaje se encarga de la figura y el paso, la imagen de referencia del rostro se encarga de los rasgos y el maquillaje, y la imagen del producto se encarga de las curvas, el reflejo de las lentes, las patillas y el contorno de los ojos de gato. Este caso también pone a prueba los primeros planos faciales, la consistencia entre varias personas, la relación de uso y la estructura geométrica del producto.
+
+| Referencias de modelo y estilo                                                                                                          | Referencias de detalles faciales                                                                                                        | Referencias del producto de gafas                                                                                                        |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/d1e00670-b618-4989-8daf-e2f57ee863ff" alt="Referencia de modelo y estilo del anuncio de moda" width="280" /> | <img src="https://cdn.acedata.cloud/uploads/6371092e-58be-4a74-9492-b9de1847af8a" alt="Referencia de detalles faciales del modelo" width="280" /> | <img src="https://cdn.acedata.cloud/uploads/4de062a9-ceb4-4619-bde1-6d90e4b19dad" alt="Referencia de la estructura del producto de gafas" width="280" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/d1e00670-b618-4989-8daf-e2f57ee863ff" style="display: block; width: 100%; max-width: 520px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/55715089-b6bd-4ef6-a3c2-e762a672f751"></video>
+
+[Abre o descarga directamente el anuncio de gafas de moda](https://cdn.acedata.cloud/uploads/55715089-b6bd-4ef6-a3c2-e762a672f751)
+
+En los anuncios de productos, las palabras clave deben separar claramente las responsabilidades de las referencias de personajes y productos: el material del personaje restringe el rostro, el maquillaje, la figura y el temperamento; el material del producto restringe el contorno, el material, el reflejo y la posición de uso. Esto es más estable que escribir de manera general "generar un anuncio de gafas".
+
+## Video generado a partir de texto
+
+Cuando hay un solo elemento de texto, se trata de un video generado a partir de texto. Es adecuado para generar imágenes directamente desde la creatividad, el guion o la descripción de la toma. Las palabras clave pueden organizarse en el orden de "sujeto + acción + escena + toma + luz + sonido".
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/videos' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MiniMax-H3",
+    "content": [
+      {
+        "type": "text",
+        "text": "Anuncio de perfume de nivel cinematográfico de 15 segundos: en las negras rocas de la costa por la mañana, una botella de perfume transparente está rodeada de niebla y olas del mar. Un primer plano muestra las gotas de agua en la botella y la refracción del vidrio, la cámara se aleja lentamente desde el primer plano del producto hasta el vasto mar; tonos plateados y azules, luz natural real, elegante y contenida, finalizando con un enfoque en el producto."
+      }
+    ],
+    "resolution": "2K",
+    "duration": 15,
+    "ratio": "16:9"
+  }'
+```
+
+El modo de sincronización predeterminado devolverá la tarea completa una vez que se complete la generación:
+
+```json
+{
+  "task": {
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f",
+    "model": "MiniMax-H3",
+    "status": "succeeded",
+    "content": { "url": "https://cdn.acedata.cloud/minimax/f5977217.mp4" },
+    "resolution": "2K",
+    "duration": 15,
+    "ratio": "16:9"
+  }
+}
+```
+
+Si se agrega `"async": true` a la solicitud, la interfaz devolverá inmediatamente:
+
+```json
+{
+  "task_id": "f5977217-ed2c-40da-adbe-93d08235618f",
+  "trace_id": "trace_7f8c2b1a"
+}
+```
+
+## Video de imagen de primer cuadro
+
+Marcar la imagen como `first_frame`, el modelo comenzará a generar desde esa imagen. Es adecuado para hacer que carteles, imágenes de productos, imágenes de personajes y obras fotográficas cobren vida de manera natural.
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "El personaje respira naturalmente y mira hacia la ventana, el borde de su ropa es movido por la brisa, la cámara avanza lentamente."
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "https://cdn.acedata.cloud/b1c82e4937.png"
+      },
+      "role": "first_frame"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+## Video de cuadro final y de primer y último cuadro
+只提供 `last_frame` puede permitir que el modelo genere de manera natural hasta la imagen especificada; al mismo tiempo, proporcionar `first_frame` y `last_frame` puede controlar claramente el punto de inicio y el punto final. Es adecuado para transiciones, cambios de forma, procesos de crecimiento o comparaciones de productos antes y después.
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "La niña crece naturalmente de la infancia a la juventud, el tiempo pasa suavemente, y el personaje siempre está en el centro de la imagen."
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_FIRST_FRAME_URL" },
+      "role": "first_frame"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_LAST_FRAME_URL" },
+      "role": "last_frame"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+Las dimensiones y la relación de aspecto de la primera y última imagen deben ser lo más consistentes posible, y las diferencias en la posición del sujeto, la composición y la iluminación no deben ser demasiado grandes, para facilitar una transición natural.
+
+## Referencia de video multimodal
+
+El material de referencia se puede combinar: imágenes de referencia controlan la apariencia del personaje o producto, videos de referencia controlan la acción y el movimiento de la cámara, y audios de referencia controlan el tono de voz, la música o el ritmo de edición. En las indicaciones, se debe especificar claramente qué debe controlar cada tipo de material, evitando subir solo el material sin dar una relación de conexión.
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "Mantener las características faciales, peinado y vestimenta del personaje de referencia, completar el corto de moda según las acciones de actuación en el video de referencia; el ritmo de la cámara sigue el audio de referencia, el primer plano resalta las expresiones faciales naturales."
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_CHARACTER_IMAGE_URL" },
+      "role": "reference_image"
+    },
+    {
+      "type": "video_url",
+      "video_url": { "url": "YOUR_PERFORMANCE_VIDEO_URL" },
+      "role": "reference_video"
+    },
+    {
+      "type": "audio_url",
+      "audio_url": { "url": "YOUR_AUDIO_URL" },
+      "role": "reference_audio"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+## Notificación de callback
+
+Al ingresar `callback_url`, se activará automáticamente el modo asíncrono: la interfaz de creación devuelve inmediatamente `task_id` y `trace_id`, y al completar la tarea, se enviará un POST a esa dirección con el resultado final, cuya estructura es consistente con la respuesta de consulta de tarea.
+
+El estado final en el callback será `succeeded`, `failed` o `cancelled`. Incluso al usar callbacks, se recomienda guardar `task_id` para consultas proactivas o compensar notificaciones perdidas.
+
+## Errores comunes
+
+| Código de estado HTTP | Significado           | Sugerencia de manejo                           |
+| --------------------- | --------------------- | ---------------------------------------------- |
+| `400`                 | Error de parámetros o combinación de materiales no válida | Verificar campos obligatorios, `role`, cantidad y formato de materiales |
+| `401`                 | Token faltante o inválido  | Verificar `Authorization: Bearer ...`       |
+| `402`                 | Saldo o límite insuficiente      | Completar saldo general en la consola        |
+| `422`                 | Inspección de contenido no aprobada    | Ajustar las indicaciones o materiales y volver a enviar |
+| `429`                 | Solicitudes demasiado frecuentes       | Reintentar después de un retroceso exponencial; se sugiere un intervalo de aproximadamente 10 segundos para la consulta de tareas |
+| `500`                 | Servicio temporalmente no disponible      | Conservar la información de la solicitud y reintentar más tarde |
+
+El `task.status: succeeded` en la respuesta sincrónica indica que el video se ha generado; la confirmación asíncrona solo representa que la tarea ha entrado en la cola. Solo se cobrará cuando la tarea finalice con éxito, la consulta de la tarea en sí es gratuita y no se cobrará de nuevo.

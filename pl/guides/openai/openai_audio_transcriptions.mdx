@@ -1,0 +1,192 @@
+---
+title: "OpenAI API do rozpoznawania mowy (/v1/audio/transcriptions)"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+Przekształcanie audio na tekst, **w pełni zgodne z OpenAI `/v1/audio/transcriptions`**. Każde SDK OpenAI wystarczy, że ustawi `base_url` na `https://api.acedata.cloud` oraz zamieni klucz na swój token AceData, aby mogło być używane bezpośrednio. Obsługuje pełne odpowiedzi oraz inkrementalne transkrypcje SSE dla `gpt-transcribe`.
+
+- **Adres żądania**: `POST https://api.acedata.cloud/v1/audio/transcriptions` (alias `POST /openai/audio/transcriptions`)
+- **Autoryzacja**: nagłówek żądania `Authorization: Bearer {token}`
+- **Format żądania**: `multipart/form-data`
+- **Rozliczenie**: według długości audio (patrz poniższa tabela), poniżej 1 sekundy liczone jako 1 sekunda.
+
+## Parametry żądania
+
+| Pole                          | Typ      | Wymagane | Opis                                                                                         |
+| --------------------------- | ------- | --- | ------------------------------------------------------------------------------------------ |
+| `file`                      | plik    | Tak   | Plik audio do transkrypcji, maksymalnie 25 MB. Obsługuje `flac`, `mp3`, `mp4`, `mpeg`, `mpga`, `m4a`, `ogg`, `wav`, `webm`.            |
+| `model`                     | string  | Nie   | `whisper-1` (domyślnie) lub `gpt-transcribe`, różnice w możliwościach patrz poniższa tabela.                                                 |
+| `language`                  | string  | Nie   | Język audio, kod ISO-639-1 (np. `zh`, `en`). Wypełnienie może zwiększyć dokładność i prędkość; pozostawienie pustym spowoduje automatyczne rozpoznanie.                                        |
+| `prompt`                    | string  | Nie   | Słowo kluczowe, które ma na celu ukierunkowanie stylu pisania lub dostarczenie terminów specjalistycznych w celu zwiększenia dokładności rozpoznawania.                                                           |
+| `response_format`           | string  | Nie   | `whisper-1`: `json` (domyślnie), `text`, `srt`, `verbose_json`, `vtt`; `gpt-transcribe`: tylko `json`, `text`. |
+| `temperature`               | number  | Nie   | Temperatura próbkowania 0–1, domyślnie 0.                                                                             |
+| `timestamp_granularities[]` | tablica | Nie   | Granularność znaczników czasowych, `word` lub `segment`, musi być używana z `response_format=verbose_json`.                            |
+| `languages[]`               | tablica | Nie   | Kandydaci językowi (ISO-639-1), **tylko `gpt-transcribe`**. Wzajemnie wykluczające się z `language`, nie przesyłać jednocześnie.                              |
+| `keywords[]`                | tablica | Nie   | Słowa kluczowe/terminy specjalistyczne, **tylko `gpt-transcribe`**, mogą znacznie zwiększyć dokładność rozpoznawania nazw marek i osób.                                        |
+| `stream`                    | boolean | Nie   | Ustawione na `true` dla `gpt-transcribe` zwraca zdarzenia inkrementalne SSE; `whisper-1` zignoruje ten parametr i zwróci pełny wynik (zgodnie z zachowaniem OpenAI).        |
+
+## Który model wybrać
+
+|                              | `whisper-1`      | `gpt-transcribe`      |
+| ---------------------------- | ---------------- | --------------------- |
+| Cena                           | $0.0078 / minutę     | **$0.0059 / minutę** (tańszy) |
+| Dokładność rozpoznawania                        | Dobra               | **Lepsza**, szczególnie dla nazw marek i terminów specjalistycznych    |
+| Wyjście napisów (`srt`/`vtt`)            | ✅                | ❌                     |
+| Znaczniki czasowe na poziomie słów                        | ✅                | ❌                     |
+| `languages[]` / `keywords[]` | ❌                | ✅                     |
+| Zwracanie wykrytego języka                     | wymaga `verbose_json` | domyślnie zwraca                  |
+| Zwracanie inkrementalne SSE                     | ❌ (parametr `stream` jest ignorowany)  | ✅                     |
+
+**Potrzebujesz napisów lub znaczników czasowych na poziomie słów → `whisper-1`; w pozostałych scenariuszach zaleca się `gpt-transcribe`** (dokładniejszy i tańszy).
+
+## Przykład
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1
+```
+
+Zwróci:
+
+```json
+{
+  "text": "Ace Data Cloud Platform is testing the speech recognition endpoint. The quick brown fox jumps over the lazy dog."
+}
+```
+
+Chińskie audio również jest obsługiwane, nie trzeba określać języka:
+
+```json
+{
+  "text": "欢迎使用 AceData Cloud 平台,我们正在测试语音识别接口,今天是 7 月 31 号。"
+}
+```
+
+### Generowanie napisów
+
+Ustaw `response_format` na `srt` lub `vtt`, aby bezpośrednio uzyskać plik z napisami:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1 \
+  -F response_format=srt \
+  -o subtitle.srt
+```
+
+Zwróci treść ( `Content-Type: text/plain` ):
+
+```
+1
+00:00:00,000 --> 00:00:03,800
+Ace Data Cloud Platform is testing the speech recognition endpoint.
+
+2
+00:00:03,800 --> 00:00:06,280
+The quick brown fox jumps over the lazy dog.
+```
+
+### Znaczniki czasowe na poziomie słów
+
+Aby uzyskać czasy rozpoczęcia i zakończenia dla każdego słowa, użyj `verbose_json` w połączeniu z `timestamp_granularities[]=word`:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1 \
+  -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word'
+```
+
+Zwróci:
+
+```json
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 6.29,
+  "text": "Ace Data Cloud Platform is testing the speech recognition endpoint. The quick brown fox jumps over the lazy dog.",
+  "words": [
+    {
+      "word": "Ace",
+      "start": 0.0,
+      "end": 0.32
+    },
+    {
+      "word": "Data",
+      "start": 0.32,
+      "end": 0.54
+    },
+    {
+      "word": "Cloud",
+      "start": 0.54,
+      "end": 0.86
+    }
+  ]
+}
+```
+
+### Transkrypcja strumieniowa
+
+`gpt-transcribe` może zwracać `Content-Type: text/event-stream` poprzez `stream=true`. Serwis będzie wysyłał zdarzenia zgodne z OpenAI:
+`transcript.text.delta` zawiera inkrementalny tekst, `transcript.text.done` zawiera pełny tekst i `usage`, co oznacza normalne zakończenie.
+
+```shell
+curl -N -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=gpt-transcribe \
+  -F stream=true
+```
+
+Przykład strumienia zdarzeń:
+
+```text
+data: {"type":"transcript.text.delta","delta":"Hello"}
+
+data: {"type":"transcript.text.done","text":"Hello world","usage":{"type":"tokens","input_tokens":14,"output_tokens":3,"total_tokens":17}}
+```
+
+Otrzymanie `transcript.text.done` oznacza normalne zakończenie. Jeśli po nawiązaniu strumienia wystąpi błąd przetwarzania, po zdarzeniu `event: error` połączenie zostanie zakończone; jeśli klient przerwie połączenie, przetwarzanie zostanie anulowane i nie będzie kontynuowane w tle. `whisper-1`, nawet jeśli przekaże `stream=true`, również zwróci odpowiedź w trybie normalnym, a nie strumieniowym.
+
+### Użycie oficjalnego SDK
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://api.acedata.cloud/v1", api_key="{token}")
+with open("audio.mp3", "rb") as f:
+    result = client.audio.transcriptions.create(model="whisper-1", file=f)
+print(result.text)
+```
+
+## Ceny
+
+| Model               | Cena na platformie  |
+| ------------------ | ------------------- |
+| `whisper-1`       | $0.0078 / minuta    |
+| `gpt-transcribe`  | $0.0059 / minuta    |
+
+> Opłata naliczana jest na podstawie rzeczywistego czasu trwania audio, poniżej 1 sekundy liczone jako 1 sekunda, maksymalnie 1 godzina na jedno zlecenie.
+
+## Uwagi
+
+- Maksymalny rozmiar pojedynczego pliku to **25 MB**. W przypadku przekroczenia proszę najpierw podzielić lub skompresować (zwykle wystarczy obniżenie bitrate'u, rozpoznawanie mowy nie wymaga wysokiej jakości dźwięku).
+- `gpt-transcribe` obsługuje `stream=true` SSE; `whisper-1` zignoruje `stream` i zwróci pełny wynik.
+- Parametry są zgodne z oficjalnym `/v1/audio/transcriptions` OpenAI, oficjalne SDK wymaga jedynie zmiany `base_url`.
+- `include[]`, `chunking_strategy`, `known_speaker_names[]`, `known_speaker_references[]` to modele transkrypcyjne, które nie są jeszcze dostępne, ich przesłanie zwróci 400 zamiast cichych ignorowań. Parametry specyficzne dla modelu (`timestamp_granularities[]` dla `whisper-1`, `languages[]`/`keywords[]` dla `gpt-transcribe`) również zwrócą 400, gdy zostaną przekazane do modelu, który ich nie obsługuje.
+- Żądania mogą być czasochłonne, zaleca się ustawienie limitu czasu klienta na co najmniej 300 sekund.
+
+## Kody błędów
+
+| Kod statusu | code                    | Opis                                                                                                                                                   |
+| ----------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 400         | `bad_request`           | Nie podano `file`, plik nie może być przetworzony lub parametry są nieprawidłowe (`model`/`response_format` mają nieobsługiwane wartości, `temperature` poza zakresem 0–1, `timestamp_granularities[]` nie współpracuje z `verbose_json`, przekazano parametry nieobsługiwane przez `whisper-1`). |
+| 401         | `authentication_failed` | token jest nieprawidłowy.                                                                                                                            |
+| 403         | `used_up`               | Niewystarczające saldo.                                                                                                                                 |
+| 413         | `request_too_large`     | Plik audio przekracza limit 25 MB.                                                                                                                    |
+| 429         | `too_many_requests`     | Zbyt wiele żądań, proszę spróbować później.                                                                                                           |
+| 500         | `api_error`             | Wewnętrzny błąd serwera, proszę spróbować później.                                                                                                     |
