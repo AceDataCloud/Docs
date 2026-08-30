@@ -160,6 +160,35 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertEqual(guides["geminivideos"]["title"], "Gemini Video API Integration Guide")
         self.assertIn("Localized body", guides["geminivideos"]["content"])
 
+    def test_index_localized_guides_ignores_reciprocal_text_sibling(self) -> None:
+        payload = {
+            "items": [
+                {
+                    "alias": "suno-voices",
+                    "api": {"path": "/suno/voices"},
+                    "sibling": {
+                        "alias": "suno-voices-integration",
+                        "title": "Suno Voice Clone API Integration Instructions",
+                        "content": "Localized integration guide",
+                    },
+                },
+                {
+                    "alias": "suno-voices-integration",
+                    "api": None,
+                    "sibling": {
+                        "alias": "suno-voices",
+                        "title": "Suno Voices API",
+                        "content": "API document body",
+                    },
+                },
+            ]
+        }
+
+        guides = sync.index_localized_guides(payload, "en")
+
+        self.assertEqual(guides["sunovoices"]["title"], "Suno Voice Clone API Integration Instructions")
+        self.assertEqual(guides["sunovoices"]["content"], "Localized integration guide")
+
     def test_index_localized_guides_rejects_empty_feed(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "No localized guides"):
             sync.index_localized_guides({"items": []}, "en")
@@ -167,8 +196,8 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
     def test_index_localized_guides_rejects_collisions(self) -> None:
         payload = {
             "items": [
-                {"alias": "same-key", "sibling": {"title": "One", "content": "One"}},
-                {"alias": "same_key", "sibling": {"title": "Two", "content": "Two"}},
+                {"alias": "same-key", "api": {"path": "/one"}, "sibling": {"title": "One", "content": "One"}},
+                {"alias": "same_key", "api": {"path": "/two"}, "sibling": {"title": "Two", "content": "Two"}},
             ]
         }
 
