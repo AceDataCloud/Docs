@@ -1,0 +1,360 @@
+---
+title: "MiniMax H3 Video Generation API Integrationsguide"
+description: "MiniMax H3 Video Generation API guide - Ace Data Cloud"
+---
+
+Denna artikel beskriver integration och användning av MiniMax H3 Video Generation API. Detta gränssnitt stöder text-till-video, kontroll av första och sista bildruta samt multimodal referensvideo, och använder en enhetlig V2 multimodal `content` struktur för att skapa uppgifter.
+
+## Ansökningsprocess
+
+För att använda MiniMax H3 Video Generation API, börja med att gå till [Ace Data Cloud-konsolen](https://platform.acedata.cloud/console/applications) för att hämta din API-token, som du ska spara för framtida bruk.
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Om du inte är inloggad eller registrerad kommer du automatiskt att omdirigeras till inloggningssidan där du blir inbjuden att registrera dig och logga in, och efter att ha slutfört detta kommer du automatiskt att återvända till den aktuella sidan.
+
+**En API-token räcker för att anropa alla tjänster på plattformen, du behöver inte ansöka separat för varje tjänst.** Vid första ansökan får du en gratis kvot för att prova; när kvoten är slut kan du ladda på allmän balans i [konsolen](https://platform.acedata.cloud/console/coin).
+
+> 📘 Fullständig dokumentation: [MiniMax H3 Video Generation API →](https://platform.acedata.cloud/documents/minimax-videos-integration)
+
+Det rekommenderas att spara token som en miljövariabel, skriv inte in den i källkoden eller skicka den till versionskontroll:
+
+```bash
+export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
+```
+
+## Gränssnittsöversikt
+
+- **Bas-URL**: `https://api.acedata.cloud`
+- **Endpoint**: `POST /minimax/videos`
+- **Autentisering**: Bär `authorization: Bearer {token}` i HTTP-headern
+- **Begärningshuvud**:
+  - `accept: application/json`
+  - `content-type: application/json`
+- **Modell (model)**: `MiniMax-H3`
+- **Inmatningsstruktur**: Skicka text, bilder, videor och ljud via `content`
+- **Utdataformat**: Som standard väntar den synkront på att genereringen ska slutföras och returnerar hela `task`; vid `async: true` eller `callback_url` returneras omedelbart `task_id` och `trace_id`
+- **Resultatfråga**: Använd [MiniMax H3 Task Query API](/documents/minimax-tasks-integration) för att hämta status och färdiga videor
+- **Asynkron callback**: Valfritt, ta emot det slutliga uppgiftsresultatet via `callback_url`
+
+Du behöver inte skicka `action` för att välja genereringsläge, gränssnittet bedömer automatiskt syftet baserat på materialtypen och `role` i `content`.
+
+## Passande scenarier
+
+| Scenarie         | Inmatningskombination                  | Vanliga användningsområden                      |
+| -------------- | ---------------------------------- | ----------------------------------------- |
+| Text-till-video       | Text                                | Reklamidéer, storyboard-repetitioner, kortfilmer, atmosfäriska bilder        |
+| Första bildruta-till-video | Text + Första bild                 | Få produktbilder, affischer, porträtt eller illustrationer att röra sig naturligt      |
+| Sista bildruta / Första och sista bildruta-video | Text + Sista bild, eller Text + Första bild + Sista bild | Kontrollera öppning och avslut, övergångar, tillväxtförändringar och före-och-efter-jämförelser      |
+| Multimodal referensvideo   | Text + Referensbilder / video / ljud   | Hålla karaktärer och produkter konsekventa, återskapa rörelser, kamerarörelser, ljudfärger eller klippningstakt |
+
+## Anropsprocess
+
+Som standard, om `async` inte skickas, kommer `/minimax/videos` att vänta på att genereringen ska slutföras och direkt returnera hela `task`. Om du behöver frigöra anslutningen omedelbart, skicka `async: true` eller `callback_url`:
+
+1. Spara `task_id` och `trace_id` från det omedelbara svaret.
+2. Om ingen callback är konfigurerad, anropa `/minimax/tasks` var 10:e sekund för att fråga.
+3. När `task.status` ändras till `succeeded`, hämta videon från `task.content.url`.
+4. När statusen är `failed` eller `cancelled`, stoppa polling och läs `task.error`.
+
+## Övergripande begärningsparametrar
+
+| Parameter         | Typ       | Obligatorisk | Standardvärde | Beskrivning                                                |
+| ---------------- | -------- | ------------ | ------------- | --------------------------------------------------------- |
+| `model`          | string   | Ja           | -             | Fastställt till `MiniMax-H3`                              |
+| `content`        | object[] | Ja           | -             | Array av multimodalt innehåll, måste innehålla ett icke-tomt `text`-element                         |
+| `resolution`     | string   | Ja           | -             | `768P` eller `2K`                                       |
+| `duration`       | integer  | Ja           | -             | Genereringstid, heltal mellan 4-15 sekunder                                     |
+| `ratio`          | string   | Villkorligt obligatorisk | `adaptive` | `adaptive`, `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16` |
+| `async`          | boolean  | Nej          | `false`       | `true` returnerar omedelbart uppgiftsidentifiering, hämta resultat via uppgiftsgränssnitt                       |
+| `callback_url`   | string   | Nej          | -             | Offentlig callback-URL för att ta emot det slutliga uppgiftsresultatet; aktiveras automatiskt i asynkront läge                     |
+
+Reglerna för `ratio` beror på arbetsflödet:
+
+- **Text-till-video**: Obligatorisk och får inte vara `adaptive`.
+- **Första bildruta, sista bildruta eller första och sista bildruta-video**: Bildformatet bestäms av inmatningsbilderna, det rekommenderas att utelämna eller skicka `adaptive`.
+- **Multimodal referensvideo**: Kan utelämnas, standard är `adaptive`; kan också specificera ett fast förhållande.
+
+Gränssnittet accepterar inte äldre eller kompatibla fält, såsom `prompt`, `image_urls`, `audio_urls`, `messages` och `first_frame_image`. Vid mottagande av sådana parameterfel, ta bort de gamla fälten och migrera till `content`; till exempel, ändra `"prompt": "一只猫挥手"` till `"content": [{"type": "text", "text": "一只猫挥手"}]`. Skicka inte både nya och gamla format samtidigt.
+
+## content-innehållsparameterar
+
+Varje innehållsobjekt måste ha `type`, övriga fält bestäms av typen:
+
+| `type`        | Datafält            | `role`            | Beskrivning                                     |
+| ------------- | ------------------- | ----------------- | ----------------------------------------------- |
+| `text`        | `text`              | Ingen              | Varje begäran måste innehålla ett icke-tomt textobjekt, max 7000 tecken             |
+| `image_url`   | `image_url.url`     | `first_frame`     | Första bildruta; om det bara finns en bild och `role` utelämnas, behandlas den också som första bildruta         |
+| `image_url`   | `image_url.url`     | `last_frame`      | Sista bildruta; kan användas ensam eller i kombination med `first_frame` för att kontrollera start och slut |
+| `image_url`   | `image_url.url`     | `reference_image` | Referens för ämne, karaktär, produkt, kläder, scen eller stil                    |
+| `video_url`   | `video_url.url`     | `reference_video` | Referens för rörelse, kamerarörelse, prestation eller klippstruktur                        |
+| `audio_url`   | `audio_url.url`     | `reference_audio` | Referens för ljudfärg, dialog, musik eller takt                          |
+
+Mediaadresser stöder tre former:
+
+- Offentligt tillgänglig HTTPS-URL, rekommenderas för stora filer.
+- `mm_file://{file_id}`, referens till redan uppladdade eller befintliga resultatfiler.
+- Motsvarande mediatypens Base64 data URI. Base64 ökar storleken med cirka en tredjedel, se till att hela begärningskroppen inte överstiger 64 MB.
+
+## Materialspecifikationer och kvantitetsbegränsningar
+| Material | Format                                       | Single File Limit | Size / Duration                                                   | Quantity Limit                     |
+| --- | ------------------------------------------- | --------- | --------------------------------------------------------------- | --------------------------- |
+| Bild  | JPG, JPEG, PNG, WEBP, HEIC, HEIF                 | Max 30 MB | Både bredd och höjd 256-5760 px; bildförhållande 0.4-2.5                                    | Max 1 första bild, max 1 sista bild, max 9 referensbilder |
+| Video | MP4, MOV; H.264/AVC eller H.265/HEVC; ljudspår AAC eller MP3 | Max 50 MB | Varje segment 2-15 sekunder, totalt max 15 sekunder; både bredd och höjd 256-5760 px; bildförhållande 0.4-2.5; 23.976-60 fps | Max 3 segment referensvideo                  |
+| Ljud  | WAV, MP3                                     | Max 15 MB | Varje segment 2-15 sekunder, totalt max 15 sekunder                                            | Max 3 segment referensljud                  |
+
+I multimodala referensscenarier får det totalt finnas max 12 filer av bilder, videor och ljud. Scenarier med första och sista bild är ömsesidigt uteslutande: när `reference_image`, `reference_video` eller `reference_audio` används kan varken `first_frame` eller `last_frame` användas, och vice versa.
+
+## Produktionsklassvisning
+
+Nedan är inte konceptbilder eller platshållarmaterial, utan verkliga referensinmatningar och faktiska videoresultat från MiniMax H3:s officiella produktionsklassprov. Tre uppsättningar fall täcker varumärkesfilmer, verkliga berättelser och mode e-handel, lämpliga för att utvärdera modellens mest kritiska förmågor i kommersiell produktion.
+
+| Förmåga       | Viktiga observationer                  |
+| -------- | --------------------------- |
+| Konsistens i personer och ansikten | Stabilitet i ansiktsdrag, frisyr, smink och personlighet efter flera kameravinklar     |
+| Ansiktsuttryck     | Ögonkontakt, mikro-uttryck, känslomässig spänning och naturliga huvudrörelser i närbild      |
+| Bevarande av produktstruktur   | Konturer, material, bärande relationer och spegelreflektioner av produkter som glasögon och väskor    |
+| Varumärkesvisuell utförande   | Enhetlighet i scenens atmosfär, filmkorn, färger, logotyp och klippens rytm |
+| Filmisk berättelse    | Förändringar i bildvinklar, personers placering, kamerarörelser, rytm och ljud som kan bilda kompletta avsnitt  |
+
+Här avser "ansiktsförmåga" konsistens i personers utseende, ansiktsdetaljer och kontroll av prestation i videoproduktion, inte identitetsigenkänning, ansiktsjämförelse eller ansiktsbyte.
+
+### Högklassig varumärkesfilm: Enhetlighet mellan personer, produkter och varumärkesresurser
+
+**Produktionens mål:** 16:9 högklassig modefilm. Skapa en kall atmosfär med ökenväg och retrobilar, behålla huvudpersonens utseende och strukturen på den svarta väskan, och naturligt integrera varumärkeslogotypen i slutet. Detta fall fokuserar på att testa konsistens mellan kameravinklar, bevarande av produkter, filmkänsla och varumärkesavslut.
+
+| Atmosfär och scenreferens                                                                                                                | Personreferens                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" alt="Atmosfärreferens för varumärkesfilm med ökenväg och retrobilar" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/88d89cc3-e6cb-42b4-ab4c-1bbbf6c9f7c8" alt="Referens för huvudpersonen i varumärkesfilm" width="420" /> |
+
+| Väskproduktreferens                                                                                                        | Varumärkeslogotypreferens                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/e91f7fff-f8e3-4da5-b882-87edbc3c9473" alt="Referens för svart väska" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/b68dac43-fb14-42b5-bf8b-fd4d65506520" alt="Referens för varumärkeslogotyp" width="420" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" style="display: block; width: 100%; max-width: 1080px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/6845b11d-1a58-4478-afd8-29e7e117772a"></video>
+
+[Öppna eller ladda ner varumärkesfilmen direkt](https://cdn.acedata.cloud/uploads/6845b11d-1a58-4478-afd8-29e7e117772a)
+
+Motsvarande `content`-organisationssätt:
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "15 sekunder, 16:9 högklassig modefilm. En retrobil står vid en ökenväg, huvudpersonen tar ut en svart väska ur bagageutrymmet, och efter en kort ögonkontakt med huvudpersonen går hon ensam. Bevara konsistensen mellan personer, väskan och varumärkets visuella stil; kall och högklassig, filmkorn, klippning som är skarp, och varumärkeslogotypen presenteras naturligt i slutet."
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/88d89cc3-e6cb-42b4-ab4c-1bbbf6c9f7c8" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/e91f7fff-f8e3-4da5-b882-87edbc3c9473" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/b68dac43-fb14-42b5-bf8b-fd4d65506520" },
+      "role": "reference_image"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 15,
+  "ratio": "16:9"
+}
+```
+
+### Verklig vertikal kortfilm: Ansiktskonsistens och känslomässig prestation
+**Produktionens mål:** 15 sekunder, 9:16 mörk romantisk kortfilm trailer. Genom att använda referensbilder av huvudkaraktärerna för att fastställa deras utseende, och referensbilder av ett slott för att begränsa utrymmet; använd medel- och närbilder för att visa ögonkonfrontation, rädsla, återhållsamhet och känslan av fara. Det här fallet är lämpligt för att observera stabiliteten i människors ansiktsdrag, mikroexpressioner, ögonkontakt och kontinuerligt skådespeleri.
+
+| Referens för huvudkaraktärerna                                                                                                          | Referens för slottsmiljö                                                                                                        |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/f772a484-9ca5-46dd-b4a4-bb3b62d20086" alt="Referens för huvudkaraktärerna" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/2305899b-8f5d-46e5-bba0-abd8d185691c" alt="Referens för slottsmiljö" width="420" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/f772a484-9ca5-46dd-b4a4-bb3b62d20086" style="display: block; width: 100%; max-width: 520px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/0f3e9bf2-5073-46f4-9a2d-7d8d912391cf"></video>
+
+[Öppna eller ladda ner kortfilm med verkliga skådespelare](https://cdn.acedata.cloud/uploads/0f3e9bf2-5073-46f4-9a2d-7d8d912391cf)
+
+Nyckelord bör tydligt ange karaktärernas relationer, känslor och bildutsnitt, snarare än att bara beskriva "dialog mellan man och kvinna":
+
+```text
+15 sekunder, 9:16 verklig mörk romantisk kortfilm trailer. Huvudkaraktären går av misstag in i ett förbjudet slott och väcker en sovande vampyradelsman; han närmar sig farligt och återhållsamt, hon är rädd men ger inte upp. Håll de två karaktärernas ansiktsdrag, frisyrer och kläder konsekventa, använd medel- och närbilder för att visa ögonkonfrontation och känslomässig spänning, mörk filmisk belysning, kompakt tempo.
+```
+
+### Modeglasögonannons: Ansiktsdetaljer och produktstruktur bevaras
+
+**Produktionens mål:** 9:16 högklassig modeglasögonannons. Fullkroppsbilder ansvarar för kroppshållning och gångstil, ansiktsreferensbilder ansvarar för ansiktsdrag och smink, produktbilder ansvarar för kurvor, linsreflektioner, glasben och kattöversilhuett. Det här fallet testar samtidigt närbilder av ansiktet, konsistens mellan flera personer, bärande relationer och produktens geometriska struktur.
+
+| Referens för modell och styling                                                                                                          | Referens för ansiktsdetaljer                                                                                                        | Referens för glasögonprodukten                                                                                                        |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/d1e00670-b618-4989-8daf-e2f57ee863ff" alt="Referens för modell och styling" width="280" /> | <img src="https://cdn.acedata.cloud/uploads/6371092e-58be-4a74-9492-b9de1847af8a" alt="Referens för ansiktsdetaljer" width="280" /> | <img src="https://cdn.acedata.cloud/uploads/4de062a9-ceb4-4619-bde1-6d90e4b19dad" alt="Referens för glasögonprodukten" width="280" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/d1e00670-b618-4989-8daf-e2f57ee863ff" style="display: block; width: 100%; max-width: 520px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/55715089-b6bd-4ef6-a3c2-e762a672f751"></video>
+
+[Öppna eller ladda ner modeglasögonannons](https://cdn.acedata.cloud/uploads/55715089-b6bd-4ef6-a3c2-e762a672f751)
+
+I produktannonser bör nyckelord tydligt separera ansiktsreferenser och produktreferenser: personmaterial begränsar ansikte, smink, kropp och karaktär; produktmaterial begränsar konturer, material, reflektioner och bärande position. Detta är mer stabilt än att skriva "generera en glasögonannons" på ett vagt sätt.
+
+## Text-till-video
+
+När det bara finns ett textobjekt är det en text-till-video. Lämplig för att direkt generera bilder från idé, manus eller kamerabeskrivning. Nyckelord kan organiseras i ordningen "ämne + handling + scen + kamera + ljus + ljud".
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/videos' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MiniMax-H3",
+    "content": [
+      {
+        "type": "text",
+        "text": "15 sekunder filmisk parfymannons: på de svarta klipporna vid kusten på morgonen, omgiven av dimma och havsvågor, en transparent parfymflaska. Närbild visar vattendroppar på flaskan och glasets brytning, kameran drar långsamt upp från produktens närbild till den vidsträckta havsytan; silverblå ton, verkligt naturligt ljus, högklassig återhållsamhet, avslutning med produkten i fokus."
+      }
+    ],
+    "resolution": "2K",
+    "duration": 15,
+    "ratio": "16:9"
+  }'
+```
+
+Standard synkroniseringsläge kommer att returnera hela uppgiften efter att den är klar:
+
+```json
+{
+  "task": {
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f",
+    "model": "MiniMax-H3",
+    "status": "succeeded",
+    "content": { "url": "https://cdn.acedata.cloud/minimax/f5977217.mp4" },
+    "resolution": "2K",
+    "duration": 15,
+    "ratio": "16:9"
+  }
+}
+```
+
+Om förfrågan inkluderar `"async": true`, returnerar gränssnittet omedelbart:
+
+```json
+{
+  "task_id": "f5977217-ed2c-40da-adbe-93d08235618f",
+  "trace_id": "trace_7f8c2b1a"
+}
+```
+
+## Första bild till video
+
+Märk bilden som `first_frame`, modellen kommer att börja generera från den bilden. Lämplig för att få affischer, produktbilder, karaktärsdesignbilder och fotografiska verk att röra sig naturligt.
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "Karaktären andas naturligt och ser ut genom fönstret, klädernas kanter rörs av en lätt bris, kameran närmar sig långsamt"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "https://cdn.acedata.cloud/b1c82e4937.png"
+      },
+      "role": "first_frame"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+## Sista bild och första och sista bild video
+只提供 `last_frame` kan låta modellen naturligt generera till en angiven bild; samtidigt kan tillhandahållande av `first_frame` och `last_frame` tydligt kontrollera start- och slutpunkt. Lämplig för övergångar, formförändringar, tillväxtprocesser eller produktjämförelser före och efter.
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "Flickan växer naturligt från barndom till ungdom, tiden flyter smidigt, karaktären är alltid i mitten av bilden"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_FIRST_FRAME_URL" },
+      "role": "first_frame"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_LAST_FRAME_URL" },
+      "role": "last_frame"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+Första och sista bildens storlek och bildförhållande bör vara så lika som möjligt, och skillnader i huvudposition, komposition och ljus bör inte vara för stora, så att en naturlig övergång lättare kan uppnås.
+
+## Multimodal referens levande video
+
+Referensmaterial kan kombineras: referensbilder kontrollerar karaktärens eller produktens utseende, referensvideor kontrollerar rörelser och kamerarörelser, referensljud kontrollerar dialogens ton, musik eller klippningstakt. I prompten bör det tydligt anges vad varje typ av material ska kontrollera, för att undvika att bara ladda upp material utan att ge en koppling.
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "Behåll referenskaraktärens ansiktsdrag, frisyr och kläder konsekventa, och genomför modeklippet enligt de utförande rörelserna i referensvideon; kamerarytmen följer referensljudet, närbilden framhäver naturliga ansiktsuttryck"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_CHARACTER_IMAGE_URL" },
+      "role": "reference_image"
+    },
+    {
+      "type": "video_url",
+      "video_url": { "url": "YOUR_PERFORMANCE_VIDEO_URL" },
+      "role": "reference_video"
+    },
+    {
+      "type": "audio_url",
+      "audio_url": { "url": "YOUR_AUDIO_URL" },
+      "role": "reference_audio"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+## Återkopplingsmeddelande
+
+Genom att ange `callback_url` aktiveras automatiskt asynkront läge: skapande av gränssnittet returnerar omedelbart `task_id` och `trace_id`, och skickar POST med det slutliga resultatet till den adressen när uppgiften är klar, strukturen är densamma som för uppgiftsfrågan.
+
+Det slutliga tillståndet i återkopplingen är `succeeded`, `failed` eller `cancelled`. Även om du använder återkoppling rekommenderas det att spara `task_id` för att kunna fråga aktivt eller kompensera för missade meddelanden.
+
+## Vanliga fel
+
+| HTTP-statuskod | Betydelse           | Hanteringsförslag                           |
+| -------- | ------------ | ------------------------------ |
+| `400`    | Parameterfel eller ogiltig materialkombination | Kontrollera obligatoriska fält, `role`, materialantal och format          |
+| `401`    | Token saknas eller ogiltig  | Kontrollera `Authorization: Bearer ...` |
+| `402`    | Otillräcklig balans eller kvot      | Fyll på allmän balans i konsolen                     |
+| `422`    | Innehållssäkerhetskontroll misslyckades    | Justera prompten eller materialet och skicka in på nytt                  |
+| `429`    | För många förfrågningar       | Exponentiell backoff och försök igen; uppgiftspolling rekommenderas med ett intervall på cirka 10 sekunder         |
+| `500`    | Tjänsten är tillfälligt otillgänglig      | Spara begärningsinformation och försök igen senare                    |
+
+I synkron respons betyder `task.status: succeeded` att videon har genererats; asynkron bekräftelse representerar endast att uppgiften har kommit in i kön. Endast när uppgiften slutligen lyckas kommer avgift att debiteras, att fråga om uppgiften i sig är gratis och kommer inte att debiteras flera gånger.

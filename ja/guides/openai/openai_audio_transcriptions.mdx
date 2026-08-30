@@ -1,0 +1,195 @@
+---
+title: "OpenAI 音声認識 API（/v1/audio/transcriptions）"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+音声をテキストに転写します。**完全に OpenAI の `/v1/audio/transcriptions` と互換性があります**。任意の OpenAI SDK は `base_url` を `https://api.acedata.cloud` に設定し、キーをあなたの AceData Token に置き換えるだけで直接使用できます。通常の完全な応答をサポートし、`gpt-transcribe` の SSE 増分転写もサポートしています。
+
+- **リクエスト URL**：`POST https://api.acedata.cloud/v1/audio/transcriptions`（別名 `POST /openai/audio/transcriptions`）
+- **認証**：リクエストヘッダー `Authorization: Bearer {token}`
+- **リクエスト形式**：`multipart/form-data`
+- **課金**：音声の長さに基づいて課金（下表参照）、1秒未満は1秒として計算されます。
+
+## リクエストパラメータ
+
+| フィールド                     | タイプ      | 必須  | 説明                                                                                         |
+| --------------------------- | ------- | --- | ------------------------------------------------------------------------------------------ |
+| `file`                      | file    | はい   | 転写する音声ファイル、最大 25 MB。`flac`、`mp3`、`mp4`、`mpeg`、`mpga`、`m4a`、`ogg`、`wav`、`webm` をサポート。            |
+| `model`                     | string  | いいえ   | `whisper-1`（デフォルト）または `gpt-transcribe`、能力の違いは下表を参照。                                                 |
+| `language`                  | string  | いいえ   | 音声の言語、ISO-639-1 コード（例：`zh`、`en`）。記入すると精度と速度が向上します；空白の場合は自動認識されます。                                        |
+| `prompt`                    | string  | いいえ   | 書き方のスタイルを導くためのプロンプト、または固有名詞、用語を提供して認識精度を向上させるため。                                                           |
+| `response_format`           | string  | いいえ   | `whisper-1`：`json`（デフォルト）、`text`、`srt`、`verbose_json`、`vtt`；`gpt-transcribe`：`json`、`text` のみ。 |
+| `temperature`               | number  | いいえ   | サンプリング温度 0–1、デフォルトは 0。                                                                             |
+| `timestamp_granularities[]` | array   | いいえ   | タイムスタンプの粒度、`word` または `segment`、`response_format=verbose_json` と併用する必要があります。                            |
+| `languages[]`               | array   | いいえ   | 候補言語（ISO-639-1）、**`gpt-transcribe` のみ**。`language` と相互排他的で、同時に送信しないでください。                              |
+| `keywords[]`                | array   | いいえ   | 固有名詞/用語のヒント、**`gpt-transcribe` のみ**、ブランド名や人名の認識精度を大幅に向上させることができます。                                        |
+| `stream`                    | boolean | いいえ   | `gpt-transcribe` を `true` に設定すると SSE 増分イベントが返されます；`whisper-1` はこのパラメータを無視し、完全な結果を返します（OpenAI の公式な動作と一致）。        |
+
+## どのモデルを選ぶか
+
+|                              | `whisper-1`      | `gpt-transcribe`      |
+| ---------------------------- | ---------------- | --------------------- |
+| 価格                           | $0.0078 / 分     | **$0.0059 / 分**（より安い） |
+| 認識精度                        | 良好               | **より良い**、特にブランド名、固有名詞    |
+| 字幕出力（`srt`/`vtt`）            | ✅                | ❌                     |
+| 単語レベルのタイムスタンプ            | ✅                | ❌                     |
+| `languages[]` / `keywords[]` | ❌                | ✅                     |
+| 検出された言語を返す                     | `verbose_json` が必要 | デフォルトで返す                  |
+| SSE 増分返却                     | ❌（`stream` が無視される）  | ✅                     |
+
+**字幕や単語レベルのタイムスタンプが必要 → `whisper-1`；その他のシナリオでは `gpt-transcribe` を推奨**（より正確で安価）。
+
+## 例
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1
+```
+
+返却：
+
+```json
+{
+  "text": "Ace Data Cloud Platform is testing the speech recognition endpoint. The quick brown fox jumps over the lazy dog."
+}
+```
+
+中国語の音声もサポートされており、言語を指定する必要はありません：
+
+```json
+{
+  "text": "欢迎使用 AceData Cloud 平台,我们正在测试语音识别接口,今天是 7 月 31 号。"
+}
+```
+
+### 字幕の生成
+
+`response_format` を `srt` または `vtt` に設定すると、直接使用可能な字幕ファイルが得られます：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1 \
+  -F response_format=srt \
+  -o subtitle.srt
+```
+
+返却内容（`Content-Type: text/plain`）：
+
+```
+1
+00:00:00,000 --> 00:00:03,800
+Ace Data Cloud Platform is testing the speech recognition endpoint.
+
+2
+00:00:03,800 --> 00:00:06,280
+The quick brown fox jumps over the lazy dog.
+```
+
+### 単語レベルのタイムスタンプ
+
+各単語の開始と終了時間が必要な場合、`verbose_json` を使用し、`timestamp_granularities[]=word` を組み合わせます：
+
+```shell
+curl -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=whisper-1 \
+  -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word'
+```
+
+返却：
+
+```json
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 6.29,
+  "text": "Ace Data Cloud Platform is testing the speech recognition endpoint. The quick brown fox jumps over the lazy dog.",
+  "words": [
+    {
+      "word": "Ace",
+      "start": 0.0,
+      "end": 0.32
+    },
+    {
+      "word": "Data",
+      "start": 0.32,
+      "end": 0.54
+    },
+    {
+      "word": "Cloud",
+      "start": 0.54,
+      "end": 0.86
+    }
+  ]
+}
+```
+
+### ストリーミング転写
+
+`gpt-transcribe` は `stream=true` を使用して `Content-Type: text/event-stream` を返すことができます。サービスは OpenAI 互換のイベントをそのまま送信します：
+`transcript.text.delta` は増分テキストを含み、`transcript.text.done` は完全なテキストと `usage` を含み、正常に完了したことを示します。
+
+```shell
+curl -N -X POST 'https://api.acedata.cloud/v1/audio/transcriptions' \
+  -H 'authorization: Bearer {token}' \
+  -F file=@audio.mp3 \
+  -F model=gpt-transcribe \
+  -F stream=true
+```
+
+イベントストリームの例：
+
+```text
+data: {"type":"transcript.text.delta","delta":"Hello"}
+
+data: {"type":"transcript.text.done","text":"Hello world","usage":{"type":"tokens","input_tokens":14,"output_tokens":3,"total_tokens":17}}
+```
+
+`transcript.text.done` を受信した時点で正常に完了したことを示します。ストリームが確立された後に処理が失敗した場合、接続は `event: error` イベントの後に終了します；クライアントが積極的に切断すると、今回の処理はキャンセルされ、バックグラウンドで生成され続けることはありません。`whisper-1` は `stream=true` を渡しても、通常の非ストリーミング応答として返されます。
+
+### 公式 SDK の使用
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://api.acedata.cloud/v1", api_key="{token}")
+with open("audio.mp3", "rb") as f:
+    result = client.audio.transcriptions.create(model="whisper-1", file=f)
+print(result.text)
+```
+
+## 価格
+
+| モデル               | 本プラットフォーム価格         |
+| ---------------- | ------------ |
+| `whisper-1`      | $0.0078 / 分 |
+| `gpt-transcribe` | $0.0059 / 分 |
+
+> 音声の実際の長さに基づいて請求され、1秒未満は1秒として計算され、単回の最大は1時間に制限されます。
+
+## 注意事項
+
+- 単一ファイルの最大 **25 MB**。超える場合は、事前に分割または圧縮してください（ビットレートを下げるだけで通常は十分で、音声認識は音質に対する要求が高くありません）。
+- `gpt-transcribe` は `stream=true` SSE をサポートします；`whisper-1` は `stream` を無視し、完全な結果を返します。
+- パラメータは OpenAI の公式 `/v1/audio/transcriptions` と一致しており、公式 SDK は `base_url` を変更するだけで使用できます。
+- `include[]`、`chunking_strategy`、`known_speaker_names[]`、`known_speaker_references[]` は、私たちがまだ提供していない
+  転写モデルに属し、渡すと 400 を返し、静かに無視されることはありません。モデル専用のパラメータ（`timestamp_granularities[]` は `whisper-1` に、
+  `languages[]`/`keywords[]` は `gpt-transcribe` に）をサポートされていないモデルに渡すと同様に 400 を返します。
+- リクエストは時間がかかるため、クライアントのタイムアウト設定は 300 秒以上を推奨します。
+
+## エラーコード
+
+| ステータスコード | code                    | 説明                                                                                                                                                   |
+| --- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400 | `bad_request`           | `file` が提供されていない、ファイルが解析できない、またはパラメータが不正（`model`/`response_format` の値がサポートされていない、`temperature` が 0–1 を超える、`timestamp_granularities[]` が `verbose_json` と組み合わされていない、`whisper-1` がサポートしていないパラメータが渡された）。 |
+| 401 | `authentication_failed` | トークンが無効です。                                                                                                                                            |
+| 403 | `used_up`               | 残高不足。                                                                                                                                                |
+| 413 | `request_too_large`     | 音声ファイルが 25 MB の上限を超えています。                                                                                                                                     |
+| 429 | `too_many_requests`     | リクエストが頻繁すぎます。しばらくしてから再試行してください。                                                                                                                                        |
+| 500 | `api_error`             | サービス内部エラーです。しばらくしてから再試行してください。                                                                                                                                        |
+```

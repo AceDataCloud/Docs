@@ -1,0 +1,364 @@
+---
+title: "MiniMax H3 視頻生成 API 對接指南"
+description: "MiniMax H3 Video Generation 整合指南 - Ace Data Cloud"
+---
+
+本文介紹 MiniMax H3 視頻生成 API 的對接與使用。該接口支持文生視頻、首尾幀控制與多模態參考生視頻，使用統一的 V2 多模態 `content` 結構創建任務。
+
+## 申請流程
+
+要使用 MiniMax H3 視頻生成 API，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications) 獲取您的 API Token，留作備用。
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+如果你尚未登錄或註冊，會自動跳轉到登錄頁面邀請你註冊和登錄，完成後會自動返回當前頁面。
+
+**一個 API Token 即可調用平台所有服務，無需為每個服務單獨申請。** 首次申請會贈送免費額度，可免費體驗；額度不足時可在 [控制台](https://platform.acedata.cloud/console/coin) 充值通用餘額。
+
+> 📘 完整文檔：[MiniMax H3 視頻生成 API →](https://platform.acedata.cloud/documents/minimax-videos-integration)
+
+建議把 Token 保存為環境變量，不要寫入源碼或提交到版本庫：
+
+```bash
+export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
+```
+
+## 接口概覽
+
+- **Base URL**：`https://api.acedata.cloud`
+- **Endpoint**：`POST /minimax/videos`
+- **認證方式**：HTTP Header 中攜帶 `authorization: Bearer {token}`
+- **請求頭**：
+  - `accept: application/json`
+  - `content-type: application/json`
+- **模型（model）**：`MiniMax-H3`
+- **輸入結構**：通過 `content` 統一傳入文本、圖片、視頻和音頻
+- **輸出模式**：默認同步等待生成完成並返回完整 `task`；傳 `async: true` 或 `callback_url` 時立即返回 `task_id` 與 `trace_id`
+- **結果查詢**：通過 [MiniMax H3 任務查詢 API](/documents/minimax-tasks-integration) 獲取狀態和成片
+- **異步回調**：可選，通過 `callback_url` 接收最終任務結果
+
+你不需要傳 `action` 來選擇生成模式，接口會根據 `content` 中的素材類型和 `role` 自動判斷用途。
+
+## 適合哪些場景
+
+| 場景         | 輸入組合                  | 常見用途                      |
+| ---------- | --------------------- | ------------------------- |
+| 文生視頻       | 文本                    | 廣告創意、分鏡預演、短視頻、氛圍鏡頭        |
+| 首幀圖生視頻     | 文本 + 首幀圖片             | 讓商品圖、海報、人物照片或插畫自然動起來      |
+| 尾幀 / 首尾幀視頻 | 文本 + 尾幀，或文本 + 首幀 + 尾幀 | 控制片頭與片尾、轉場、成長變化和前後對比      |
+| 多模態參考生視頻   | 文本 + 參考圖片 / 視頻 / 音頻   | 保持角色和產品一致，複刻動作、運鏡、音色或剪輯節奏 |
+
+## 調用流程
+
+默認不傳 `async` 時，`/minimax/videos` 會等待生成完成並直接返回完整 `task`。需要立即釋放連接時，傳 `async: true` 或 `callback_url`：
+
+1. 保存立即響應中的 `task_id` 和 `trace_id`。
+2. 未配置回調時，每隔約 10 秒調用 `/minimax/tasks` 查詢一次。
+3. 當 `task.status` 變為 `succeeded` 時，從 `task.content.url` 獲取視頻。
+4. 當狀態為 `failed` 或 `cancelled` 時停止輪詢，並讀取 `task.error`。
+
+## 頂層請求參數
+
+| 參數             | 類型       | 必填   | 默認值        | 說明                                                |
+| -------------- | -------- | ---- | ---------- | ------------------------------------------------- |
+| `model`        | string   | 是    | -          | 固定為 `MiniMax-H3`                                  |
+| `content`      | object[] | 是    | -          | 多模態內容數組，必須包含一個非空 `text` 項                         |
+| `resolution`   | string   | 是    | -          | `768P` 或 `2K`                                     |
+| `duration`     | integer  | 是    | -          | 生成時長，4-15 秒整數                                     |
+| `ratio`        | string   | 條件必填 | `adaptive` | `adaptive`、`21:9`、`16:9`、`4:3`、`1:1`、`3:4`、`9:16` |
+| `async`        | boolean  | 否    | `false`    | `true` 時立即返回任務標識，通過任務接口獲取結果                       |
+| `callback_url` | string   | 否    | -          | 接收最終任務結果的公網回調 URL；提供後自動啟用異步模式                     |
+
+`ratio` 的規則取決於工作流：
+
+- **文生視頻**：必填，且不能為 `adaptive`。
+- **首幀、尾幀或首尾幀視頻**：畫幅由輸入圖片決定，建議省略或傳 `adaptive`。
+- **多模態參考生視頻**：可省略，默認 `adaptive`；也可以明確指定一個固定比例。
+
+接口不接受舊版或兼容字段，例如 `prompt`、`image_urls`、`audio_urls`、`messages` 和 `first_frame_image`。收到這類參數錯誤時，請刪除舊字段並遷移到 `content`；例如把 `"prompt": "一隻貓揮手"` 改為 `"content": [{"type": "text", "text": "一隻貓揮手"}]`。不要同時發送新舊兩種格式。
+
+## content 內容項參數
+
+每個內容項都必須有 `type`，其餘字段由類型決定：
+
+| `type`      | 數據字段            | `role`            | 說明                                     |
+| ----------- | --------------- | ----------------- | -------------------------------------- |
+| `text`      | `text`          | 不傳                | 每個請求必須包含一個非空文本項，最長 7000 字符             |
+| `image_url` | `image_url.url` | `first_frame`     | 首幀圖片；只有一張圖片且省略 `role` 時，也按首幀處理         |
+| `image_url` | `image_url.url` | `last_frame`      | 尾幀圖片；可單獨使用，也可與 `first_frame` 組合控制起點和終點 |
+| `image_url` | `image_url.url` | `reference_image` | 參考主體、角色、產品、服裝、場景或風格                    |
+| `video_url` | `video_url.url` | `reference_video` | 參考動作、運鏡、表演或剪輯結構                        |
+| `audio_url` | `audio_url.url` | `reference_audio` | 參考音色、對白、音樂或節奏                          |
+
+媒體地址支持三種形式：
+
+- 可公網訪問的 HTTPS URL，推薦用於大文件。
+- `mm_file://{file_id}`，引用已經上傳或已有結果的文件。
+- 對應媒體類型的 Base64 data URI。Base64 會使體積增加約三分之一，請確保整個請求體不超過 64 MB。
+
+## 素材規格與數量限制
+| 素材  | 格式                                          | 单文件限制     | 尺寸 / 时长                                                         | 数量限制                        |
+| --- | ------------------------------------------- | --------- | --------------------------------------------------------------- | --------------------------- |
+| 图片  | JPG、JPEG、PNG、WEBP、HEIC、HEIF                 | 不超过 30 MB | 宽高均为 256-5760 px；宽高比 0.4-2.5                                    | 首帧最多 1 张、尾帧最多 1 张、参考图最多 9 张 |
+| 视频  | MP4、MOV；H.264/AVC 或 H.265/HEVC；音轨 AAC 或 MP3 | 不超过 50 MB | 每段 2-15 秒，合计不超过 15 秒；宽高均为 256-5760 px；宽高比 0.4-2.5；23.976-60 fps | 最多 3 段参考视频                  |
+| 音频  | WAV、MP3                                     | 不超过 15 MB | 每段 2-15 秒，合计不超过 15 秒                                            | 最多 3 段参考音频                  |
+
+多模态参考场景中的图片、视频和音频合计最多 12 个文件。首尾帧场景和参考素材场景互斥：一旦使用 `reference_image`、`reference_video` 或 `reference_audio`，就不能再使用 `first_frame` 或 `last_frame`，反之亦然。
+
+## 生产级能力展示
+
+下面不是概念图或占位素材，而是 MiniMax H3 官方生产级能力样片的真实参考输入与实际视频输出。三组案例分别覆盖品牌短片、真人叙事和时尚电商，适合评估模型在商业制作中最关键的能力。
+
+| 能力       | 重点观察                        |
+| -------- | --------------------------- |
+| 人物与人脸一致性 | 多镜头切换后五官、发型、妆容和人物气质是否稳定     |
+| 面部表演     | 近景中的眼神、微表情、情绪张力和自然头部运动      |
+| 商品结构保持   | 眼镜、手袋等产品的轮廓、材质、佩戴关系和镜面反射    |
+| 品牌视觉执行   | 场景氛围、电影颗粒、色彩、Logo 与剪辑节奏是否统一 |
+| 电影化叙事    | 景别变化、人物调度、运镜、节奏和声音能否形成完整段落  |
+
+这里的“人脸能力”指视频生成中的人物外观一致性、面部细节和表演控制，不是身份识别、人脸比对或换脸接口。
+
+### 高端品牌短片：人物、产品与品牌资产统一
+
+**制作目标：** 16:9 高级时装品牌片。以荒漠公路和复古汽车建立冷峻氛围，保持女主角外观与黑色手袋结构，并将品牌 Logo 自然纳入结尾。这个案例重点检验跨镜头人物一致性、商品保持、电影质感和品牌收束能力。
+
+| 氛围与场景参考                                                                                                                | 人物参考                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" alt="荒漠公路与复古汽车的品牌片氛围参考" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/88d89cc3-e6cb-42b4-ab4c-1bbbf6c9f7c8" alt="品牌片女主角参考" width="420" /> |
+
+| 手袋产品参考                                                                                                        | 品牌 Logo 参考                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/e91f7fff-f8e3-4da5-b882-87edbc3c9473" alt="黑色手袋产品参考" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/b68dac43-fb14-42b5-bf8b-fd4d65506520" alt="品牌 Logo 参考" width="420" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" style="display: block; width: 100%; max-width: 1080px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/6845b11d-1a58-4478-afd8-29e7e117772a"></video>
+
+[直接打开或下载品牌短片](https://cdn.acedata.cloud/uploads/6845b11d-1a58-4478-afd8-29e7e117772a)
+
+对应的 `content` 组织方式：
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "15 秒、16:9 高级时装品牌片。荒漠公路旁停着复古汽车，女主从后备箱取出黑色手袋，与男主短暂对视后独自离开。保持人物、手袋与品牌视觉一致；冷峻高级，电影颗粒，剪辑利落，结尾自然呈现品牌 Logo。"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/6e65f865-f1c2-4f80-8b51-9a98d4d930b1" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/88d89cc3-e6cb-42b4-ab4c-1bbbf6c9f7c8" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/e91f7fff-f8e3-4da5-b882-87edbc3c9473" },
+      "role": "reference_image"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "https://cdn.acedata.cloud/uploads/b68dac43-fb14-42b5-bf8b-fd4d65506520" },
+      "role": "reference_image"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 15,
+  "ratio": "16:9"
+}
+```
+
+### 真人竖屏短剧：人脸一致性与情绪表演
+**製作目標：** 15 秒、9:16 暗黑浪漫短劇預告。透過男女主角參考圖鎖定人物外觀，以古堡參考圖約束空間；使用中近景與面部特寫表現眼神對峙、恐懼、克制和危險感。這個案例適合觀察真人五官穩定性、微表情、視線關係和連續表演。
+
+| 男女主角參考                                                                                                          | 古堡場景參考                                                                                                        |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/f772a484-9ca5-46dd-b4a4-bb3b62d20086" alt="真人短劇男女主角參考" width="420" /> | <img src="https://cdn.acedata.cloud/uploads/2305899b-8f5d-46e5-bba0-abd8d185691c" alt="暗黑古堡場景參考" width="420" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/f772a484-9ca5-46dd-b4a4-bb3b62d20086" style="display: block; width: 100%; max-width: 520px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/0f3e9bf2-5073-46f4-9a2d-7d8d912391cf"></video>
+
+[直接打開或下載真人短劇](https://cdn.acedata.cloud/uploads/0f3e9bf2-5073-46f4-9a2d-7d8d912391cf)
+
+提示詞應明確人物關係、情緒和景別，而不只是描述“男女對話”：
+
+```text
+15 秒、9:16 真人暗黑浪漫短劇預告。女主誤入禁忌古堡，喚醒沉睡的吸血鬼貴族；
+他危險而克制地靠近，她恐懼但不屈服。保持兩位角色的五官、髮型與服裝一致，
+以中近景和面部特寫表現眼神對峙與情緒張力，暗色電影光線，節奏緊湊。
+```
+
+### 時尚眼鏡廣告：人臉細節與商品結構保持
+
+**製作目標：** 9:16 高級時尚眼鏡廣告。人物全身圖負責身形與台步，人臉參考圖負責五官和妝容，產品圖負責環繞曲線、鏡片反射、鏡腿和貓眼輪廓。這個案例同時考驗臉部近景、多人人一致性、佩戴關係和商品幾何結構。
+
+| 模特與造型參考                                                                                                          | 人臉細節參考                                                                                                        | 眼鏡產品參考                                                                                                        |
+| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="https://cdn.acedata.cloud/uploads/d1e00670-b618-4989-8daf-e2f57ee863ff" alt="時尚廣告模特與造型參考" width="280" /> | <img src="https://cdn.acedata.cloud/uploads/6371092e-58be-4a74-9492-b9de1847af8a" alt="模特人臉細節參考" width="280" /> | <img src="https://cdn.acedata.cloud/uploads/4de062a9-ceb4-4619-bde1-6d90e4b19dad" alt="眼鏡產品結構參考" width="280" /> |
+
+<video controls playsinline preload="metadata" poster="https://cdn.acedata.cloud/uploads/d1e00670-b618-4989-8daf-e2f57ee863ff" style="display: block; width: 100%; max-width: 520px; height: auto; margin: 16px auto; border-radius: 8px;" src="https://cdn.acedata.cloud/uploads/55715089-b6bd-4ef6-a3c2-e762a672f751"></video>
+
+[直接打開或下載時尚眼鏡廣告](https://cdn.acedata.cloud/uploads/55715089-b6bd-4ef6-a3c2-e762a672f751)
+
+在商品廣告中，提示詞應把人物參考和產品參考的職責分開寫清楚：人物素材約束臉、妝容、身形和氣質；產品素材約束輪廓、材質、反射和佩戴位置。這樣比籠統地寫“生成一條眼鏡廣告”更穩定。
+
+## 文生視頻
+
+只有一個文本項時即為文生視頻。適合從創意、腳本或鏡頭描述直接生成畫面。提示詞可以按“主體 + 動作 + 場景 + 鏡頭 + 光線 + 聲音”的順序組織。
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/videos' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MiniMax-H3",
+    "content": [
+      {
+        "type": "text",
+        "text": "15 秒電影級香水廣告：清晨海岸的黑色礁石上，透明香水瓶被薄霧與海浪環繞。微距展現瓶身水珠和玻璃折射，鏡頭從產品特寫緩慢拉升到廣闊海面；銀藍色調，真實自然光，高級克制，結尾定格產品。"
+      }
+    ],
+    "resolution": "2K",
+    "duration": 15,
+    "ratio": "16:9"
+  }'
+```
+
+默認同步模式會在生成完成後返回完整任務：
+
+```json
+{
+  "task": {
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f",
+    "model": "MiniMax-H3",
+    "status": "succeeded",
+    "content": {
+      "url": "https://cdn.acedata.cloud/minimax/f5977217.mp4"
+    },
+    "resolution": "2K",
+    "duration": 15,
+    "ratio": "16:9"
+  }
+}
+```
+
+若請求中加入 `"async": true`，接口立即返回：
+
+```json
+{
+  "task_id": "f5977217-ed2c-40da-adbe-93d08235618f",
+  "trace_id": "trace_7f8c2b1a"
+}
+```
+
+## 首幀圖生視頻
+
+將圖片標記為 `first_frame`，模型會從該畫面開始生成。適合讓海報、商品圖、角色設定圖和攝影作品自然動起來。
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "人物自然呼吸並看向窗外，衣角被微風吹動，鏡頭緩慢推進"
+    },
+    {
+      "type": "image_url",
+      "image_url": {
+        "url": "https://cdn.acedata.cloud/b1c82e4937.png"
+      },
+      "role": "first_frame"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+## 尾幀和首尾幀視頻
+只提供 `last_frame` 可以讓模型自然生成到指定畫面；同時提供 `first_frame` 與 `last_frame`，可以明確控制起點和終點。適合轉場、形態變化、成長過程或產品前後對比。
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "女孩從童年自然成長為青年，時間流逝平滑，人物始終位於畫面中央"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_FIRST_FRAME_URL" },
+      "role": "first_frame"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_LAST_FRAME_URL" },
+      "role": "last_frame"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+首幀與尾幀的尺寸和寬高比應盡量一致，主體位置、構圖和光線差異不要過大，這樣更容易得到自然過渡。
+
+## 多模態參考生視頻
+
+參考素材可以組合使用：參考圖片控制角色或產品外觀，參考視頻控制動作和運鏡，參考音頻控制對白音色、音樂或剪輯節奏。提示詞中應明確說明每類素材要控制什麼，避免只上傳素材卻不給出關聯關係。
+
+```json
+{
+  "model": "MiniMax-H3",
+  "content": [
+    {
+      "type": "text",
+      "text": "保持參考人物的五官、髮型與服裝一致，按照參考視頻中的表演動作完成時尚短片；鏡頭節奏跟隨參考音頻，近景突出自然面部表情"
+    },
+    {
+      "type": "image_url",
+      "image_url": { "url": "YOUR_CHARACTER_IMAGE_URL" },
+      "role": "reference_image"
+    },
+    {
+      "type": "video_url",
+      "video_url": { "url": "YOUR_PERFORMANCE_VIDEO_URL" },
+      "role": "reference_video"
+    },
+    {
+      "type": "audio_url",
+      "audio_url": { "url": "YOUR_AUDIO_URL" },
+      "role": "reference_audio"
+    }
+  ],
+  "resolution": "2K",
+  "duration": 5,
+  "ratio": "adaptive"
+}
+```
+
+## 回調通知
+
+傳入 `callback_url` 會自動啟用異步模式：創建接口立即返回 `task_id` 和 `trace_id`，並在任務完成後向該地址 POST 最終結果，結構與任務查詢響應一致。
+
+回調中的最終狀態為 `succeeded`、`failed` 或 `cancelled`。即使使用回調，也建議保存 `task_id`，以便主動查詢或補償漏掉的通知。
+
+## 常見錯誤
+
+| HTTP 狀態碼 | 含義           | 處理建議                           |
+| -------- | ------------ | ------------------------------ |
+| `400`    | 參數錯誤或素材組合不合法 | 檢查必填字段、`role`、素材數量和格式          |
+| `401`    | Token 缺失或無效  | 檢查 `Authorization: Bearer ...` |
+| `402`    | 餘額或額度不足      | 在控制台補充通用餘額                     |
+| `422`    | 內容安全檢查未通過    | 調整提示詞或素材後重新提交                  |
+| `429`    | 請求過於頻繁       | 指數退避後重試；任務輪詢建議間隔約 10 秒         |
+| `500`    | 服務暫時不可用      | 保留請求信息，稍後重試                    |
+
+同步響應中的 `task.status: succeeded` 表示視頻已生成；異步確認只代表任務已進入隊列。只有任務最終成功時才會計費，查詢任務本身免費，不會重複扣費。

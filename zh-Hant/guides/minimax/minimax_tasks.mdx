@@ -1,0 +1,296 @@
+---
+title: "MiniMax H3 任務查詢 API 對接指南"
+description: "MiniMax H3 Video Generation 整合指南 - Ace Data Cloud"
+---
+
+本文介紹 MiniMax H3 任務查詢 API 的對接與使用。該接口用於查詢、批量列出或刪除 [MiniMax H3 視頻生成 API](/documents/minimax-videos-integration) 創建的異步任務。
+
+## 申請流程
+
+要使用 MiniMax H3 任務查詢 API，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications) 獲取您的 API Token，留作備用。
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+如果你尚未登錄或註冊，會自動跳轉到登錄頁面邀請你註冊和登錄，完成後會自動返回當前頁面。
+
+**一個 API Token 即可調用平台所有服務，無需為每個服務單獨申請。** 首次申請會贈送免費額度，可免費體驗；額度不足時可在 [控制台](https://platform.acedata.cloud/console/coin) 充值通用餘額。
+
+> 📘 完整文檔：[MiniMax H3 任務查詢 API →](https://platform.acedata.cloud/documents/minimax-tasks-integration)
+
+查詢任務時應使用創建該任務的同一個 Token。建議將 Token 保存為環境變量，不要寫入源碼或提交到版本庫：
+
+```bash
+export ACEDATACLOUD_API_KEY="YOUR_API_KEY"
+```
+
+## 接口概覽
+
+- **Base URL**：`https://api.acedata.cloud`
+- **Endpoint**：`POST /minimax/tasks`
+- **認證方式**：HTTP Header 中攜帶 `authorization: Bearer {token}`
+- **請求頭**：
+  - `accept: application/json`
+  - `content-type: application/json`
+- **查詢單個任務**：`action=retrieve`，傳入 `id`
+- **批量查詢任務**：`action=retrieve_batch`，可按任務 ID、時間範圍和分頁條件篩選
+- **刪除任務**：`action=delete`，傳入 `id`
+- **計費說明**：任務查詢免費，不會產生重複計費
+
+創建視頻後必須保存 `task_id`。推薦每隔約 10 秒查詢一次，直到任務進入終態。
+
+## 請求參數
+
+| 參數               | 類型       | 必填   | 適用動作                | 說明                                                   |
+| ---------------- | -------- | ---- | ------------------- | ---------------------------------------------------- |
+| `action`         | string   | 否    | 全部                  | `retrieve`、`retrieve_batch` 或 `delete`；默認 `retrieve` |
+| `id`             | string   | 條件必填 | `retrieve`、`delete` | 單個任務 ID                                              |
+| `ids`            | string[] | 否    | `retrieve_batch`    | 只返回指定任務 ID；省略時按其他條件列出任務                              |
+| `limit`          | integer  | 否    | `retrieve_batch`    | 本次最多返回的任務數量                                          |
+| `offset`         | integer  | 否    | `retrieve_batch`    | 從結果列表中跳過的任務數量，用於分頁                                   |
+| `created_at_min` | number   | 否    | `retrieve_batch`    | 創建時間下限，Unix 時間戳，單位為秒                                 |
+| `created_at_max` | number   | 否    | `retrieve_batch`    | 創建時間上限，Unix 時間戳，單位為秒                                 |
+
+三種動作的用途如下：
+
+| `action`         | 用途                 | 必要參數                           | 響應結構                                  |
+| ---------------- | ------------------ | ------------------------------ | ------------------------------------- |
+| `retrieve`       | 查詢一個任務的狀態和結果       | `id`                           | `{ "task": {...} }`                   |
+| `retrieve_batch` | 按任務 ID、時間和分頁條件批量查詢 | 可選 `ids`、時間範圍、`offset`、`limit` | `{ "items": [...], "total": number }` |
+| `delete`         | 根據任務當前狀態取消或刪除任務記錄  | `id`                           | `{ "id": "...", "deleted": true }`    |
+
+## 查詢單個任務
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "action": "retrieve",
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f"
+  }'
+```
+
+下面是一次真實成功任務的響應：
+
+```json
+{
+  "task": {
+    "id": "f5977217-ed2c-40da-adbe-93d08235618f",
+    "model": "MiniMax-H3",
+    "status": "succeeded",
+    "created_at": 1786184658,
+    "updated_at": 1786184758,
+    "content": {
+      "url": "https://platform2.cdn.acedata.cloud/minimax/f5977217-ed2c-40da-adbe-93d08235618f.mp4"
+    },
+    "resolution": "768P",
+    "duration": 4,
+    "usage": {
+      "total_seconds": 4,
+      "input_seconds": 0,
+      "output_seconds": 4,
+      "input_image_count": 0
+    },
+    "ratio": "16:9",
+    "task_type": "generation",
+    "modality": "video"
+  }
+}
+```
+
+[打開這次任務的真實視頻結果](https://platform2.cdn.acedata.cloud/minimax/f5977217-ed2c-40da-adbe-93d08235618f.mp4)
+
+## 任務狀態
+
+| `status`    | 含義         | 客戶端處理                      |
+| ----------- | ---------- | -------------------------- |
+| `queued`    | 已進入隊列，等待執行 | 繼續輪詢                       |
+| `running`   | 正在生成       | 繼續輪詢                       |
+| `succeeded` | 生成成功       | 讀取 `task.content.url`，停止輪詢 |
+| `failed`    | 生成失敗       | 讀取 `task.error`，停止輪詢       |
+| `cancelled` | 任務已取消      | 停止輪詢                       |
+
+`succeeded`、`failed` 和 `cancelled` 都是終態。不要在進入終態後繼續輪詢。
+
+## task 響應字段
+
+| 字段                        | 類型      | 說明                              |
+| ------------------------- | ------- | ------------------------------- |
+| `id`                      | string  | 任務 ID                           |
+| `model`                   | string  | 任務使用的模型，現在為 `MiniMax-H3`        |
+| `status`                  | string  | 當前任務狀態                          |
+| `error.code`              | string  | 失敗錯誤碼，僅失敗時返回                    |
+| `error.message`           | string  | 失敗原因，僅失敗時返回                     |
+| `created_at`              | integer | 創建時間，Unix 時間戳，單位為秒              |
+| `updated_at`              | integer | 最近一次狀態更新時間，Unix 時間戳，單位為秒        |
+| `content.url`             | string  | 成功後的視頻地址                        |
+| `resolution`              | string  | 輸出分辨率，`768P` 或 `2K`             |
+| `duration`                | integer | 輸出視頻時長，單位為秒                     |
+| `usage.total_seconds`     | integer | 總計費用量，等於輸入視頻秒數與輸出秒數之和           |
+| `usage.input_seconds`     | integer | 參考視頻輸入產生的計費用量                   |
+| `usage.output_seconds`    | integer | 輸出視頻產生的計費用量                     |
+| `usage.input_image_count` | integer | 計費統計中的輸入圖片數量                    |
+| `ratio`                   | string  | 實際輸出寬高比；使用 `adaptive` 時以這裡的結果為準 |
+| `task_type`               | string  | 視頻生成任務為 `generation`            |
+| `modality`                | string  | 視頻任務為 `video`                   |
+
+## Python 輪詢完整示例
+以下代码從環境變量讀取 Token，創建任務後每隔 10 秒查詢一次：
+
+```python
+import os
+import time
+
+import requests
+
+BASE_URL = "https://api.acedata.cloud"
+HEADERS = {
+    "Authorization": f"Bearer {os.environ['ACEDATACLOUD_API_KEY']}",
+    "Content-Type": "application/json",
+}
+
+create_response = requests.post(
+    f"{BASE_URL}/minimax/videos",
+    headers=HEADERS,
+    json={
+        "model": "MiniMax-H3",
+        "content": [
+            {
+                "type": "text",
+                "text": "清晨的海邊，一艘白色帆船駛過平靜海面，鏡頭緩慢橫移",
+            }
+        ],
+        "resolution": "768P",
+        "duration": 4,
+        "ratio": "16:9",
+    },
+    timeout=30,
+)
+create_response.raise_for_status()
+task_id = create_response.json()["task_id"]
+
+while True:
+    time.sleep(10)
+    query_response = requests.post(
+        f"{BASE_URL}/minimax/tasks",
+        headers=HEADERS,
+        json={"action": "retrieve", "id": task_id},
+        timeout=30,
+    )
+    query_response.raise_for_status()
+    task = query_response.json()["task"]
+    print(f"task={task_id} status={task['status']}")
+
+    if task["status"] == "succeeded":
+        print(f"video_url={task['content']['url']}")
+        break
+    if task["status"] in ("failed", "cancelled"):
+        raise RuntimeError(task.get("error") or task["status"])
+```
+
+生產環境應為輪詢設置總超時，並對 `429` 和臨時 `5xx` 使用指數退避。網絡超時不等於生成失敗，可以使用同一個 `task_id` 繼續查詢。
+
+## 批量查詢
+
+指定多個任務 ID：
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": ["TASK_ID_1", "TASK_ID_2"],
+    "offset": 0,
+    "limit": 20
+  }'
+```
+
+按時間範圍分頁列出任務：
+
+```json
+{
+  "action": "retrieve_batch",
+  "created_at_min": 1786000000,
+  "created_at_max": 1786200000,
+  "offset": 0,
+  "limit": 20
+}
+```
+
+批量響應中的 `items` 使用與單任務查詢相同的 task 字段，`total` 是篩選條件匹配的任務總數：
+
+```json
+{
+  "items": [
+    {
+      "id": "TASK_ID_1",
+      "model": "MiniMax-H3",
+      "status": "running",
+      "resolution": "2K",
+      "duration": 5,
+      "ratio": "adaptive",
+      "task_type": "generation",
+      "modality": "video"
+    }
+  ],
+  "total": 1
+}
+```
+
+任務查詢窗口為最近 7 天。超過該窗口的 `task_id` 可能返回無效任務；業務系統應在創建任務時保存 ID，並在成功後及時持久化結果 URL。
+
+## 取消或刪除任務
+
+```bash
+curl -X POST 'https://api.acedata.cloud/minimax/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "action": "delete",
+    "id": "YOUR_TASK_ID"
+  }'
+```
+
+動作取決於任務當前狀態：
+
+| 當前狀態        | 行為            |
+| ----------- | ------------- |
+| `queued`    | 取消尚未開始的任務     |
+| `succeeded` | 刪除任務記錄        |
+| `failed`    | 刪除任務記錄        |
+| `running`   | 不允許刪除或取消，返回錯誤 |
+| `cancelled` | 不允許重複操作，返回錯誤  |
+
+刪除成功示例：
+
+```json
+{
+  "id": "YOUR_TASK_ID",
+  "deleted": true
+}
+```
+
+刪除任務記錄不會撤銷已經完成的計費，也不能保證已保存的視頻副本同時被刪除。
+
+## 失敗響應與排查
+
+失敗任務仍以 HTTP 200 返回 task 對象，並在 `task.error` 中給出原因：
+
+```json
+{
+  "task": {
+    "id": "YOUR_TASK_ID",
+    "model": "MiniMax-H3",
+    "status": "failed",
+    "error": {
+      "code": "1026",
+      "message": "video description contains sensitive content"
+    },
+    "task_type": "generation",
+    "modality": "video"
+  }
+}
+```
+
+接口本身返回 `400` 時應檢查 `action` 與條件參數，`401` 表示 Token 無效，`429` 表示查詢過於頻繁，`500` 表示服務暫時不可用。生成失敗的任務不計費；成功任務按最終 `usage` 記錄用量。
