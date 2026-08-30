@@ -888,13 +888,13 @@ def index_localized_guides(payload: Any, language: str) -> dict[str, dict[str, s
     for item in items:
         if not isinstance(item, dict):
             continue
+        api = item.get("api")
         sibling = item.get("sibling")
-        if not isinstance(sibling, dict) or not sibling.get("content"):
+        if not isinstance(api, dict) or not isinstance(sibling, dict) or not sibling.get("content"):
             continue
 
         candidates = [item.get("alias", ""), sibling.get("alias", "").removesuffix("-integration")]
-        api = item.get("api")
-        api_path = (api.get("path") or "").strip("/").replace("/", "_") if isinstance(api, dict) else ""
+        api_path = (api.get("path") or "").strip("/").replace("/", "_")
 
         guide = {
             "content": sibling["content"],
