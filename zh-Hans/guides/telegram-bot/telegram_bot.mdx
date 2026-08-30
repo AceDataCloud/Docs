@@ -1,0 +1,148 @@
+---
+title: "Telegram 账号代理使用指南"
+description: "Telegram Account Proxy 集成指南 - Ace Data Cloud"
+---
+
+Telegram 账号代理为你本人拥有的个人 Telegram 账号提供独立、常驻的 MCP 与 REST 接口。每个实例只服务一个账号；容器内不含 AI，登录会话保存在该实例的独立持久卷中。
+
+> 这不是 Telegram Bot API 机器人。请勿用于垃圾消息、批量冷发或绕过 Telegram 限制。向第三方发送、编辑或删除内容前，应由你的 Agent 获取明确确认。
+
+## 部署与登录
+
+1. 在[控制台 → 应用](https://platform.acedata.cloud/console/applications)创建 Telegram 账号代理，并选择资源规格。
+2. 实例就绪后点击「生成登录二维码」。二维码短期有效，过期后可重新生成。
+3. 在 Telegram 打开**设置 → 设备 → 链接桌面设备**并扫描二维码。
+4. 如果状态变为 `password_required`，在控制台输入 Telegram 两步验证密码。密码只提交到你的租户实例，不会写入平台配置。
+5. 状态变为 `authenticated` 后，控制台显示当前账号、MCP 地址和 Bearer 访问令牌。
+
+授权会话存储在持久卷中，正常重启和升级会复用它。控制台「退出账号」会调用 `/api/auth/logout` 撤销 Telegram 会话；「销毁实例」还会删除工作负载与持久卷。
+
+## 鉴权与健康检查
+
+除 `/health` 外，登录、REST 与 MCP 接口都要求：
+
+```text
+Authorization: Bearer <访问令牌>
+```
+
+服务只接受请求头鉴权，不支持把令牌拼到 URL。请像保护账号密码一样保护它。
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+```
+
+返回示例：
+
+```json
+{
+  "status": "ok",
+  "gateway_connected": true,
+  "login_state": "authenticated"
+}
+```
+
+- `gateway_connected` 表示实例能否连接 Telegram。
+- `login_state` 常见值包括 `login_required`、`waiting_scan`、`password_required`、`authenticated`。
+- `/health` 返回 200 只说明进程可用；进行账号操作前还要确认 `login_state=authenticated`。
+
+## 连接 MCP 客户端
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <访问令牌>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Cursor 等支持静态请求头的客户端
+
+按客户端当前文档配置 Streamable HTTP 地址，并添加 `Authorization` 请求头。例如支持下列结构的客户端可使用：
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <访问令牌>"}
+    }
+  }
+}
+```
+
+这不是所有 MCP 客户端的通用配置格式。Claude Desktop / Claude.ai 的远程连接器由云端建立，不读取本地 `claude_desktop_config.json` 中的任意 HTTP 请求头；当前如需静态 Bearer 请求头，请使用 Claude Code 或明确支持该能力的客户端。
+
+## MCP 工具
+
+| 工具 | 作用 |
+|---|---|
+| `telegram_whoami` | 查看当前授权账号 |
+| `telegram_list_chats` | 列出最近会话，可仅看未读 |
+| `telegram_contacts` | 列出联系人 |
+| `telegram_read_messages` | 读取指定会话的最近消息 |
+| `telegram_search_messages` | 搜索一个会话或全部会话 |
+| `telegram_send_message` | 发送消息，可回复指定消息 |
+| `telegram_edit_message` | 编辑当前账号发送的消息 |
+| `telegram_delete_message` | 删除有权限删除的消息 |
+| `telegram_react` | 使用 Unicode 表情回应消息 |
+| `telegram_mark_read` | 将会话标记为已读 |
+
+`target` 可以是会话 ID、用户名或**精确**会话名称；名称有歧义时优先使用 ID 或用户名。
+
+## REST API
+
+所有成功响应使用 `{"data": ...}`，失败响应使用 `{"error": "..."}`。
+
+### 示例
+
+```bash
+# 当前账号
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 最近会话
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 给 Saved Messages 发一条测试消息
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### 完整接口
+
+| 方法与路径 | 主要参数 | 作用 |
+|---|---|---|
+| `POST /api/auth/qr` | — | 生成登录二维码 URL |
+| `GET /api/auth/status` | — | 查询登录状态与账号信息 |
+| `POST /api/auth/password` | `{password}` | 提交两步验证密码 |
+| `POST /api/auth/logout` | — | 撤销实例保存的会话 |
+| `GET /api/whoami` | — | 查看当前账号 |
+| `GET /api/chats` | `?limit=&unread_only=` | 列出会话与未读数 |
+| `GET /api/contacts` | — | 列出联系人 |
+| `GET /api/chats/{target}/messages` | `?limit=` | 读取消息 |
+| `GET /api/messages/search` | `?q=&target=&limit=` | 搜索消息；省略 target 时跨会话搜索 |
+| `POST /api/messages` | `{target,text,reply_to?}` | 发送或回复消息 |
+| `PATCH /api/chats/{target}/messages/{message_id}` | `{text}` | 编辑消息 |
+| `DELETE /api/chats/{target}/messages/{message_id}` | — | 删除消息 |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}` | 添加 Unicode 表情回应 |
+| `POST /api/chats/{target}/read` | — | 标记会话已读 |
+
+## 常见问题
+
+- **401**：Bearer 令牌缺失或错误。确认令牌放在请求头，不是 URL 查询参数。
+- **503**：代理访问令牌未配置，或 Telegram 客户端尚未就绪。先检查 `/health`。
+- **400**：参数或 JSON 无效；搜索必须提供 `q`，`limit` 必须是大于等于 1 的整数。
+- **403 / 404**：当前账号没有权限，或 target / message ID 不存在。
+- **429**：触发 Telegram 频率限制。读取 `retry_after` 并等待，不要并发重试。
+- **二维码一直未完成**：重新生成二维码，并确认使用的是 Telegram「链接桌面设备」扫码入口。
+- **重启后要求重新登录**：检查实例持久卷是否正常；主动退出、在 Telegram 设备列表撤销会话或会话失效后需要重新扫码。
+
+## 验证范围
+
+源码和自动化测试覆盖登录状态、Bearer fail-close、REST 参数校验、错误映射与会话持久化实现。生产使用仍应先在 `target=me`（Saved Messages）完成只读与消息创建/编辑/删除 smoke，再允许 Agent 操作第三方会话。
