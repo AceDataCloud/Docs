@@ -291,6 +291,54 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             self.assertNotIn("private.invalid", message)
             self.assertNotIn("restricted source", message)
 
+    def test_clean_schema_downgrades_numeric_exclusive_bounds(self) -> None:
+        self.assertEqual(
+            sync.clean_schema({"type": "number", "exclusiveMinimum": 0}),
+            {"type": "number", "minimum": 0, "exclusiveMinimum": True},
+        )
+
+    def test_clean_openapi_normalizes_components_and_media_examples(self) -> None:
+        spec = {
+            "openapi": "3.0.0",
+            "paths": {
+                "/items": {
+                    "post": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {"$ref": "#/components/schemas/Envelope"},
+                                        "example": {"ok": True},
+                                        "examples": {
+                                            "raw": {"ok": True},
+                                            "wrapped": {"summary": "Done", "value": {"ok": True}},
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "components": {
+                "schemas": {
+                    "Envelope": {
+                        "type": "object",
+                        "required": [],
+                        "properties": {"ok": {"type": "boolean"}},
+                    }
+                }
+            },
+        }
+
+        cleaned = sync.clean_openapi_spec(spec)
+
+        self.assertNotIn("required", cleaned["components"]["schemas"]["Envelope"])
+        examples = cleaned["paths"]["/items"]["post"]["responses"]["200"]["content"]["application/json"]["examples"]
+        self.assertEqual(examples["raw"], {"value": {"ok": True}})
+        self.assertEqual(examples["wrapped"], {"summary": "Done", "value": {"ok": True}})
+        self.assertNotIn("example", cleaned["paths"]["/items"]["post"]["responses"]["200"]["content"]["application/json"])
+
     def test_openapi_artifact_validation_only_checks_responses(self) -> None:
         request_only = {
             "paths": {
