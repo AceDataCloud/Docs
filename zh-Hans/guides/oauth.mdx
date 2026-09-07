@@ -2,13 +2,13 @@
 title: "接入「使用 Ace Data Cloud 登录」（OAuth 2.0）"
 ---
 
-让你自己的产品支持「使用 Ace Data Cloud 登录」，并在用户授权后，**代表用户**读写其 Ace Data Cloud 资源（个人资料、API Token、订阅、用量、订单等）。底层是标准的 **OAuth 2.0 授权码模式（Authorization Code）+ PKCE**，与 GitHub / Google 登录的接法完全一致——你已有的任意 OAuth 客户端库都能直接用。
+让你自己的产品支持「使用 Ace Data Cloud 登录」，并在用户授权后，**代表用户**读写其 Ace Data Cloud 资源（个人资料、API Token、订阅、用量、订单等）。底层是标准的 **OAuth 2.0 授权码模式（Authorization Code）+ PKCE**，可用支持授权码与 PKCE 的 OAuth 客户端库接入；需按下面的端点、认证方式和用户信息字段配置。
 
 > **适合场景**：你在做一个第三方应用 / Agent / MCP 客户端 / 自动化工作流，想让用户用 Ace Data Cloud 账号一键登录，并按需访问他在平台上的资源，而不必让用户手动复制粘贴 API Key。
 
 ## 名词 & 端点速查
 
-所有端点都在 `https://auth.acedata.cloud`，可通过发现端点（Discovery）随时获取最新地址：
+授权相关端点在 `https://auth.acedata.cloud`，可通过发现端点（Discovery）随时获取最新地址：
 
 ```bash
 curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
@@ -29,7 +29,7 @@ curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
 
 按「最小权限」申请，用户会在授权页看到你申请的每一项权限。
 
-**身份类（OIDC 兼容）**
+**身份类 Scope**
 
 | Scope | 含义 | `/users/me` 返回字段 |
 |-------|------|----------------------|
@@ -96,7 +96,7 @@ https://auth.acedata.cloud/oauth2/authorize
 - `state`：自己生成的随机串，回调时原样带回，用来防 CSRF，**务必校验**。
 - **PKCE（公开客户端必做，机密客户端也推荐）**：先生成随机 `code_verifier`，再计算
   `code_challenge = BASE64URL( SHA256( code_verifier ) )`，把 `code_challenge` 放进授权 URL，
-  `code_verifier` 自己留着第 4 步用。
+  `code_verifier` 自己留着第 3 步用。
 
 用户登录并点击「同意」后，浏览器会被重定向回：
 
@@ -112,15 +112,17 @@ https://auth.acedata.cloud/oauth2/authorize
 
 在你的**后端**（机密客户端）或客户端（PKCE 公开客户端）用 `code` 调用令牌端点。
 
+以下 Bash 命令使用你在前面取得的环境变量 `CLIENT_ID`、`CLIENT_SECRET`、`REDIRECT_URI`、`AUTHORIZATION_CODE`、`CODE_VERIFIER`。先赋值再执行；`--data-urlencode` 会正确编码回调地址和授权码。
+
 **机密客户端（带 client_secret）：**
 
 ```bash
 curl -X POST https://auth.acedata.cloud/oauth2/token \
   -d grant_type=authorization_code \
-  -d code=<上一步拿到的 code> \
-  -d client_id=<你的 client_id> \
-  -d client_secret=<你的 client_secret> \
-  -d redirect_uri=<和第 2 步完全一致的回调地址>
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "client_secret=$CLIENT_SECRET" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI"
 ```
 
 **公开客户端（PKCE，无 client_secret）：**
@@ -128,25 +130,25 @@ curl -X POST https://auth.acedata.cloud/oauth2/token \
 ```bash
 curl -X POST https://auth.acedata.cloud/oauth2/token \
   -d grant_type=authorization_code \
-  -d code=<code> \
-  -d client_id=<你的 client_id> \
-  -d code_verifier=<第 2 步生成的 code_verifier> \
-  -d redirect_uri=<回调地址>
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "code_verifier=$CODE_VERIFIER" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI"
 ```
 
-成功返回（`refresh_token` 仅在申请了 `offline_access` 时出现）：
+返回结构示意（占位值不是实测凭据；`refresh_token` 仅在申请了 `offline_access` 时出现）：
 
 ```json
 {
   "access_token": "<JWT>",
   "token_type": "Bearer",
   "expires_in": 1296000,
-  "scope": "openid profile credentials:read",
+  "scope": "openid profile credentials:read offline_access",
   "refresh_token": "<JWT，仅 offline_access 时>"
 }
 ```
 
-`access_token` 是一个 JWT，内含 `scope` 声明；有效期 **15 天**（`expires_in` 秒数）。Refresh Token 有效期 **30 天**。
+`access_token` 是一个 JWT，内含 `scope` 声明；Access Token 到期时间以响应 `expires_in` 为准。不要依赖旧文档的“Refresh Token 固定 30 天”：当前配置未设置 SimpleJWT 使用的 `REFRESH_TOKEN_LIFETIME`，库默认值是 1 天；部署配置可能覆盖它，客户端必须处理刷新失败并重新授权。
 
 ## 第 4 步：用 Access Token 调用接口
 
@@ -159,10 +161,10 @@ curl https://auth.acedata.cloud/api/v1/users/me \
   -H "Authorization: Bearer <access_token>"
 ```
 
-**调用平台资源接口**（`api.acedata.cloud`，按 scope 鉴权）。例如已获 `credentials:read`：
+**调用平台资源接口**（`platform.acedata.cloud`，按 scope 鉴权）。例如已获 `credentials:read`：
 
 ```bash
-curl https://api.acedata.cloud/api/v1/credentials/ \
+curl https://platform.acedata.cloud/api/v1/credentials/ \
   -H "Authorization: Bearer <access_token>"
 ```
 
@@ -175,21 +177,23 @@ Access Token 过期后，用 Refresh Token 换一对新令牌（需当初申请�
 ```bash
 curl -X POST https://auth.acedata.cloud/oauth2/token \
   -d grant_type=refresh_token \
-  -d refresh_token=<你的 refresh_token>
+  --data-urlencode "refresh_token=$REFRESH_TOKEN"
 ```
 
-返回结构同第 3 步；scope 会从原授权中**原样保留**。刷新后旧 Refresh Token 失效（轮换），请保存新的。
+返回结构同第 3 步；scope 会从原授权中**原样保留**。请保存新令牌。当前自定义刷新处理并未把旧 Refresh Token 加入黑名单，不能承诺旧令牌刷新后立即失效。
 
 ## 撤销令牌
 
 ```bash
 curl -X POST https://auth.acedata.cloud/oauth2/revoke \
-  -d token=<access_token 或 refresh_token>
+  --data-urlencode "token=$ACCESS_TOKEN"
 ```
 
-## 真实案例：我们自己的 MCP 服务器就是这么接的
+当前撤销端点接收请求并返回 HTTP 200，但服务端实现没有撤销 JWT。**200 不代表旧令牌已经不可用**。退出你的应用时删除本地凭据；若产品要求服务端即时撤销，当前实现不满足该要求，不能仅靠调用此端点完成。
 
-Ace Data Cloud 的 15+ 个 MCP 服务器（NanoBanana、Midjourney、Suno、Seedance、Kling…）在 Claude Desktop / Cursor 里出现的「Sign in with Ace Data Cloud」连接，走的就是这套流程：它们都是注册为 **公开（PKCE）** 类型的 OAuth 应用，申请 `credentials` 相关 scope，用户授权后 MCP 服务器即可代表用户调用 `api.acedata.cloud`——无需用户手动粘贴 API Key。你的接法和它们完全一样。
+## MCP 中的 OAuth 连接
+
+支持 OAuth 的 MCP 连接可通过浏览器授权取得访问所需凭据；它与在 JSON 中直接填写 API Key 是两条不同的配置路径。具体客户端是否支持远程 OAuth、申请哪些 Scope，应以对应 MCP 教程和实际同意页为准。不要把 OAuth Access Token 当作通用 API Key 随意互换。
 
 ## 常见错误
 
@@ -210,6 +214,18 @@ Ace Data Cloud 的 15+ 个 MCP 服务器（NanoBanana、Midjourney、Suno、Seed
 | 每账号最多 OAuth 应用数 | 20 |
 | 授权码有效期 | 10 分钟，单次使用 |
 | Access Token 有效期 | 15 天 |
-| Refresh Token 有效期 | 30 天（轮换） |
+| Refresh Token 有效期 | 以部署配置和令牌到期时间为准；不保证刷新后旧令牌失效 |
 | `redirect_uri` | 必须与注册值精确匹配 |
 | `client_secret` | 仅创建 / 轮换时显示一次，服务端以 SHA-256 哈希存储 |
+
+## 本轮核对与联调验收
+
+2026-09-07 实际读取 Discovery，确认本文授权、换 Token、撤销、UserInfo 端点及 Scope 列表。发现文档支持 S256 与 plain；新接入统一使用 S256。当前返回的发现字段不足以声明完整 OIDC：不要假定一定有 `id_token`、JWKS 或 OIDC UserInfo 的标准 `sub` 字段；身份按本文 `id` 处理。
+
+实际联调时依次验证：state 不匹配应拒绝回调；code 仅换取一次；UserInfo 只返回授权范围内字段；需要离线续期才申请 offline_access；撤销端点当前不保证旧凭据失效，应把它列为接入限制。Discovery 读取成功不代表整条 OAuth 用户授权流程已实测。
+
+2026-09-07 还实际检查了管理接口路由：`api.acedata.cloud/api/v1/credentials/` 返回 404；本文修正后的 `platform.acedata.cloud/api/v1/credentials/` 在未携带凭据时返回 401。这验证路由存在，不等同于完成用户授权。刷新与撤销限制来自当前服务端实现核对。
+
+- [OAuth 授权服务器元数据 RFC 8414](https://www.rfc-editor.org/rfc/rfc8414)
+- [PKCE RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)
+- [SimpleJWT 令牌有效期配置](https://django-rest-framework-simplejwt.readthedocs.io/en/stable/settings.html#refresh-token-lifetime)
