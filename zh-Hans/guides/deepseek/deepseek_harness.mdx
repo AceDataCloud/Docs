@@ -1,119 +1,112 @@
 ---
-title: "DeepSeek Harness 接入 Coding Plan"
+title: "DeepSeek Harness：新版 SDK 接入与文件读取实战"
 description: "DeepSeek AI 集成指南 - Ace Data Cloud"
 ---
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 是在本地运行的编程 Agent。它会读取工作区、调用工具并执行命令，再通过 OpenAI-compatible Chat Completions 接口调用模型。
+DeepSeek Harness 是本地编程 Agent 运行时。Python SDK 启动随包提供的运行时，通过 Ace Data Cloud 的 Chat Completions 接口完成模型请求和工具循环。
 
-> 本文适用于 `deepseek-harness-sdk==0.1.0rc6` 与 `deepseek-harness-runtime-bin==0.1.0rc6`。升级客户端后，请重新完成下方的只读文件测试。
+**2026-09-07 实测版本：`deepseek-harness-sdk==0.1.2rc1`，匹配运行时 `deepseek-harness-runtime-bin==0.1.2rc1`。** 这是候选发布版（rc）；本例固定版本以便复现，不把将来的 `latest` 自动视为兼容。旧版 `0.1.0rc6` 示例需要迁移：显式提供 `dsh_home`，不再使用已移除的 `session_root` 参数。
 
-## 支持范围
+## 获取 Ace Data Cloud API Key
 
-| 项目 | 配置 |
-|---|---|
-| API Base URL | `https://api.acedata.cloud/v1` |
-| 模型 | `deepseek-v4-pro` |
-| 协议 | OpenAI-compatible Chat Completions（流式） |
-| 能力 | 文本、推理过程、函数工具调用、本地 Bash 工具循环、usage 统计 |
+1. 打开 [控制台 → 应用列表](https://platform.acedata.cloud/console/applications)，完成登录。
+2. 按计费方式选择应用：使用 Coding Plan 时进入 **Coding Application**；按量使用时选择有对应服务权限的通用/服务应用。Coding 套餐与通用余额分别管理。
+3. 复制该应用的 **API Key / API Token**，不要复制 Application ID 或 `platform-` 管理 Token。下文 API Key 字段只填写密钥本身，不含 `Bearer ` 前缀。
+4. 确认应用有效且有额度。活动和免费额度以控制台实时显示为准。
 
-模型目录会变化。运行前先用 Coding Plan 专属密钥查询实时目录：
+用同一把 Key 查询模型目录：
 
 ```bash
-curl https://api.acedata.cloud/v1/models \
+export ACEDATACLOUD_API_KEY="YOUR_ACEDATACLOUD_API_KEY"
+curl --fail-with-body https://api.acedata.cloud/v1/models \
   -H "Authorization: Bearer $ACEDATACLOUD_API_KEY"
 ```
 
-确认响应包含 `deepseek-v4-pro`。不要把 `deepseek-v4-flash` 当作本文工具模式的等价替代；本次固定版本验证中，它的多轮推理历史与工具回放未通过。
+PowerShell 环境变量写法为 `$env:ACEDATACLOUD_API_KEY = "YOUR_ACEDATACLOUD_API_KEY"`；使用 Windows 自带 curl 时写 `curl.exe`。`/v1/models` 是模型发现入口，目录中出现某个模型不等于当前 Key 有对应 API 权限。还要核对所选协议、应用范围和客户端能力。
 
-## 1. 准备专属密钥
+下文 `MODEL_ID` 必须替换为具体模型 ID。不要把真实 Key 提交到 Git、贴进日志或截图。
+## 1. 安装 SDK
 
-打开 [Coding Plan 应用](https://platform.acedata.cloud/console/applications)，进入已购买的 Coding Application，创建或复制该应用的专属 API Key。Coding Plan 不使用通用余额，其他应用的密钥不能代表套餐权限。
-
-只把密钥放进当前 shell：
-
-```bash
-export ACEDATACLOUD_API_KEY="PASTE_YOUR_CODING_KEY_HERE"
-export DEEPSEEK_BASE_URL="https://api.acedata.cloud/v1"
-export DEEPSEEK_API_KEY="$ACEDATACLOUD_API_KEY"
-```
-
-不要把真实密钥写入脚本、配置仓库、终端截图或 Session 记录。
-
-## 2. 创建隔离工作区
-
-Harness 的 bundled runtime 包含本地 Bash 工具。第一次验证不要指向真实项目或主目录；创建一个没有秘密的一次性目录：
+需要 Python 3.10+，以及当前运行时 wheel 支持的操作系统/CPU 架构。先在一个测试目录中创建虚拟环境：
 
 ```bash
-mkdir -p /tmp/deepseek-harness-demo/workspace
-mkdir -p /tmp/deepseek-harness-demo/sessions
-printf 'compatibility fixture\n' > /tmp/deepseek-harness-demo/workspace/fixture.txt
-python3 -m venv /tmp/deepseek-harness-demo/venv
-/tmp/deepseek-harness-demo/venv/bin/pip install \
-  "deepseek-harness-sdk==0.1.0rc6"
+mkdir deepseek-harness-demo
+cd deepseek-harness-demo
+python3 -m venv .venv
+.venv/bin/python -m pip install "deepseek-harness-sdk==0.1.2rc1"
+mkdir workspace
+printf 'compatibility fixture\n' > workspace/fixture.txt
 ```
 
-如果公司网络使用私有 PyPI 镜像，请先确认镜像中同时存在相同版本的 `deepseek-harness-runtime-bin`。不要使用 `danger-full-access` 扩大文件访问范围；本文示例只把一次性目录传给 `cwd`。
+Windows PowerShell 创建环境使用 `python -m venv .venv`，安装命令使用 `.venv\Scripts\python.exe -m pip install "deepseek-harness-sdk==0.1.2rc1"`，并手动创建 `workspace/fixture.txt`。SDK 会安装同版本 runtime，无需另装系统 Node.js。使用私有镜像时确认 SDK 和 runtime 都已同步。
 
-## 3. 运行官方 Python SDK
+## 2. 运行一个可验收的任务
 
-把下面内容保存为 `/tmp/deepseek-harness-demo/run.py`：
+在测试目录保存 `run.py`：
 
 ```python
 import os
-
+from pathlib import Path
 from deepseek_harness import DeepSeekHarness
 
+root = Path(__file__).resolve().parent
 with DeepSeekHarness(
     provider="deepseek-official",
     model="deepseek-v4-pro",
-    max_tokens=160,
-    cwd="/tmp/deepseek-harness-demo/workspace",
-    session_root="/tmp/deepseek-harness-demo/sessions",
-    base_url=os.environ["DEEPSEEK_BASE_URL"],
-    api_key=os.environ["DEEPSEEK_API_KEY"],
+    max_tokens=2048,
+    cwd=str(root / "workspace"),
+    dsh_home=str(root / "harness-home"),
+    base_url="https://api.acedata.cloud/v1",
+    api_key=os.environ["ACEDATACLOUD_API_KEY"],
     request_timeout_seconds=180,
 ) as harness:
     result = harness.run(
-        "Read fixture.txt once, then reply with exactly: sdk-harness-ok",
-        session_id="acedatacloud-compat",
+        "Read fixture.txt once and include its exact contents in your answer. "
+        "Then append sdk-harness-ok. Do not change files.",
+        session_id="acedatacloud-docs-demo",
     )
-
 print(result.final_response)
 print(result.finish_reason)
 ```
 
-运行：
+运行前确保 Key 已在同一终端导出：
 
 ```bash
-/tmp/deepseek-harness-demo/venv/bin/python \
-  /tmp/deepseek-harness-demo/run.py
+.venv/bin/python run.py
 ```
 
-预期结果：
+这里 `provider="deepseek-official"` 选择 Harness 的 DeepSeek 协议适配器；显式设置的 `base_url` 决定请求发往 Ace Data Cloud。`cwd` 是模型可操作的工作目录，`dsh_home` 用于运行时的配置和会话数据。把它们指向测试目录不等于建立操作系统级沙箱，测试时不要放入私密文件。
+
+## 3. 本次真实结果
+
+在 macOS arm64、Python 3.12、上述 SDK/runtime 与 `deepseek-v4-pro` 上，2026-09-07 得到：
 
 ```text
+compatibility fixture
 sdk-harness-ok
 completed
 ```
 
-这一步同时验证 Bearer 鉴权、`/v1/chat/completions`、SSE、推理内容、工具调用与工具结果回传。完成后可删除 `/tmp/deepseek-harness-demo`；若 Session 目录包含项目上下文，也应按代码仓库同等敏感级别保管。
+这次测试使用已有平台 API Key，验证了新版 SDK 启动、模型文本请求、文件读取工具及结果回传；不是只让模型照抄固定口令。没有验证 Coding Plan 所有档位、所有 DeepSeek 模型、全部工具或其他操作系统。
+
+旧稿中“Flash 不能作为替代”的结论属于旧版本测试，不能直接当作新版本永久限制。更换 `deepseek-v4-flash` 或其他模型时，重复同一个文件测试再判断兼容性。
 
 ## 常见问题
 
-- **401**：检查 `ACEDATACLOUD_API_KEY` 是否导出到运行 Python 的同一个 shell。
-- **403 或额度提示**：确认密钥属于当前 Coding Application，套餐仍在有效期且有剩余额度。
-- **模型不可用**：重新查询 `/v1/models`，不要根据旧截图猜模型名。
-- **`reasoning_content` / 工具回放错误**：确认 SDK/runtime 都是本文固定版本，并使用 `deepseek-v4-pro`。
-- **工具执行次数异常**：停止运行可能产生副作用的任务，先用本文只读 fixture 验证当前服务版本。
-- **安装失败**：确认 Python 3.10+、操作系统架构受当前 wheel 支持，并检查 SDK/runtime 版本一致。
+| 现象 | 检查 |
+|---|---|
+| `session_root` 参数错误 | 使用新版 `dsh_home`，SDK/runtime 版本必须匹配 |
+| 提示必须提供 Harness home | 设置 `dsh_home` 或子进程的 `DSH_HOME` |
+| 401 / invalid_token | Key 是否导出到执行 Python 的环境，是否含多余 Bearer 前缀 |
+| 403 / 权限或额度错误 | 核对当前应用、API scope、套餐有效期和额度 |
+| 输出被截断 | 不要照搬旧例极小的 160 token 限额；给推理和工具循环留足输出预算 |
+| 初始化/请求超时 | 区分运行时初始化与模型请求超时，检查网络及错误日志；不要反复提交有副作用的任务 |
 
-## 能力边界
+完成后可移除自己创建的测试目录。会话文件可能包含读取过的代码，应按项目文件管理。
 
-本文只验证本地 Python SDK 到 Chat Completions 的文本与工具循环。图片、Files API、`/v1/responses`、`/v1/messages`、远程工作区和托管 sandbox 不在本教程承诺范围内；工作区权限与本地命令风险由运行 Harness 的机器和配置负责。
+## 官方依据
 
-## 官方参考
-
-- [DeepSeek Harness 仓库](https://github.com/deepseek-ai/deepseek-harness)
 - [DeepSeek Harness Python SDK](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk/README.md)
-
-返回 [Coding Plan 配置中心](https://platform.acedata.cloud/documents/coding-plan-integration)。
+- [SDK 发布记录](https://pypi.org/project/deepseek-harness-sdk/)
+- [匹配运行时发布记录](https://pypi.org/project/deepseek-harness-runtime-bin/)
+- [Coding Plan 配置中心](https://platform.acedata.cloud/documents/coding-plan-integration)
