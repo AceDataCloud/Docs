@@ -62,7 +62,7 @@ EXCLUDED_SERVICES = {
     "riffusion",
     "udio",
 }
-DOC_ONLY_SERVICES = {"coding"}
+DOC_ONLY_SERVICES = {"coding", "integrations"}
 
 SKIP_DOC_KEYS = {
     "acedataext",
