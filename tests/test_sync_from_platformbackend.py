@@ -86,6 +86,15 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
 
             self.assertTrue((output / "zh-Hans/guides/integrations/open-webui.mdx").is_file())
 
+    def test_cherry_studio_has_an_integration_output_record(self) -> None:
+        bundle = json.loads(sync.EXACT_MAP_PATH.read_text())
+        record = next(
+            row for row in bundle["records"] if row["source_doc_key"] == "development_cherry_studio"
+        )
+        self.assertEqual(record["service_alias"], "integrations")
+        self.assertEqual(record["output_path"], "guides/integrations/cherry-studio.mdx")
+        self.assertEqual(record["canonical_alias"], "development_cherry_studio")
+
     def test_sync_guides_writes_exact_output_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
