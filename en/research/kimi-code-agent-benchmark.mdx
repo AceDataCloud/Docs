@@ -1,0 +1,147 @@
+---
+title: "Kimi Code agent run: token and billing audit"
+description: "A six-call coding-agent case study with independently checked output, token reconciliation, historical billing math, and explicit limitations."
+---
+
+This report audits one complete Kimi Code CLI agent task executed through the Ace Data Cloud OpenAI-compatible endpoint on **August 4, 2026**. It asks a narrower question than a model leaderboard:
+
+> Can a coding agent complete a multi-tool task, and do its client-side token counts reconcile with the platform usage and billing records?
+
+The answer for this run was yes. This is a single-run case study, not a general quality or reliability claim.
+
+## Reproduce the ledger checks
+
+The machine-readable call ledger is committed at [`research/kimi-agent-benchmark.json`](https://github.com/AceDataCloud/Docs/blob/main/research/kimi-agent-benchmark.json). Verify it without network access or third-party packages:
+
+```bash
+python3 scripts/verify_kimi_agent_benchmark.py
+```
+
+The verifier checks all six historical pricing calculations, the applied billing ratio, totals, status codes, cached-token sum, and task summary arithmetic.
+
+<Warning>
+  The rates in the dataset are the rates recorded for the August 4 experiment. They are **not current pricing**. Use the [live pricing page](https://platform.acedata.cloud/pricing) for purchasing decisions.
+</Warning>
+
+## Setup
+
+| Field | Value |
+|---|---|
+| Client | Kimi Code CLI 1.49.0 |
+| Provider type | `openai_legacy` |
+| API base URL | `https://api.acedata.cloud/v1` |
+| Model | `kimi-k3` |
+| Agent turns / LLM calls | 6 |
+| Tool calls | 5 |
+| Tool types | Shell, WriteFile |
+
+The agent received a 10-row sales CSV with three undisclosed data-quality faults: one missing region, one negative unit count, and one non-numeric unit count. It had to inspect the data, write a cleaner, generate a JSON summary, write tests, execute them, and summarize the result.
+
+## Observed execution
+
+| Step | Action |
+|---:|---|
+| 1 | Read the input files |
+| 2 | Write `clean_report.py` |
+| 3 | Execute the cleaner |
+| 4 | Write `test_clean.py` |
+| 5 | Run tests and inspect `summary.json` |
+| 6 | Return the final summary |
+
+The run completed in six LLM calls with no retry. The produced summary reported 7 valid rows, 3 rejected rows, and total revenue of 671.21.
+
+## Correctness checks
+
+The task output was checked three ways at experiment time:
+
+1. **Independent arithmetic:** total and region values were recalculated without using the generated cleaner.
+2. **Rejected-row reasons:** all three faults were represented in the output rather than silently dropped.
+3. **Mutation test:** changing a valid unit count from 10 to 999 made the generated test fail with a different total; restoring the input made it pass again.
+
+| Metric | Agent output | Independent calculation |
+|---|---:|---:|
+| Total revenue | 671.21 | 671.21 |
+| North | 511.28 | 511.28 |
+| South | 159.93 | 159.93 |
+| Valid / rejected rows | 7 / 3 | 7 / 3 |
+
+## Token reconciliation
+
+The client reported six token-usage records. The platform recorded exactly six `kimi-k3` calls in the same experiment window. Prompt, cached, and completion tokens matched call by call.
+
+| Call | Prompt | Cached | Completion | HTTP | Elapsed |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 21,628 | 0 | 103 | 200 | 3.853 s |
+| 2 | 22,124 | 21,332 | 1,482 | 200 | 15.520 s |
+| 3 | 23,589 | 22,122 | 67 | 200 | 3.176 s |
+| 4 | 23,783 | 23,587 | 1,397 | 200 | 15.404 s |
+| 5 | 25,212 | 23,781 | 87 | 200 | 3.646 s |
+| 6 | 26,104 | 25,210 | 407 | 200 | 8.894 s |
+
+All six calls returned HTTP 200. The cumulative cached-token count was 116,032, illustrating how quickly repeated agent context becomes cache-heavy.
+
+## Historical billing verification
+
+At experiment time, the recorded list-price formula was:
+
+```text
+list_credits = 1e-6 × (35.52 × prompt_tokens + 147.6 × completion_tokens)
+deducted_credits = list_credits × 0.92
+```
+
+| Call | Historical list credits | Deducted credits | Ratio |
+|---:|---:|---:|---:|
+| 1 | 0.78342936 | 0.72075501 | 0.92 |
+| 2 | 1.00458768 | 0.92422067 | 0.92 |
+| 3 | 0.84777048 | 0.77994884 | 0.92 |
+| 4 | 1.05096936 | 0.96689181 | 0.92 |
+| 5 | 0.90837144 | 0.83570172 | 0.92 |
+| 6 | 0.98728728 | 0.90830430 | 0.92 |
+
+The verifier reproduces:
+
+- 5.5824156 historical list Credits;
+- 5.13582235 deducted Credits;
+- approximately $0.489007 at the recorded $0.095215/Credit conversion rate.
+
+The `0.92` ratio was the account's applied discount in this experiment. It is not a universal discount promise.
+
+## Finding and remediation
+
+The original experiment exposed a billing defect: cached tokens were included in prompt tokens but the then-current Kimi rule did not apply the lower cache-hit rate. Agent loops amplify that issue because later turns repeatedly carry the same prefix.
+
+The defect was fixed after the experiment. The remediation also added a dynamic consistency check tying the cached coefficient to the prompt coefficient and a guard preventing negative bills when prices change. A post-fix production retest confirmed that token counts and recorded charges still reconciled.
+
+This page intentionally preserves the original ledger as historical evidence. It does not apply today's formula retroactively or present historical coefficients as current pricing.
+
+## Credential safety finding
+
+The agent's first shell command read a configuration file containing an API key. That key therefore entered the model context, prompt cache, and local session export. The temporary credential and export were deleted after testing.
+
+When using an agent CLI:
+
+1. keep secret-bearing config outside the agent work directory;
+2. restrict file permissions, for example `chmod 600 ~/.kimi/config.toml`;
+3. do not ask the agent to inspect directories containing credentials;
+4. inspect exported sessions before sharing them;
+5. rotate a key if it appears in command output or an exported transcript.
+
+## Limitations
+
+- This is one task, one model, one client version, and six calls.
+- It does not compare model quality against another model.
+- The original temporary CSV, generated code, session archive, and credential were deleted. The task correctness evidence is documented, but the exact agent execution cannot be rerun from this repository.
+- The committed JSON makes the token and historical billing ledger reproducible; it does not recreate private platform logs.
+- HTTP 200 in this sample does not establish a service-level success rate.
+- Historical rates and discounts must not be used as current pricing.
+
+## What this evidence supports
+
+This run supports four bounded conclusions:
+
+1. Kimi Code CLI completed the designed multi-tool coding task through the OpenAI-compatible endpoint.
+2. Client and platform token counts matched for all six calls.
+3. Recorded deductions matched the historical rule and account ratio to eight decimal places.
+4. The experiment found a cache-pricing defect and a credential-hygiene risk; the pricing defect was remediated, while credential placement remains an operator responsibility.
+
+For a current integration, use `openai_legacy` with `https://api.acedata.cloud/v1`, keep credentials outside the work directory, and verify current model availability and pricing before running a paid task.
