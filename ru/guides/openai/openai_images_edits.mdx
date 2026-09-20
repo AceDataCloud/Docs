@@ -5,7 +5,7 @@ description: "OpenAI generation API guide - Ace Data Cloud"
 
 ## 1. Получение API Key
 
-Откройте [список приложений Ace Data Cloud](https://platform.acedata.cloud/console/applications), войдите в доступное приложение и скопируйте API Key.
+Откройте [список приложений Ace Data Cloud](https://platform.acedata.cloud/console/applications), перейдите в доступное приложение и скопируйте API Key.
 
 ![Получение Ace Data Cloud API Key](https://cdn.acedata.cloud/dvc3cg.jpg)
 
@@ -65,27 +65,92 @@ curl https://api.acedata.cloud/openai/images/edits \
   -F "prompt=Replace the background with a bright modern studio"
 ```
 
-`image` можно передавать повторно; серия GPT Image поддерживает до 16 референсных изображений. `image` в JSON-запросе может быть одним URL или массивом URL; для локальных файлов используется загрузка multipart.
+Можно повторно передавать `image`; серия GPT Image поддерживает до 16 референсных изображений. `image` в JSON-запросе может быть одним URL или массивом URL; для локальных файлов используется multipart-загрузка.
 
-## 4. Часто используемые параметры
+## 4. Локальное редактирование с использованием маски
+
+Официальный интерфейс Images Edit задаёт область, в которой разрешено внесение изменений, через `mask`. Модели Ace Data Cloud с `:official` следуют тому же multipart-контракту:
+
+- `mask` должен быть PNG с альфа-каналом размером не более 4 МБ;
+- размер маски должен полностью совпадать с первой `image`;
+- прозрачные пиксели с Alpha, равным `0`, обозначают разрешённую для редактирования область, а непрозрачные пиксели обозначают то, что следует сохранить;
+- RGB-изображения, которые имеют только чёрно-белые цвета, но не имеют прозрачного канала, не могут использоваться в качестве допустимых масок;
+- подсказка должна описывать желаемое итоговое изображение целиком, одновременно явно указывая локальные изменения и содержимое, которое должно остаться неизменным.
+
+Ниже сначала создаётся маска из исходного изображения. В примере центральный прямоугольник делается прозрачным, позволяя модели изменять только эту область:
+
+```python
+from PIL import Image, ImageDraw
+
+source = Image.open("input.png").convert("RGBA")
+mask = Image.new("RGBA", source.size, (0, 0, 0, 255))
+draw = ImageDraw.Draw(mask)
+width, height = source.size
+draw.rectangle(
+    (width // 4, height // 4, width * 3 // 4, height * 3 // 4),
+    fill=(0, 0, 0, 0),
+)
+mask.save("mask.png")
+```
+
+Затем загрузите исходное изображение и маску вместе:
+
+```bash
+curl https://api.acedata.cloud/openai/images/edits \
+  -H "Authorization: Bearer 你的 API Key" \
+  -F "model=gpt-image-2:official" \
+  -F "image=@input.png" \
+  -F "mask=@mask.png" \
+  -F "prompt=Keep the composition, lighting, and all objects outside the transparent mask unchanged. Inside the masked area, replace the empty tabletop with a small blue ceramic vase."
+```
+
+Также можно использовать способ вызова `images.edit` из официального Python SDK OpenAI: достаточно указать Ace Data Cloud в качестве `base_url`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="你的 API Key",
+    base_url="https://api.acedata.cloud/openai",
+)
+
+with open("input.png", "rb") as image, open("mask.png", "rb") as mask:
+    result = client.images.edit(
+        model="gpt-image-2:official",
+        image=image,
+        mask=mask,
+        prompt=(
+            "Keep the composition, lighting, and all objects outside the "
+            "transparent mask unchanged. Inside the masked area, replace "
+            "the empty tabletop with a small blue ceramic vase."
+        ),
+    )
+
+print(result.data[0].url)
+```
+
+Сейчас `mask` предоставляется как поле multipart-файла. Если исходное изображение необходимо передать через URL, также измените запрос на multipart: `image` может по-прежнему передаваться как текстовое поле URL, а `mask` загружается с использованием `@mask.png`. Маска ограничивает область редактирования, однако генерирующая модель всё ещё может естественным образом сглаживать границы; если необходимы строгие границы, следует использовать чёткие альфа-границы и повторно указать в подсказке, какое содержимое должно остаться неизменным.
+
+Приведённый выше способ вызова соответствует примерам масок в [OpenAI Image Edit API](https://developers.openai.com/api/reference/python/resources/images/methods/edit) и [официальном Cookbook для GPT Image](https://developers.openai.com/cookbook/examples/generate_images_with_gpt_image).
+
+## 5. Часто используемые параметры
 
 | Поле                | Описание                                                                                                                               |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `model`           | `gpt-image-2`, `gpt-image-2.5-flare` (быстрее) или `gpt-image-2.5-sunburst` (более высокая точность и контроль); для всех трёх можно выбрать соответствующий вариант `:official`, а `gpt-image-2` также поддерживает `:reverse` |
-| `image`           | В JSON используется один URL или массив до 16 URL; в multipart используется одно или несколько файловых полей `image`                                                                    |
+| `model`           | `gpt-image-2`, `gpt-image-2.5-flare` (быстрее) или `gpt-image-2.5-sunburst` (более высокая точность и управляемость); для всех трёх можно выбрать соответствующий вариант `:official`, а `gpt-image-2` также поддерживает `:reverse` |
+| `image`           | В JSON используется один URL или массив до 16 URL; в multipart используются одно или несколько файловых полей `image`                                                                    |
 | `prompt`          | Инструкция по редактированию                                                                                                                             |
 | `size`            | `auto` или соответствующий ограничениям `WIDTHxHEIGHT`                                                                                                     |
 | `n`               | 1–10; при `response_format=b64_json` поддерживается только 1                                                                                           |
 | `response_format` | `url` или `b64_json`                                                                                                               |
 | `callback_url`    | Необязательный адрес асинхронного обратного вызова                                                                                                                         |
 
-Правила размеров совпадают с интерфейсом генерации: ширина и высота должны быть кратны 16, длинная сторона не должна превышать 3840, общее количество пикселей составляет 655,360–8,294,400, а соотношение сторон не должно превышать 3:1. Если не указывать `size` или использовать `auto`, модель выберет формат кадра на основе промпта и первого референсного изображения.
+Правила размера совпадают с интерфейсом генерации: ширина и высота должны быть кратны 16, длинная сторона не должна превышать 3840, общее число пикселей должно составлять 655 360–8 294 400, а соотношение сторон не должно превышать 3:1. Если `size` опущен или используется `auto`, модель выберет формат, учитывая подсказку и первое референсное изображение.
+`gpt-image-2`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst` и `gpt-image-2:reverse` тарифицируются по количеству успешно созданных изображений; `gpt-image-2:official`, `gpt-image-2.5-flare:official` и `gpt-image-2.5-sunburst:official` рассчитываются на основе фактических Token текстового ввода, ввода референсных изображений и вывода изображений; окончательные данные определяются записями об использовании.
 
-`gpt-image-2`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst` и `gpt-image-2:reverse` тарифицируются по количеству успешно созданных изображений; `gpt-image-2:official`, `gpt-image-2.5-flare:official` и `gpt-image-2.5-sunburst:official` рассчитываются по фактическим Token текстового ввода, ввода референсных изображений и вывода изображений, окончательным считается журнал использования.
+## 6. Асинхронные обратные вызовы и устранение ошибок
 
-## 5. Асинхронные обратные вызовы и устранение ошибок
-
-Для длительных задач можно добавить в запрос:
+Для длительных задач в запрос можно добавить:
 
 ```json
 {
@@ -93,15 +158,15 @@ curl https://api.acedata.cloud/openai/images/edits \
 }
 ```
 
-Асинхронный ответ 200 имеет вид `{"task_id": "..."}`; после завершения обратный вызов возвращает итоговый результат. Синхронный запрос, напротив, возвращает `created` и `data`.
+Асинхронный ответ 200 имеет вид `{"task_id": "..."}`; после завершения выполняется обратный вызов с итоговым результатом. Синхронные запросы возвращают `created` и `data`.
 
-| Статус  | Проверка                      |
-| --- | ----------------------- |
-| 400 | Формат/количество изображений, комбинация параметров и формат размера       |
-| 401 | API Key и Bearer Header |
-| 429 | Частота запросов                    |
-| 504 | Перейдите на асинхронный обратный вызов                  |
+| Статус  | Проверка                                                                |
+| --- | ----------------------------------------------------------------- |
+| 400 | Формат/количество изображений, комбинация параметров и формат размеров; при использовании `mask` проверьте PNG Alpha-канал, ограничение в 4 МБ и соответствие его размеров первой исходной картинке |
+| 401 | API Key и Bearer Header                                           |
+| 429 | Частота запросов                                                              |
+| 504 | Перейдите на асинхронный обратный вызов                                                            |
 
-Ответы с ошибками содержат `trace_id`. При сообщении о проблеме предоставляйте этот ID, не предоставляйте API Key.
+Ответы с ошибками содержат `trace_id`. При сообщении о проблеме укажите этот ID, не указывайте API Key.
 
-Полный список полей и актуальные перечисления приведены на странице [OpenAI Images Edits API](https://platform.acedata.cloud/documents/openai-images-edits). Для генерации изображений только из текста смотрите [генерацию изображений GPT Image 2 / 2.5](https://platform.acedata.cloud/documents/openai-images-generations).
+Полный список полей и актуальные перечисления смотрите на странице [OpenAI Images Edits API](https://platform.acedata.cloud/documents/openai-images-edits). Для генерации изображений только по тексту смотрите [Генерация изображений GPT Image 2 / 2.5](https://platform.acedata.cloud/documents/openai-images-generations).
