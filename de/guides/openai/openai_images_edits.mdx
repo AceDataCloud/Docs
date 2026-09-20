@@ -5,11 +5,11 @@ description: "OpenAI generation API guide - Ace Data Cloud"
 
 ## 1. API-Key abrufen
 
-Öffnen Sie die [Ace Data Cloud-Anwendungsliste](https://platform.acedata.cloud/console/applications), gehen Sie zu einer verfügbaren Anwendung und kopieren Sie den API-Key.
+Öffnen Sie die [Ace Data Cloud Anwendungsliste](https://platform.acedata.cloud/console/applications), rufen Sie die verfügbare Anwendung auf und kopieren Sie den API-Key.
 
 ![Ace Data Cloud API-Key abrufen](https://cdn.acedata.cloud/dvc3cg.jpg)
 
-## 2. Mit einer Bild-URL bearbeiten
+## 2. Mit Bild-URL bearbeiten
 
 Originalbild:
 
@@ -49,11 +49,11 @@ Erfolgreiche Antwort:
 }
 ```
 
-Dies ist das am 8. September 2026 über Ace Data Cloud tatsächlich fertiggestellte Bearbeitungsergebnis: Der Becher wird orange, der Hintergrund wird dunkel marineblau, und die ursprüngliche Komposition sowie die Größe von 1024×1536 bleiben erhalten:
+Dies ist das am 8. September 2026 über Ace Data Cloud tatsächlich fertiggestellte Bearbeitungsergebnis: Der Becher wurde orange, der Hintergrund dunkel marineblau, während die ursprüngliche Komposition und die Größe 1024×1536 beibehalten wurden:
 
 ![GPT Image 2 Bearbeitungsergebnis mit orangem Becher](https://cdn.acedata.cloud/b6d780a732ca.png)
 
-## 3. Lokale Bilder hochladen
+## 3. Lokales Bild hochladen
 
 Verwenden Sie `multipart/form-data`:
 
@@ -65,27 +65,92 @@ curl https://api.acedata.cloud/openai/images/edits \
   -F "prompt=Replace the background with a bright modern studio"
 ```
 
-`image` kann wiederholt übergeben werden; die GPT-Image-Serie unterstützt bis zu 16 Referenzbilder. `image` in JSON-Anfragen kann eine einzelne URL oder ein URL-Array sein; lokale Dateien werden per Multipart hochgeladen.
+`image` kann wiederholt übergeben werden; die GPT-Image-Serie unterstützt maximal 16 Referenzbilder. `image` in JSON-Anfragen kann eine einzelne URL oder ein URL-Array sein; lokale Dateien werden über multipart hochgeladen.
 
-## 4. Häufig verwendete Parameter
+## 4. Lokale Bearbeitung mit Maske verwenden
+
+Die offizielle Images-Edit-Schnittstelle gibt über `mask` den Bereich an, der geändert werden darf. Die `:official`-Modelle von Ace Data Cloud folgen demselben Multipart-Vertrag:
+
+- `mask` muss eine PNG-Datei mit Alpha-Kanal sein und darf nicht größer als 4 MB sein;
+- Die Größe der Maske muss exakt mit der ersten `image` übereinstimmen;
+- Transparente Pixel mit Alpha `0` zeigen an, dass Bearbeitungen erlaubt sind, nicht transparente Pixel zeigen an, dass sie beibehalten werden sollen;
+- RGB-Bilder, die nur schwarz und weiß sind, aber keinen Transparenzkanal haben, können nicht als gültige Masken verwendet werden;
+- Der Prompt sollte das gewünschte vollständige Bild beschreiben und gleichzeitig die lokale Änderung sowie den Inhalt, der unverändert bleiben soll, klar angeben.
+
+Erstellen Sie zunächst eine Maske aus dem Originalbild. Das Beispiel setzt das mittlere Rechteck auf transparent und erlaubt dem Modell nur, diesen Bereich zu ändern:
+
+```python
+from PIL import Image, ImageDraw
+
+source = Image.open("input.png").convert("RGBA")
+mask = Image.new("RGBA", source.size, (0, 0, 0, 255))
+draw = ImageDraw.Draw(mask)
+width, height = source.size
+draw.rectangle(
+    (width // 4, height // 4, width * 3 // 4, height * 3 // 4),
+    fill=(0, 0, 0, 0),
+)
+mask.save("mask.png")
+```
+
+Laden Sie dann das Originalbild und die Maske zusammen hoch:
+
+```bash
+curl https://api.acedata.cloud/openai/images/edits \
+  -H "Authorization: Bearer 你的 API Key" \
+  -F "model=gpt-image-2:official" \
+  -F "image=@input.png" \
+  -F "mask=@mask.png" \
+  -F "prompt=Keep the composition, lighting, and all objects outside the transparent mask unchanged. Inside the masked area, replace the empty tabletop with a small blue ceramic vase."
+```
+
+Sie können auch weiterhin die Aufrufmethode `images.edit` des offiziellen OpenAI-Python-SDK verwenden; Sie müssen lediglich `base_url` auf Ace Data Cloud setzen:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="你的 API Key",
+    base_url="https://api.acedata.cloud/openai",
+)
+
+with open("input.png", "rb") as image, open("mask.png", "rb") as mask:
+    result = client.images.edit(
+        model="gpt-image-2:official",
+        image=image,
+        mask=mask,
+        prompt=(
+            "Keep the composition, lighting, and all objects outside the "
+            "transparent mask unchanged. Inside the masked area, replace "
+            "the empty tabletop with a small blue ceramic vase."
+        ),
+    )
+
+print(result.data[0].url)
+```
+
+`mask` wird derzeit als Multipart-Dateifeld bereitgestellt. Wenn Sie das Originalbild per URL übergeben müssen, ändern Sie die Anfrage ebenfalls in multipart: `image` kann weiterhin als URL-Textfeld verwendet werden, `mask` wird mit `@mask.png` hochgeladen. Die Maske begrenzt den Bearbeitungsbereich, das generative Modell kann jedoch weiterhin an den Rändern natürliche Übergänge erzeugen; wenn strikte Grenzen erforderlich sind, sollten Sie klare Alpha-Ränder verwenden und im Prompt wiederholt angeben, welche Inhalte unverändert bleiben müssen.
+
+Die obige Aufrufmethode entspricht den Maskenbeispielen der [OpenAI Image Edit API](https://developers.openai.com/api/reference/python/resources/images/methods/edit) und des [offiziellen GPT Image Cookbook](https://developers.openai.com/cookbook/examples/generate_images_with_gpt_image).
+
+## 5. Häufig verwendete Parameter
 
 | Feld                | Beschreibung                                                                                                                               |
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `model`           | `gpt-image-2`, `gpt-image-2.5-flare` (schneller) oder `gpt-image-2.5-sunburst` (höhere Wiedergabetreue und Kontrolle); alle drei können die entsprechende `:official`-Variante auswählen, `gpt-image-2` unterstützt zusätzlich `:reverse` |
-| `image`           | JSON verwendet eine einzelne URL oder ein Array mit bis zu 16 URLs; Multipart verwendet ein oder mehrere `image`-Dateifelder                                                                    |
+| `model`           | `gpt-image-2`, `gpt-image-2.5-flare` (schneller) oder `gpt-image-2.5-sunburst` (höhere Genauigkeit und Kontrolle); alle drei können die entsprechende `:official`-Variante wählen, `gpt-image-2` unterstützt außerdem `:reverse` |
+| `image`           | JSON verwendet eine einzelne URL oder ein Array mit bis zu 16 URLs; multipart verwendet ein oder mehrere `image`-Dateifelder                                                                    |
 | `prompt`          | Bearbeitungsanweisung                                                                                                                             |
-| `size`            | `auto` oder ein zulässiges `WIDTHxHEIGHT`                                                                                                     |
+| `size`            | `auto` oder ein den Einschränkungen entsprechendes `WIDTHxHEIGHT`                                                                                                     |
 | `n`               | 1–10; bei `response_format=b64_json` wird nur 1 unterstützt                                                                                           |
 | `response_format` | `url` oder `b64_json`                                                                                                               |
 | `callback_url`    | Optionale asynchrone Callback-Adresse                                                                                                                         |
 
-Die Größenregeln entsprechen der Generierungs-API: Breite und Höhe müssen Vielfache von 16 sein, die lange Seite darf 3840 nicht überschreiten, die Gesamtpixelzahl beträgt 655.360–8.294.400, und das Seitenverhältnis darf 3:1 nicht überschreiten. Wenn `size` ausgelassen oder `auto` verwendet wird, wählt das Modell das Format anhand des Prompts und des ersten Referenzbilds aus.
+Die Größenregeln entsprechen denen der Generierungsschnittstelle: Breite und Höhe müssen Vielfache von 16 sein, die lange Seite darf 3840 nicht überschreiten, die Gesamtpixelzahl beträgt 655.360–8.294.400 und das Seitenverhältnis darf 3:1 nicht überschreiten. Wenn `size` weggelassen oder `auto` verwendet wird, wählt das Modell anhand des Prompts und des ersten Referenzbildes das Bildformat aus.
+`gpt-image-2`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst` und `gpt-image-2:reverse` werden nach der Anzahl erfolgreich erstellter Bilder abgerechnet; `gpt-image-2:official`, `gpt-image-2.5-flare:official` und `gpt-image-2.5-sunburst:official` werden anhand der tatsächlichen Tokens für Texteingabe, Referenzbildeingabe und Bildausgabe abgerechnet, maßgeblich sind letztlich die Nutzungsaufzeichnungen.
 
-`gpt-image-2`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst` und `gpt-image-2:reverse` werden nach der Anzahl erfolgreich erstellter Bilder abgerechnet; `gpt-image-2:official`, `gpt-image-2.5-flare:official` und `gpt-image-2.5-sunburst:official` werden anhand der tatsächlichen Tokens für Texteingabe, Referenzbildeingabe und Bildausgabe abgerechnet, maßgeblich ist letztlich der Nutzungsdatensatz.
+## 6. Asynchrone Rückrufe und Fehlersuche
 
-## 5. Asynchrone Callbacks und Fehlerbehebung
-
-Bei langen Aufgaben kann Folgendes zur Anfrage hinzugefügt werden:
+Lange Aufgaben können der Anfrage Folgendes hinzufügen:
 
 ```json
 {
@@ -93,15 +158,15 @@ Bei langen Aufgaben kann Folgendes zur Anfrage hinzugefügt werden:
 }
 ```
 
-Die asynchrone 200-Antwort lautet `{"task_id": "..."}`; nach Abschluss wird das Endergebnis per Callback gesendet. Synchrone Anfragen geben dagegen `created` und `data` zurück.
+Die asynchrone 200-Antwort lautet `{"task_id": "..."}`; nach Abschluss wird das Endergebnis zurückgerufen. Synchronisierte Anfragen geben hingegen `created` und `data` zurück.
 
-| Status  | Prüfen                      |
-| --- | ----------------------- |
-| 400 | Bildformat/-anzahl, Parameterkombination und Größenformat       |
-| 401 | API-Key und Bearer-Header |
-| 429 | Anfragerate                    |
-| 504 | Asynchronen Callback verwenden                  |
+| Status  | Prüfung                                                                |
+| --- | ----------------------------------------------------------------- |
+| 400 | Bildformat/-anzahl, Parameterkombination und Größenformat; bei Verwendung von `mask` den PNG-Alpha-Kanal, die 4-MB-Beschränkung sowie prüfen, ob dessen Größe mit dem ersten Originalbild übereinstimmt |
+| 401 | API-Key und Bearer-Header                                           |
+| 429 | Anfragehäufigkeit                                                              |
+| 504 | Auf asynchronen Rückruf umstellen                                                            |
 
 Fehlerantworten enthalten `trace_id`. Geben Sie bei der Meldung von Problemen diese ID an, nicht den API-Key.
 
-Vollständige Felder und Echtzeit-Aufzählungen finden Sie auf der Seite [OpenAI Images Edits API](https://platform.acedata.cloud/documents/openai-images-edits). Für die Bildgenerierung nur aus Text siehe [GPT Image 2 / 2.5 Bildgenerierung](https://platform.acedata.cloud/documents/openai-images-generations).
+Die vollständigen Felder und Echtzeit-Enumerationen richten sich nach der Seite [OpenAI Images Edits API](https://platform.acedata.cloud/documents/openai-images-edits). Für die Bildgenerierung aus reinem Text siehe [GPT Image 2 / 2.5 Bildgenerierung](https://platform.acedata.cloud/documents/openai-images-generations).
