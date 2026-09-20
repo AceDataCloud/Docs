@@ -67,7 +67,73 @@ curl https://api.acedata.cloud/openai/images/edits \
 
 可重复传入 `image`，GPT Image 系列最多支持 16 张参考图。JSON 请求中的 `image` 可以是单个 URL 或 URL 数组；本地文件使用 multipart 上传。
 
-## 4. 常用参数
+## 4. 使用蒙版局部编辑
+
+官方 Images Edit 接口通过 `mask` 指定允许修改的区域。Ace Data Cloud 的 `:official` 模型遵循相同的 multipart 契约：
+
+- `mask` 必须是带 Alpha 通道的 PNG，大小不超过 4MB；
+- 蒙版尺寸必须与第一张 `image` 完全一致；
+- Alpha 为 `0` 的透明像素表示允许编辑，非透明像素表示应保留；
+- 只有颜色为黑白、但没有透明通道的 RGB 图片不能作为有效蒙版；
+- 提示词应描述期望得到的完整画面，同时明确局部修改和需要保持不变的内容。
+
+下面先从原图生成一个蒙版。示例将中央矩形设为透明，只允许模型修改该区域：
+
+```python
+from PIL import Image, ImageDraw
+
+source = Image.open("input.png").convert("RGBA")
+mask = Image.new("RGBA", source.size, (0, 0, 0, 255))
+draw = ImageDraw.Draw(mask)
+width, height = source.size
+draw.rectangle(
+    (width // 4, height // 4, width * 3 // 4, height * 3 // 4),
+    fill=(0, 0, 0, 0),
+)
+mask.save("mask.png")
+```
+
+然后把原图和蒙版一起上传：
+
+```bash
+curl https://api.acedata.cloud/openai/images/edits \
+  -H "Authorization: Bearer 你的 API Key" \
+  -F "model=gpt-image-2:official" \
+  -F "image=@input.png" \
+  -F "mask=@mask.png" \
+  -F "prompt=Keep the composition, lighting, and all objects outside the transparent mask unchanged. Inside the masked area, replace the empty tabletop with a small blue ceramic vase."
+```
+
+也可以沿用 OpenAI 官方 Python SDK 的 `images.edit` 调用方式，只需把 `base_url` 指向 Ace Data Cloud：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="你的 API Key",
+    base_url="https://api.acedata.cloud/openai",
+)
+
+with open("input.png", "rb") as image, open("mask.png", "rb") as mask:
+    result = client.images.edit(
+        model="gpt-image-2:official",
+        image=image,
+        mask=mask,
+        prompt=(
+            "Keep the composition, lighting, and all objects outside the "
+            "transparent mask unchanged. Inside the masked area, replace "
+            "the empty tabletop with a small blue ceramic vase."
+        ),
+    )
+
+print(result.data[0].url)
+```
+
+`mask` 目前以 multipart 文件字段提供。需要通过 URL 传入原图时，也请将请求改为 multipart：`image` 可以继续作为 URL 文本字段，`mask` 使用 `@mask.png` 上传。蒙版会约束编辑区域，但生成模型仍可能对边缘进行自然融合；需要严格边界时，应使用清晰的 Alpha 边缘并在提示词中重复说明哪些内容必须保持不变。
+
+以上调用方式与 [OpenAI Image Edit API](https://developers.openai.com/api/reference/python/resources/images/methods/edit) 和 [GPT Image 官方 Cookbook](https://developers.openai.com/cookbook/examples/generate_images_with_gpt_image) 的蒙版示例一致。
+
+## 5. 常用参数
 
 | 字段 | 说明 |
 | --- | --- |
@@ -83,7 +149,7 @@ curl https://api.acedata.cloud/openai/images/edits \
 
 `gpt-image-2`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst` 与 `gpt-image-2:reverse` 按成功张数计费；`gpt-image-2:official`、`gpt-image-2.5-flare:official` 和 `gpt-image-2.5-sunburst:official` 根据文字输入、参考图输入和图片输出的实际 Token 结算，最终以使用记录为准。
 
-## 5. 异步回调与排错
+## 6. 异步回调与排错
 
 长任务可在请求中加入：
 
@@ -97,7 +163,7 @@ curl https://api.acedata.cloud/openai/images/edits \
 
 | 状态 | 检查 |
 | --- | --- |
-| 400 | 图片格式/数量、参数组合和尺寸格式 |
+| 400 | 图片格式/数量、参数组合和尺寸格式；使用 `mask` 时检查 PNG Alpha 通道、4MB 限制及其尺寸是否与第一张原图一致 |
 | 401 | API Key 与 Bearer Header |
 | 429 | 请求频率 |
 | 504 | 改用异步回调 |
