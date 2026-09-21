@@ -1,0 +1,134 @@
+---
+title: "Guide d’intégration du projet Suno Studio"
+description: "Suno Music Generation API guide - Ace Data Cloud"
+---
+
+L’API du projet Suno Studio gère les projets de musique multipiste via un seul point d’entrée :
+
+```http
+POST /suno/projects
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+```
+
+L’`action` dans la requête détermine le type d’opération. La clé primaire du Project utilise uniformément `id` ; `version_id` représente la version actuelle du projet, et toutes les opérations de modification et d’exportation doivent soumettre la dernière version afin d’éviter les écrasements concurrents.
+
+## Aperçu des opérations
+
+| action             | Mode  | Usage                      |
+| ------------------ | --- | ----------------------- |
+| `create`           | Synchrone  | Créer un projet vide                   |
+| `retrieve`         | Synchrone  | Lire le projet et le `state` complet modifiable      |
+| `save`             | Synchrone  | Enregistrer l’état complet du projet                |
+| `upload`           | Asynchrone  | Initialiser un élément pouvant être ajouté au projet à partir d’une adresse audio HTTPS |
+| `add_track`        | Asynchrone  | Ajouter un audio existant au projet               |
+| `generate_track`   | Asynchrone  | Générer de nouveaux candidats de piste audio pour l’intervalle spécifié            |
+| `replace_section`  | Asynchrone  | Générer des candidats de remplacement local                |
+| `commit_candidate` | Asynchrone  | Soumettre le candidat sélectionné au projet             |
+| `remove_track`     | Synchrone  | Supprimer la piste spécifiée                  |
+| `render`           | Asynchrone  | Exporter une chanson complète à partir de la version enregistrée           |
+
+Les opérations asynchrones renvoient immédiatement un `task_id`. Utilisez l’interface gratuite `/suno/tasks` pour interroger l’état, ou transmettez `callback_url` pour recevoir le résultat final.
+
+## Création et lecture
+
+```json
+{"action":"create","title":"My Studio Project"}
+```
+
+Toutes les opérations de modification doivent envoyer un Header `Idempotency-Key` unique. Après une création réussie, `data.id` dans la réponse est le Project ID.
+
+```json
+{"action":"retrieve","id":"PROJECT_ID"}
+```
+
+La réponse de lecture contient le `state` complet. Il est recommandé de d’abord lire, puis de modifier et enregistrer sur la base de la valeur renvoyée ; ne construisez pas manuellement depuis zéro les structures internes de rythme et de pistes.
+
+## Enregistrement de l’état complet
+
+```json
+{
+  "action":"save",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Edited Project",
+  "state":{"tracks":[],"timing":{}}
+}
+```
+
+Si la version a changé, l’interface renvoie HTTP 409. Dans ce cas, effectuez à nouveau `retrieve`, fusionnez les modifications, puis soumettez avec une nouvelle clé d’idempotence ; ne réessayez pas aveuglément l’ancienne requête.
+
+## Téléversement et ajout de pistes
+
+```json
+{
+  "action":"upload",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "audio_url":"https://cdn.example.com/reference.mp3",
+  "async":true
+}
+```
+
+Une fois le téléversement terminé, le résultat de la tâche renvoie l’`audio_id` candidat. Ajoutez-le ensuite au projet :
+
+```json
+{
+  "action":"add_track",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "audio_id":"AUDIO_ID",
+  "name":"Backing Vocals"
+}
+```
+
+## Génération et remplacement
+
+`generate_track` génère des candidats de piste audio pour un intervalle du projet ; `replace_section` renvoie deux candidats de remplacement local. Les deux opérations ne sélectionnent pas automatiquement le résultat artistique.
+
+```json
+{
+  "action":"replace_section",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "source_audio_id":"AUDIO_ID",
+  "start_seconds":35.12,
+  "end_seconds":48.76,
+  "model":"chirp-v6",
+  "replacement_lyrics":"新的歌词片段",
+  "async":true
+}
+```
+
+Après avoir sélectionné un candidat, soumettez-le :
+
+```json
+{
+  "action":"commit_candidate",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "operation_id":"OPERATION_ID",
+  "candidate_id":"CANDIDATE_ID",
+  "track_id":"TRACK_ID"
+}
+```
+
+Les candidats sont liés à la version du projet au moment de leur génération. Si le projet a déjà changé, les anciens candidats ne peuvent pas être soumis directement.
+
+## Exportation de la chanson complète
+
+```json
+{
+  "action":"render",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Final Mix",
+  "lyrics":"[Instrumental]",
+  "async":true,
+  "callback_url":"https://example.com/webhooks/suno"
+}
+```
+
+Le serveur lit l’état de projet faisant autorité de la version spécifiée et assemble les paramètres d’exportation. Le résultat final contient `render_id`, `audio_id`, `audio_url` et la durée. Le projet est lié à l’environnement d’exécution lors de sa création, et ne peut pas être migré entre environnements ni bénéficier d’un basculement automatique en cas de panne.
+
+> Vous ne pouvez téléverser ou traiter que des fichiers audio pour lesquels vous disposez de droits d’utilisation légitimes. L’API de projet est actuellement en Beta ; veuillez conserver de manière persistante les URL audio finales dans les résultats importants.
