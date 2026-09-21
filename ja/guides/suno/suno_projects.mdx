@@ -1,0 +1,134 @@
+---
+title: "Suno Studio プロジェクト統合ガイド"
+description: "Suno Music Generation API guide - Ace Data Cloud"
+---
+
+Suno Studio プロジェクト API は、1 つのエントリポイントを通じてマルチトラック音楽プロジェクトを管理します：
+
+```http
+POST /suno/projects
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+```
+
+リクエスト内の `action` が操作タイプを決定します。Project の主キーには一律 `id` を使用します。`version_id` は現在のプロジェクトバージョンを示し、すべての変更およびエクスポート操作では、並行した上書きを避けるために最新バージョンを送信する必要があります。
+
+## 操作概要
+
+| action             | モード | 用途                      |
+| ------------------ | --- | ----------------------- |
+| `create`           | 同期  | 空のプロジェクトを作成する             |
+| `retrieve`         | 同期  | プロジェクトおよび完全に編集可能な `state` を読み取る      |
+| `save`             | 同期  | 完全なプロジェクト状態を保存する                |
+| `upload`           | 非同期  | HTTPS 音声アドレスからプロジェクトに追加可能な素材を初期化する |
+| `add_track`        | 非同期  | 既存の音声をプロジェクトに追加する               |
+| `generate_track`   | 非同期  | 指定区間の新しい音声トラック候補を生成する            |
+| `replace_section`  | 非同期  | 部分置換候補を生成する                |
+| `commit_candidate` | 非同期  | 選択した候補をプロジェクトにコミットする             |
+| `remove_track`     | 同期  | 指定トラックを削除する                  |
+| `render`           | 非同期  | 保存済みバージョンを完全な楽曲としてエクスポートする           |
+
+非同期操作は直ちに `task_id` を返します。無料の `/suno/tasks` API を使用してポーリングするか、`callback_url` を渡して終端状態の結果を受け取ります。
+
+## 作成と読み取り
+
+```json
+{"action":"create","title":"My Studio Project"}
+```
+
+すべての変更操作では、一意の `Idempotency-Key` Header を送信する必要があります。作成成功後、レスポンス内の `data.id` が Project ID です。
+
+```json
+{"action":"retrieve","id":"PROJECT_ID"}
+```
+
+読み取りレスポンスには完全な `state` が含まれます。まず読み取りを行い、返された値に基づいて変更・保存することを推奨します。内部の拍子およびトラック構造をゼロから手動で構築しないでください。
+
+## 完全な状態の保存
+
+```json
+{
+  "action":"save",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Edited Project",
+  "state":{"tracks":[],"timing":{}}
+}
+```
+
+バージョンがすでに変更されている場合、API は HTTP 409 を返します。この場合は再度 `retrieve` し、変更をマージした後、新しい冪等キーで送信してください。古いリクエストを無闇に再試行しないでください。
+
+## アップロードとトラックの追加
+
+```json
+{
+  "action":"upload",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "audio_url":"https://cdn.example.com/reference.mp3",
+  "async":true
+}
+```
+
+アップロード完了後、タスク結果は候補の `audio_id` を返します。その後、それをプロジェクトに追加します：
+
+```json
+{
+  "action":"add_track",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "audio_id":"AUDIO_ID",
+  "name":"Backing Vocals"
+}
+```
+
+## 生成と置換
+
+`generate_track` はプロジェクト区間の音声トラック候補を生成します。`replace_section` は 2 つの部分置換候補を返します。どちらの操作も、芸術的な結果を自動選択しません。
+
+```json
+{
+  "action":"replace_section",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "source_audio_id":"AUDIO_ID",
+  "start_seconds":35.12,
+  "end_seconds":48.76,
+  "model":"chirp-v6",
+  "replacement_lyrics":"新的歌词片段",
+  "async":true
+}
+```
+
+候補を選択した後にコミットします：
+
+```json
+{
+  "action":"commit_candidate",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "operation_id":"OPERATION_ID",
+  "candidate_id":"CANDIDATE_ID",
+  "track_id":"TRACK_ID"
+}
+```
+
+候補は生成時のプロジェクトバージョンに紐付けられています。プロジェクトがすでに変更されている場合、古い候補を直接コミットすることはできません。
+
+## 完全な楽曲のエクスポート
+
+```json
+{
+  "action":"render",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Final Mix",
+  "lyrics":"[Instrumental]",
+  "async":true,
+  "callback_url":"https://example.com/webhooks/suno"
+}
+```
+
+サーバー側は指定バージョンの権威あるプロジェクト状態を読み取り、エクスポートパラメータを組み立てます。終端状態の結果には `render_id`、`audio_id`、`audio_url` および長さが含まれます。プロジェクトは作成時の実行環境に紐付けられており、環境間で移行したり自動フェイルオーバーしたりすることはできません。
+
+> 合法的な使用権を所有する音声のみをアップロードまたは処理できます。プロジェクト API は現在 Beta です。重要な結果内の最終音声 URL を永続化してください。

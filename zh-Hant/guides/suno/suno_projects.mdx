@@ -1,0 +1,137 @@
+---
+title: "Suno Studio 專案接入指南"
+description: "Suno Music Generation 整合指南 - Ace Data Cloud"
+---
+
+Suno Studio 專案 API 透過一個入口管理多軌音樂工程：
+
+```http
+POST /suno/projects
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+```
+
+請求中的 `action` 決定操作類型。Project 主鍵統一使用 `id`；`version_id` 表示目前工程版本，所有修改和匯出操作都必須提交最新版本，避免並行覆蓋。
+
+## 操作概覽
+
+| action             | 模式  | 用途                      |
+| ------------------ | --- | ----------------------- |
+| `create`           | 同步  | 建立空工程                   |
+| `retrieve`         | 同步  | 讀取工程及完整可編輯的 `state`    |
+| `save`             | 同步  | 儲存完整工程狀態                |
+| `upload`           | 非同步 | 從 HTTPS 音訊位址初始化可加入工程的素材 |
+| `add_track`        | 非同步 | 將已有音訊加入工程               |
+| `generate_track`   | 非同步 | 為指定區間生成新音軌候選            |
+| `replace_section`  | 非同步 | 生成局部替換候選                |
+| `commit_candidate` | 非同步 | 將選取的候選提交至工程             |
+| `remove_track`     | 同步  | 刪除指定軌道                  |
+| `render`           | 非同步 | 將已儲存版本匯出為完整歌曲           |
+
+非同步操作會立即返回 `task_id`。使用免費的 `/suno/tasks` 介面輪詢，或傳入 `callback_url` 接收終態結果。
+
+## 建立和讀取
+
+```json
+{
+  "action": "create",
+  "title": "My Studio Project"
+}
+```
+
+所有修改操作應傳送唯一的 `Idempotency-Key` Header。建立成功後回應中的 `data.id` 是 Project ID。
+
+```json
+{"action":"retrieve","id":"PROJECT_ID"}
+```
+
+讀取回應包含完整 `state`。建議先讀取，再基於回傳值修改並儲存；不要從零手動建構內部節拍和軌道結構。
+
+## 儲存完整狀態
+
+```json
+{
+  "action":"save",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Edited Project",
+  "state":{"tracks":[],"timing":{}}
+}
+```
+
+如果版本已變更，介面返回 HTTP 409。此時重新 `retrieve`，合併修改後再使用新的冪等鍵提交；不要盲目重試舊請求。
+
+## 上傳和新增軌道
+
+```json
+{
+  "action": "upload",
+  "id": "PROJECT_ID",
+  "version_id": "CURRENT_VERSION_ID",
+  "audio_url": "https://platform2.cdn.acedata.cloud/fish/5ade0339-5f11-487e-aacc-06a908271706.mp3?example=audio-001",
+  "async": true
+}
+```
+
+上傳完成後任務結果返回候選 `audio_id`。再將其加入工程：
+
+```json
+{
+  "action": "add_track",
+  "id": "PROJECT_ID",
+  "version_id": "CURRENT_VERSION_ID",
+  "audio_id": "AUDIO_ID",
+  "name": "Backing Vocals"
+}
+```
+
+## 生成和替換
+
+`generate_track` 為工程區間生成音軌候選；`replace_section` 返回兩個局部替換候選。兩個操作都不會自動選擇藝術結果。
+
+```json
+{
+  "action": "replace_section",
+  "id": "PROJECT_ID",
+  "version_id": "CURRENT_VERSION_ID",
+  "source_audio_id": "AUDIO_ID",
+  "start_seconds": 35.12,
+  "end_seconds": 48.76,
+  "model": "chirp-v6",
+  "replacement_lyrics": "新的歌詞片段",
+  "async": true
+}
+```
+
+選擇候選後提交：
+
+```json
+{
+  "action":"commit_candidate",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "operation_id":"OPERATION_ID",
+  "candidate_id":"CANDIDATE_ID",
+  "track_id":"TRACK_ID"
+}
+```
+
+候選與生成時的工程版本綁定。工程已經變更時，舊候選不能直接提交。
+
+## 匯出完整歌曲
+
+```json
+{
+  "action":"render",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Final Mix",
+  "lyrics":"[Instrumental]",
+  "async":true,
+  "callback_url":"https://example.com/webhooks/suno"
+}
+```
+
+伺服器讀取指定版本的權威工程狀態並組裝匯出參數。終態結果包含 `render_id`、`audio_id`、`audio_url` 和時長。專案綁定建立時的執行環境，不能跨環境遷移或自動容錯切換。
+
+> 僅可上傳或處理您擁有合法使用權的音訊。工程 API 目前為 Beta；請持久化重要結果中的最終音訊 URL。

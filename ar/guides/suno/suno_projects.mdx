@@ -1,0 +1,134 @@
+---
+title: "دليل تكامل مشروع Suno Studio"
+description: "Suno Music Generation API guide - Ace Data Cloud"
+---
+
+تدير واجهة API لمشروع Suno Studio مشروع موسيقى متعدد المسارات من خلال نقطة دخول واحدة:
+
+```http
+POST /suno/projects
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+```
+
+يحدد `action` في الطلب نوع العملية. يستخدم المفتاح الأساسي للمشروع بشكل موحد `id`؛ ويمثل `version_id` إصدار المشروع الحالي، ويجب أن ترسل جميع عمليات التعديل والتصدير أحدث إصدار لتجنب الكتابة الفوقية المتزامنة.
+
+## نظرة عامة على العمليات
+
+| action             | النمط  | الغرض                      |
+| ------------------ | --- | ----------------------- |
+| `create`           | متزامن  | إنشاء مشروع فارغ                   |
+| `retrieve`         | متزامن  | قراءة المشروع و`state` الكامل القابل للتحرير      |
+| `save`             | متزامن  | حفظ حالة المشروع الكاملة                |
+| `upload`           | غير متزامن  | تهيئة مادة يمكن إضافتها إلى المشروع من عنوان صوت HTTPS |
+| `add_track`        | غير متزامن  | إضافة صوت موجود إلى المشروع               |
+| `generate_track`   | غير متزامن  | إنشاء مرشحات لمسار صوتي جديد لفترة محددة            |
+| `replace_section`  | غير متزامن  | إنشاء مرشحين للاستبدال الموضعي                |
+| `commit_candidate` | غير متزامن  | إرسال المرشح المحدد إلى المشروع             |
+| `remove_track`     | متزامن  | حذف المسار المحدد                  |
+| `render`           | غير متزامن  | تصدير الإصدار المحفوظ كأغنية كاملة           |
+
+تعيد العمليات غير المتزامنة `task_id` فورًا. استخدم واجهة `/suno/tasks` المجانية للاستعلام الدوري، أو مرر `callback_url` لتلقي النتيجة النهائية.
+
+## الإنشاء والقراءة
+
+```json
+{"action":"create","title":"My Studio Project"}
+```
+
+يجب أن ترسل جميع عمليات التعديل Header فريدًا من نوع `Idempotency-Key`। بعد نجاح الإنشاء، يكون `data.id` في الاستجابة هو معرّف المشروع.
+
+```json
+{"action":"retrieve","id":"PROJECT_ID"}
+```
+
+تتضمن استجابة القراءة `state` الكاملة. يُوصى بالقراءة أولًا، ثم التعديل والحفظ استنادًا إلى القيمة المُعادة؛ لا تُنشئ يدويًا هياكل الإيقاع والمسارات الداخلية من الصفر.
+
+## حفظ الحالة الكاملة
+
+```json
+{
+  "action":"save",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Edited Project",
+  "state":{"tracks":[],"timing":{}}
+}
+```
+
+إذا كان الإصدار قد تغيّر، تعيد الواجهة HTTP 409. عندئذٍ أعد `retrieve`، وادمج التعديلات ثم أرسل باستخدام مفتاح تكرار جديد؛ لا تُعِد محاولة الطلب القديم بشكل أعمى.
+
+## رفع المسارات وإضافتها
+
+```json
+{
+  "action":"upload",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "audio_url":"https://cdn.example.com/reference.mp3",
+  "async":true
+}
+```
+
+بعد اكتمال الرفع، تعيد نتيجة المهمة `audio_id` المرشح. ثم أضفه إلى المشروع:
+
+```json
+{
+  "action":"add_track",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "audio_id":"AUDIO_ID",
+  "name":"Backing Vocals"
+}
+```
+
+## التوليد والاستبدال
+
+ينشئ `generate_track` مرشحات لمسار صوتي لفترة من المشروع؛ ويعيد `replace_section` مرشحين للاستبدال الموضعي. لا تقوم أي من العمليتين بتحديد النتيجة الفنية تلقائيًا.
+
+```json
+{
+  "action":"replace_section",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "source_audio_id":"AUDIO_ID",
+  "start_seconds":35.12,
+  "end_seconds":48.76,
+  "model":"chirp-v6",
+  "replacement_lyrics":"新的歌词片段",
+  "async":true
+}
+```
+
+أرسل بعد تحديد المرشح:
+
+```json
+{
+  "action":"commit_candidate",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "operation_id":"OPERATION_ID",
+  "candidate_id":"CANDIDATE_ID",
+  "track_id":"TRACK_ID"
+}
+```
+
+يرتبط المرشح بإصدار المشروع عند التوليد. عندما يكون المشروع قد تغيّر، لا يمكن إرسال المرشح القديم مباشرةً.
+
+## تصدير الأغنية الكاملة
+
+```json
+{
+  "action":"render",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Final Mix",
+  "lyrics":"[Instrumental]",
+  "async":true,
+  "callback_url":"https://example.com/webhooks/suno"
+}
+```
+
+يقرأ الخادم حالة المشروع الموثوقة للإصدار المحدد ويجمع معلمات التصدير. تتضمن النتيجة النهائية `render_id` و`audio_id` و`audio_url` والمدة. يرتبط المشروع ببيئة التنفيذ عند الإنشاء، ولا يمكن نقله بين البيئات أو تبديل الأعطال تلقائيًا.
+
+> لا يجوز رفع أو معالجة سوى الصوت الذي تملك حقًا قانونيًا لاستخدامه. واجهة API للمشروع حاليًا في Beta؛ يرجى حفظ عنوان URL النهائي للصوت ضمن النتائج المهمة بشكل دائم.
