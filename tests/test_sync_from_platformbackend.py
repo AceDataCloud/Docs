@@ -339,7 +339,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertEqual(examples["wrapped"], {"summary": "Done", "value": {"ok": True}})
         self.assertNotIn("example", cleaned["paths"]["/items"]["post"]["responses"]["200"]["content"]["application/json"])
 
-    def test_openapi_artifact_validation_only_checks_responses(self) -> None:
+    def test_openapi_artifact_validation_rejects_result_cdn_only_in_responses(self) -> None:
         request_only = {
             "paths": {
                 "/items": {
@@ -350,7 +350,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
                 }
             }
         }
-        self.assertFalse(sync.invalid_openapi_response_artifact_urls(request_only))
+        self.assertTrue(sync.invalid_openapi_response_artifact_urls(request_only))
 
         request_only["paths"]["/items"]["post"]["responses"]["200"]["content"]["application/json"]["example"]["video_url"] = "https://media.invalid/video.mp4"
         self.assertTrue(sync.invalid_openapi_response_artifact_urls(request_only))
@@ -540,3 +540,7 @@ class PublicAssetUrlTests(unittest.TestCase):
         )
         self.assertTrue(value["video_url"].startswith("https://cdn.acedata.cloud/assets/examples/"))
         self.assertNotIn("platform2.cdn.acedata.cloud", value["video_url"])
+
+    def test_result_cdn_is_rejected_for_published_artifacts(self) -> None:
+        payload = {"video_url": "https://platform2.cdn.acedata.cloud/gemini/result.mp4"}
+        self.assertTrue(sync.invalid_artifact_urls(payload))
