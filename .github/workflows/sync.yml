@@ -2,7 +2,7 @@ name: Sync Docs from PlatformBackend
 
 on:
   repository_dispatch:
-    types: [sync-docs]
+    types: [sync-docs, platform-contracts-updated]
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * *"
@@ -28,12 +28,46 @@ jobs:
           path: Docs
           token: ${{ secrets.BOT_GITHUB_TOKEN }}
 
+      - name: Resolve PlatformBackend ref
+        id: backend
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_TYPE: ${{ github.event.action }}
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+        run: |
+          if [ "$EVENT_NAME" = "repository_dispatch" ] && [ "$EVENT_TYPE" = "platform-contracts-updated" ]; then
+            if ! printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::Direct contract events require a full PlatformBackend source_sha."
+              exit 1
+            fi
+            echo "ref=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+            echo "direct=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+            echo "direct=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout PlatformBackend
         uses: actions/checkout@v4
         with:
           repository: AceDataCloud/PlatformBackend
+          ref: ${{ steps.backend.outputs.ref }}
           path: PlatformBackend
           token: ${{ secrets.BOT_GITHUB_TOKEN }}
+
+      - name: Verify PlatformBackend source
+        if: steps.backend.outputs.direct == 'true'
+        run: |
+          actual=$(git -C PlatformBackend rev-parse HEAD)
+          test "$actual" = "${{ steps.backend.outputs.ref }}"
+          bundle=$(mktemp -d)
+          python PlatformBackend/scripts/ecosystem_contracts.py \
+            --backend-dir PlatformBackend compile \
+            --output-dir "$bundle" \
+            --source-sha "$actual"
+          python PlatformBackend/scripts/ecosystem_contracts.py verify \
+            --bundle-dir "$bundle" \
+            --source-sha "$actual"
 
       - name: Set up Python
         uses: actions/setup-python@v5
