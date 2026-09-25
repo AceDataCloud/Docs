@@ -209,8 +209,8 @@ def sanitize_artifact_values(value: Any, counters: dict[str, int], field: str | 
     counters[kind] += 1
     bases = {
         "image": "https://cdn.acedata.cloud/e724d7f13d.png",
-        "video": "https://platform2.cdn.acedata.cloud/gemini/04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4",
-        "audio": "https://platform2.cdn.acedata.cloud/fish/5ade0339-5f11-487e-aacc-06a908271706.mp3",
+        "video": "https://cdn.acedata.cloud/assets/examples/gemini/04a043bd-6b23-4b4e-945c-ce48158c3eee-3a89912507c7.mp4",
+        "audio": "https://cdn.acedata.cloud/assets/examples/fish/5ade0339-5f11-487e-aacc-06a908271706-8e3fcb0e5547.mp3",
     }
     return f"{bases[kind]}?example={kind}-{counters[kind]:03d}"
 
@@ -267,7 +267,8 @@ def invalid_artifact_urls(value: Any, field: str | None = None) -> bool:
     host = (parsed.hostname or "").rstrip(".").casefold()
     if parsed.scheme.casefold() != "https" or host not in {"cdn.acedata.cloud", "platform.cdn.acedata.cloud", "suro.id"}:
         return True
-    return "/examples/" in parsed.path.casefold()
+    path = parsed.path.casefold()
+    return path.startswith("/examples/") and not path.startswith("/assets/examples/")
 
 
 def invalid_openapi_response_artifact_urls(spec: Any) -> bool:
