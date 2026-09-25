@@ -265,7 +265,7 @@ def invalid_artifact_urls(value: Any, field: str | None = None) -> bool:
     except ValueError:
         return True
     host = (parsed.hostname or "").rstrip(".").casefold()
-    if parsed.scheme.casefold() != "https" or host not in {"cdn.acedata.cloud", "platform.cdn.acedata.cloud", "platform2.cdn.acedata.cloud", "suro.id"}:
+    if parsed.scheme.casefold() != "https" or host not in {"cdn.acedata.cloud", "platform.cdn.acedata.cloud", "suro.id"}:
         return True
     path = parsed.path.casefold()
     return path.startswith("/examples/") and not path.startswith("/assets/examples/")
