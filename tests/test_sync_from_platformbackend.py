@@ -247,8 +247,8 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         )
         result = sync.neutralize_response_terms(content, ())
         self.assertIn("e724d7f13d.png?example=image-001", result)
-        self.assertIn("04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4?example=video-001", result)
-        self.assertIn("04a043bd-6b23-4b4e-945c-ce48158c3eee.mp4?example=video-002", result)
+        self.assertIn("04a043bd-6b23-4b4e-945c-ce48158c3eee-3a89912507c7.mp4?example=video-001", result)
+        self.assertIn("04a043bd-6b23-4b4e-945c-ce48158c3eee-3a89912507c7.mp4?example=video-002", result)
         self.assertEqual(sync.neutralize_response_terms(content, (), sanitize_artifacts=False), content)
 
     def test_neutralize_terms_only_in_response_fence(self) -> None:
@@ -521,3 +521,22 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PublicAssetUrlTests(unittest.TestCase):
+    def test_content_addressed_primary_cdn_examples_are_allowed(self) -> None:
+        payload = {
+            "video_url": "https://cdn.acedata.cloud/assets/examples/kling/example-6a664a591a53.mp4"
+        }
+        self.assertFalse(sync.invalid_artifact_urls(payload))
+
+    def test_placeholder_examples_are_rejected(self) -> None:
+        payload = {"video_url": "https://cdn.acedata.cloud/examples/video-placeholder.mp4"}
+        self.assertTrue(sync.invalid_artifact_urls(payload))
+
+    def test_sanitizer_uses_durable_primary_cdn_assets(self) -> None:
+        counters = {"image": 0, "video": 0, "audio": 0}
+        value = sync.sanitize_artifact_values(
+            {"video_url": "https://bad.example/result.mp4"}, counters
+        )
+        self.assertTrue(value["video_url"].startswith("https://cdn.acedata.cloud/assets/examples/"))
+        self.assertNotIn("platform2.cdn.acedata.cloud", value["video_url"])
