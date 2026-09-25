@@ -55,6 +55,37 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             self.assertEqual(mapping["tool_route"], "coding")
             self.assertEqual(exact["tool_route"]["output_path"], "guides/coding/custom_name.mdx")
 
+    def test_integrations_exact_record_writes_discoverable_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backend = root / "backend"
+            output = root / "output"
+            docs = backend / "docs"
+            docs.mkdir(parents=True)
+            (docs / "development_open_webui.md").write_text("# Open WebUI\n\nBody", encoding="utf-8")
+            records = [
+                {
+                    "canonical_alias": "development_open_webui",
+                    "source_doc_key": "development_open_webui",
+                    "service_alias": "integrations",
+                    "output_path": "guides/integrations/open-webui.mdx",
+                }
+            ]
+            bundle_path = root / "exact.json"
+            bundle_path.write_text(json.dumps({"schema_version": 1, "records": records}), encoding="utf-8")
+
+            exact = sync.load_exact_doc_records(backend, [], bundle_path)
+            sync.sync_guides(
+                backend,
+                output,
+                {"integrations": {"alias": "integrations", "display_name": "Integrations"}},
+                {"open_webui": "integrations"},
+                ["zh-Hans"],
+                exact_records=exact,
+            )
+
+            self.assertTrue((output / "zh-Hans/guides/integrations/open-webui.mdx").is_file())
+
     def test_sync_guides_writes_exact_output_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
