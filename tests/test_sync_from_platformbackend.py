@@ -544,3 +544,17 @@ class PublicAssetUrlTests(unittest.TestCase):
     def test_result_cdn_is_rejected_for_published_artifacts(self) -> None:
         payload = {"video_url": "https://platform2.cdn.acedata.cloud/gemini/result.mp4"}
         self.assertTrue(sync.invalid_artifact_urls(payload))
+
+
+class RetiredPublicAssetTests(unittest.TestCase):
+    def test_generated_tree_rewrites_retired_fallback_assets(self) -> None:
+        old_url, new_url = next(iter(sync.RETIRED_PUBLIC_ASSETS.items()))
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            page = root / "el/guides/producer/producer_wav.mdx"
+            page.parent.mkdir(parents=True)
+            page.write_text(f"Response:\n```json\n{{\"audio_url\":\"{old_url}\"}}\n```\n")
+            sync.neutralize_generated_tree(root, ((), (), ()))
+            content = page.read_text()
+            self.assertIn(new_url, content)
+            self.assertNotIn(old_url, content)

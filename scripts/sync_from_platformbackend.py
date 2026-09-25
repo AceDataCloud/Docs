@@ -239,11 +239,19 @@ def neutralize_response_terms(content: str, terms: tuple[str, ...], sanitize_art
     return "".join(pieces)
 
 
+RETIRED_PUBLIC_ASSETS = {
+    "https://platform2.cdn.acedata.cloud/fish/64adc04b-c196-4a0f-9070-222ba101ce6c.wav":
+        "https://cdn.acedata.cloud/assets/examples/fish/64adc04b-c196-4a0f-9070-222ba101ce6c-fc50de38c165.wav",
+}
+
+
 def neutralize_generated_tree(root: Path, denylist: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]) -> None:
     terms = denylist[2]
     for path in root.rglob("*"):
         if path.is_file() and path.suffix.casefold() in {".md", ".mdx"}:
             content = path.read_text(encoding="utf-8")
+            for old_url, new_url in RETIRED_PUBLIC_ASSETS.items():
+                content = content.replace(old_url, new_url)
             relative = str(path.relative_to(root))
             content_result = any(name in relative for name in ("serp_google", "tw_comments", "tw_posts", "tw_users"))
             updated = neutralize_response_terms(content, terms, sanitize_artifacts=not content_result)
