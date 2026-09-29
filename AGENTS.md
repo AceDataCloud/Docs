@@ -1,33 +1,26 @@
-> **First-time setup**: Customize this file for your project. Prompt the user to customize this file for their project.
-> For Mintlify product knowledge (components, configuration, writing standards),
-> install the Mintlify skill: `npx skills add https://mintlify.com/docs`
+# AceDataCloud Docs
 
-# Documentation project instructions
+This is the Mintlify documentation site. Navigation and site configuration
+live in `docs.json`; `mint dev` previews pages and `mint broken-links`
+checks links.
 
-## About this project
+## Content ownership
 
-- This is a documentation site built on [Mintlify](https://mintlify.com)
-- Pages are MDX files with YAML frontmatter
-- Configuration lives in `docs.json`
-- Run `mint dev` to preview locally
-- Run `mint broken-links` to check links
+- `scripts/sync_from_platformbackend.py` generates OpenAPI specs and
+  localized guides and MCP pages from PlatformBackend. Check
+  `managed_paths()` and `SKIP_DOC_KEYS` in that script before editing:
+  generated paths are replaced by the sync workflow. Change their source
+  in PlatformBackend or the generator instead.
+- Other pages, such as hand-authored quickstarts and concepts, can be
+  edited here. Keep navigation in `docs.json` consistent with page moves
+  and additions.
+- Use real API responses for examples. Customer-facing copy must not
+  disclose internal suppliers, supplier hosts, hidden upstream model
+  names, or routing/resale details. Public model names are fine.
 
-## Terminology
+## Verify
 
-{/* Add product-specific terms and preferred usage */}
-{/* Example: Use "workspace" not "project", "member" not "user" */}
-
-## Style preferences
-
-{/* Add any project-specific style rules below */}
-
-- Use active voice and second person ("you")
-- Keep sentences concise — one idea per sentence
-- Use sentence case for headings
-- Bold for UI elements: Click **Settings**
-- Code formatting for file names, commands, paths, and code references
-
-## Content boundaries
-
-{/* Define what should and shouldn't be documented */}
-{/* Example: Don't document internal admin features */}
+For generated-content or navigation changes, run the relevant checks in
+`.github/workflows/validate-sync.yml` and the site's link check. For a
+small hand-authored page change, preview the affected page and check its
+links. Do not run the publication sync merely to validate prose.
