@@ -1,0 +1,46 @@
+---
+title: "GPT-Live 实时语音对话"
+description: "OpenAI generation 集成指南 - Ace Data Cloud"
+---
+
+GPT-Live 支持边听边说、双向字幕和后台任务。Studio 的 ChatGPT 语音通话使用 `gpt-live-1` 处理语音，复杂问题继续由当前选择的聊天模型处理。
+
+## 连接
+
+使用平台 API Token 连接 `wss://realtime.acedata.cloud/v1/live/sessions`。Studio 或聊天服务凭据使用 `wss://realtime.acedata.cloud/aichat2/live`。服务器通过 `Authorization: Bearer <token>` 鉴权；浏览器通过 WebSocket 子协议传递凭据，避免写入 URL：
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+等待 `session.started` 后连续发送 `session.input_audio.append`，其中 `audio` 是 24 kHz、单声道、16 位小端 PCM 原始音频的 Base64，不包含 WAV 文件头。按实际采样速度发送音频，静音片段也要保持连续。
+
+按顺序播放 `session.output_audio.delta.delta`。用户和助手字幕分别来自 `session.input_transcript.delta` 与 `session.output_transcript.delta`，保留每段 `delta`、`start_ms`、`end_ms`；双方字幕可能同时增长。Live 没有逐条语音回复结束事件，应根据本地播放队列更新“正在回答”状态。
+
+## 后台任务
+
+当前支持 `client` 委派模式。收到 `session.delegation.created` 后，应用根据语音字幕和已保存上下文调用自己的后台，并通过 `session.thinking.append` 或 `session.commentary.append` 返回结果，携带对应的 `delegation_id` 和最多 500 token 的纯文本 `content`。结果应来自已完成的后台操作；语音被打断不表示后台任务已取消。
+
+暂不支持托管 Responses 委派、录音存储、`session.update`、会话恢复或自动重连。模型固定为 `gpt-live-1`，音频固定为 24 kHz PCM16，音色在开始通话时选择。旧的 Realtime API 仍可使用。
+
+## 计费与结束通话
+
+语音按活跃会话时长计费：**0.01 Credits/秒，即 0.6 Credits/分钟**，不按整分钟向上取整。用户说话、助手说话、静音、双方沉默和等待后台任务的时间均计费。后台模型或工具调用按对应 API 另行计费。Credits 对应的美元价格取决于充值套餐，以控制台当前价格为准。
+
+`session.usage.updated.usage.seconds` 是累计用量。例如先收到 12 秒、再收到 15 秒，总计为 15 秒。平台只结算新增时长，不重复累加快照。
+
+结束时发送 `session.close`，继续接收，直到收到 `session.closed`，再关闭连接并释放麦克风。强制断开可能导致最终用量未确认，界面应明确报告。余额不足、计费失败或达到会话限制时，连接会结束。默认单次通话最多 30 分钟。
+
+参数错误通过 `error` 事件返回；`error.client_event_id` 对应失败命令。启动失败应停止录音并展示错误，不自动切换模型或重试产生新费用。
