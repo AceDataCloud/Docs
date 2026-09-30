@@ -57,7 +57,7 @@ Install our GitHub app from your [dashboard](https://dashboard.mintlify.com/sett
 ## Automated tests
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest
 ```
 
 CI discovers tests by filename instead of maintaining a per-file list. Add Python
