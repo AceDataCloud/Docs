@@ -1,0 +1,46 @@
+---
+title: "GPT-Live rozmowy głosowe w czasie rzeczywistym"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live obsługuje jednoczesne słuchanie i mówienie, dwukierunkowe napisy oraz zadania w tle. Rozmowy głosowe ChatGPT w Studio używają `gpt-live-1` do przetwarzania głosu, a złożone pytania są nadal obsługiwane przez aktualnie wybrany model czatu.
+
+## Połączenie
+
+Użyj tokenu API platformy, aby połączyć się z `wss://realtime.acedata.cloud/v1/live/sessions`. Studio lub dane uwierzytelniające usługi czatu używają `wss://realtime.acedata.cloud/aichat2/live`. Serwer uwierzytelnia przez `Authorization: Bearer <token>`; przeglądarka przekazuje dane uwierzytelniające przez podprotokół WebSocket, aby uniknąć zapisywania ich w URL:
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+Po oczekiwaniu na `session.started` wysyłaj ciągle `session.input_audio.append`, gdzie `audio` to Base64 surowego dźwięku PCM 24 kHz, mono, 16-bitowego little-endian, bez nagłówka pliku WAV. Wysyłaj dźwięk z rzeczywistą szybkością próbkowania, a segmenty ciszy również muszą zachować ciągłość.
+
+Odtwarzaj po kolei `session.output_audio.delta.delta`. Napisy użytkownika i asystenta pochodzą odpowiednio z `session.input_transcript.delta` oraz `session.output_transcript.delta`; zachowuj dla każdego segmentu `delta`, `start_ms`, `end_ms`; napisy obu stron mogą narastać jednocześnie. Live nie ma zdarzenia zakończenia każdej pojedynczej odpowiedzi głosowej, dlatego stan „odpowiada” należy aktualizować na podstawie lokalnej kolejki odtwarzania.
+
+## Zadania w tle
+
+Obecnie obsługiwany jest tryb delegowania `client`. Po otrzymaniu `session.delegation.created` aplikacja wywołuje własne zaplecze na podstawie napisów głosowych i zapisanego kontekstu, a następnie zwraca wynik przez `session.thinking.append` lub `session.commentary.append`, przekazując odpowiedni `delegation_id` oraz zwykły tekst `content` o długości maksymalnie 500 tokenów. Wynik powinien pochodzić z ukończonej operacji w tle; przerwanie głosu nie oznacza, że zadanie w tle zostało anulowane.
+
+Na razie nie są obsługiwane zarządzane delegowanie Responses, przechowywanie nagrań, `session.update`, wznawianie sesji ani automatyczne ponowne łączenie. Model jest na stałe ustawiony na `gpt-live-1`, dźwięk na 24 kHz PCM16, a barwa głosu jest wybierana przy rozpoczęciu rozmowy. Stare Realtime API nadal może być używane.
+
+## Rozliczanie i zakończenie rozmowy
+
+Głos jest rozliczany według czasu trwania aktywnej sesji: **0.01 Credits/s, czyli 0.6 Credits/min**, bez zaokrąglania w górę do pełnych minut. Czas, gdy użytkownik mówi, asystent mówi, panuje cisza, obie strony milczą oraz oczekiwanie na zadania w tle, jest rozliczany. Model w tle lub wywołania narzędzi są rozliczane osobno zgodnie z odpowiednim API. Cena Credits w dolarach zależy od pakietu doładowania; obowiązuje aktualna cena w konsoli.
+
+`session.usage.updated.usage.seconds` to skumulowane użycie. Na przykład po otrzymaniu najpierw 12 sekund, a następnie 15 sekund, łączna wartość wynosi 15 sekund. Platforma rozlicza tylko przyrost czasu i nie sumuje wielokrotnie migawek.
+
+Przy zakończeniu wyślij `session.close`, kontynuuj odbieranie do momentu otrzymania `session.closed`, a następnie zamknij połączenie i zwolnij mikrofon. Wymuszone rozłączenie może spowodować, że końcowe użycie nie zostanie potwierdzone, co interfejs powinien jasno zgłaszać. Połączenie zakończy się przy niewystarczającym saldzie, niepowodzeniu rozliczenia lub osiągnięciu limitu sesji. Domyślnie pojedyncza rozmowa może trwać maksymalnie 30 minut.
+
+Błędy parametrów są zwracane przez zdarzenie `error`; `error.client_event_id` odpowiada nieudanej komendzie. W przypadku niepowodzenia uruchomienia należy zatrzymać nagrywanie i wyświetlić błąd, bez automatycznego przełączania modelu ani ponawiania prób generujących nowe opłaty.

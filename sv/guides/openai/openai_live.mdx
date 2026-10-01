@@ -1,0 +1,46 @@
+---
+title: "GPT-Live röstkonversation i realtid"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live stöder att lyssna och tala samtidigt, tvåvägsundertexter och bakgrundsuppgifter. ChatGPT-röstsamtal i Studio använder `gpt-live-1` för att bearbeta tal, medan komplexa frågor fortsätter att hanteras av den för närvarande valda chattmodellen.
+
+## Anslutning
+
+Använd plattformens API Token för att ansluta till `wss://realtime.acedata.cloud/v1/live/sessions`. Autentiseringsuppgifter för Studio eller chatttjänsten använder `wss://realtime.acedata.cloud/aichat2/live`. Servern autentiserar via `Authorization: Bearer <token>`; webbläsaren överför autentiseringsuppgifter via WebSocket-underprotokoll för att undvika att skriva dem i URL:en:
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+Vänta på `session.started` och skicka sedan kontinuerligt `session.input_audio.append`, där `audio` är Base64-kodad råljuddata i 24 kHz, mono, 16-bitars little-endian PCM utan WAV-filhuvud. Skicka ljud enligt den faktiska samplingshastigheten; tysta segment måste också hållas kontinuerliga.
+
+Spela upp `session.output_audio.delta.delta` i ordning. Användarens och assistentens undertexter kommer från respektive `session.input_transcript.delta` och `session.output_transcript.delta`; behåll varje segments `delta`, `start_ms` och `end_ms`; båda sidornas undertexter kan växa samtidigt. Live har ingen slut-händelse för enskilda röstsvar; statusen ”svarar” bör uppdateras baserat på den lokala uppspelningskön.
+
+## Bakgrundsuppgifter
+
+För närvarande stöds läget `client`-delegering. Efter att ha mottagit `session.delegation.created` anropar applikationen sin egen bakgrundstjänst baserat på röstundertexter och sparad kontext, och returnerar resultatet via `session.thinking.append` eller `session.commentary.append`, med motsvarande `delegation_id` och ren text i `content` på högst 500 token. Resultatet ska komma från en slutförd bakgrundsåtgärd; att talet avbryts betyder inte att bakgrundsuppgiften har avbrutits.
+
+Delegering till hanterade Responses, lagring av inspelningar, `session.update`, återupptagning av sessioner eller automatisk återanslutning stöds ännu inte. Modellen är fast `gpt-live-1`, ljudet är fast 24 kHz PCM16, och röst väljs när samtalet startas. Det gamla Realtime API:t kan fortfarande användas.
+
+## Debitering och avslut av samtal
+
+Tal debiteras efter aktiv sessionstid: **0.01 Credits/sekund, dvs. 0.6 Credits/minut**, utan avrundning uppåt till hela minuter. Tid då användaren talar, assistenten talar, det är tyst, båda är tysta eller man väntar på en bakgrundsuppgift debiteras. Bakgrundsmodeller eller verktygsanrop debiteras separat enligt motsvarande API. Dollarpriset som Credits motsvarar beror på påfyllnadspaketet; se det aktuella priset i konsolen.
+
+`session.usage.updated.usage.seconds` är den kumulativa användningen. Om man till exempel först får 12 sekunder och sedan 15 sekunder är totalen 15 sekunder. Plattformen debiterar endast tillkommen tid och summerar inte ögonblicksbilder dubbelt.
+
+Skicka `session.close` vid avslut, fortsätt att ta emot tills `session.closed` tas emot, stäng sedan anslutningen och frigör mikrofonen. Tvångsavbrott kan leda till att den slutliga användningen inte bekräftas, vilket gränssnittet tydligt bör rapportera. Anslutningen avslutas när saldot är otillräckligt, debiteringen misslyckas eller sessionsgränsen nås. Ett enskilt samtal är som standard högst 30 minuter.
+
+Parameterfel returneras via händelsen `error`; `error.client_event_id` motsvarar det misslyckade kommandot. Vid startfel ska inspelningen stoppas och felet visas, utan att automatiskt byta modell eller försöka igen och skapa nya kostnader.

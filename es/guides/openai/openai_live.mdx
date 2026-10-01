@@ -1,0 +1,46 @@
+---
+title: "Conversación de voz en tiempo real de GPT-Live"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live admite hablar mientras escucha, subtítulos bidireccionales y tareas en segundo plano. Las llamadas de voz de ChatGPT de Studio usan `gpt-live-1` para procesar la voz, y las preguntas complejas continúan siendo procesadas por el modelo de chat seleccionado actualmente.
+
+## Conexión
+
+Use el Token de API de la plataforma para conectarse a `wss://realtime.acedata.cloud/v1/live/sessions`. Las credenciales de Studio o del servicio de chat usan `wss://realtime.acedata.cloud/aichat2/live`. El servidor autentica mediante `Authorization: Bearer <token>`; el navegador transmite las credenciales mediante subprotocolos de WebSocket, evitando escribirlas en la URL:
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+Después de esperar `session.started`, envíe continuamente `session.input_audio.append`, donde `audio` es el Base64 de audio sin procesar PCM de 24 kHz, monoaural y little-endian de 16 bits, sin incluir la cabecera del archivo WAV. Envíe el audio según la velocidad de muestreo real, y los fragmentos silenciosos también deben mantenerse continuos.
+
+Reproduzca en orden `session.output_audio.delta.delta`. Los subtítulos del usuario y del asistente proceden respectivamente de `session.input_transcript.delta` y `session.output_transcript.delta`; conserve el `delta`, `start_ms` y `end_ms` de cada segmento; los subtítulos de ambas partes pueden crecer simultáneamente. Live no tiene un evento de finalización para cada respuesta de voz, por lo que el estado de “respondiendo” debe actualizarse según la cola de reproducción local.
+
+## Tareas en segundo plano
+
+Actualmente se admite el modo de delegación `client`. Después de recibir `session.delegation.created`, la aplicación llama a su propio backend según los subtítulos de voz y el contexto guardado, y devuelve el resultado mediante `session.thinking.append` o `session.commentary.append`, incluyendo el `delegation_id` correspondiente y `content` de texto sin formato de hasta 500 tokens. El resultado debe provenir de una operación de backend completada; que la voz sea interrumpida no significa que la tarea en segundo plano se haya cancelado.
+
+Por el momento no se admiten la delegación gestionada de Responses, el almacenamiento de grabaciones, `session.update`, la reanudación de sesiones ni la reconexión automática. El modelo está fijado en `gpt-live-1`, el audio está fijado en PCM16 de 24 kHz y la voz se selecciona al iniciar la llamada. La antigua API de Realtime sigue pudiendo utilizarse.
+
+## Facturación y finalización de la llamada
+
+La voz se factura según la duración de la sesión activa: **0.01 Credits/segundo, es decir, 0.6 Credits/minuto**, sin redondear hacia arriba a minutos completos. Se factura el tiempo en que habla el usuario, habla el asistente, hay silencio, ambas partes guardan silencio y se esperan tareas en segundo plano. El modelo de backend o las llamadas a herramientas se facturan por separado según la API correspondiente. El precio en dólares correspondiente a los Credits depende del paquete de recarga; prevalece el precio actual de la consola.
+
+`session.usage.updated.usage.seconds` es el uso acumulado. Por ejemplo, si primero se reciben 12 segundos y luego 15 segundos, el total es de 15 segundos. La plataforma solo liquida la duración adicional y no acumula repetidamente las instantáneas.
+
+Al finalizar, envíe `session.close`, continúe recibiendo hasta recibir `session.closed`, y luego cierre la conexión y libere el micrófono. La desconexión forzada puede causar que el uso final no sea confirmado, y la interfaz debe informarlo claramente. Cuando el saldo sea insuficiente, falle la facturación o se alcance el límite de la sesión, la conexión finalizará. De forma predeterminada, una sola llamada puede durar hasta 30 minutos.
+
+Los errores de parámetros se devuelven mediante el evento `error`; `error.client_event_id` corresponde al comando fallido. Si el inicio falla, se debe detener la grabación y mostrar el error, sin cambiar automáticamente de modelo ni reintentar generando nuevos cargos.

@@ -1,0 +1,46 @@
+---
+title: "GPT-Live Echtzeit-Sprachdialog"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live unterstützt gleichzeitiges Zuhören und Sprechen, bidirektionale Untertitel und Hintergrundaufgaben. Der ChatGPT-Sprachanruf von Studio verwendet `gpt-live-1` zur Verarbeitung von Sprache, komplexe Fragen werden weiterhin vom aktuell ausgewählten Chatmodell verarbeitet.
+
+## Verbindung
+
+Verwenden Sie den Plattform-API-Token, um sich mit `wss://realtime.acedata.cloud/v1/live/sessions` zu verbinden. Für Studio- oder Chatdienst-Anmeldedaten verwenden Sie `wss://realtime.acedata.cloud/aichat2/live`. Der Server authentifiziert über `Authorization: Bearer <token>`; der Browser übermittelt Anmeldedaten über das WebSocket-Unterprotokoll, um das Schreiben in die URL zu vermeiden:
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+Warten Sie auf `session.started`, bevor Sie fortlaufend `session.input_audio.append` senden, wobei `audio` das Base64-kodierte rohe Audio im Format 24 kHz, mono, 16-Bit-Little-Endian PCM ohne WAV-Dateikopf ist. Senden Sie Audio mit der tatsächlichen Abtastrate; auch stille Segmente müssen fortlaufend beibehalten werden.
+
+Spielen Sie `session.output_audio.delta.delta` der Reihenfolge nach ab. Die Untertitel des Benutzers und des Assistenten stammen jeweils aus `session.input_transcript.delta` und `session.output_transcript.delta`; bewahren Sie für jedes `delta` `start_ms` und `end_ms` auf; die Untertitel beider Seiten können gleichzeitig wachsen. Live verfügt über kein Endereignis für einzelne Sprachantworten; der Status „antwortet gerade“ sollte anhand der lokalen Wiedergabewarteschlange aktualisiert werden.
+
+## Hintergrundaufgaben
+
+Derzeit wird der Delegierungsmodus `client` unterstützt. Nach dem Empfang von `session.delegation.created` ruft die Anwendung anhand der Sprachuntertitel und des gespeicherten Kontexts ihr eigenes Backend auf und gibt die Ergebnisse über `session.thinking.append` oder `session.commentary.append` zurück, jeweils mit der entsprechenden `delegation_id` und reinem Text-`content` von höchstens 500 Token. Die Ergebnisse sollten aus abgeschlossenen Backend-Vorgängen stammen; eine Unterbrechung der Sprache bedeutet nicht, dass die Hintergrundaufgabe abgebrochen wurde.
+
+Derzeit werden keine verwaltete Responses-Delegierung, Aufzeichnungsspeicherung, `session.update`, Sitzungswiederherstellung oder automatische Wiederverbindung unterstützt. Das Modell ist fest auf `gpt-live-1` eingestellt, Audio ist fest auf 24 kHz PCM16 eingestellt, und die Stimme wird beim Beginn des Anrufs ausgewählt. Die alte Realtime API kann weiterhin verwendet werden.
+
+## Abrechnung und Anruf beenden
+
+Sprache wird nach der Dauer der aktiven Sitzung abgerechnet: **0.01 Credits/Sekunde, also 0.6 Credits/Minute**, ohne Aufrundung auf volle Minuten. Die Zeit, in der der Benutzer spricht, der Assistent spricht, Stille herrscht, beide Seiten schweigen oder auf Hintergrundaufgaben gewartet wird, wird jeweils abgerechnet. Backend-Modelle oder Tool-Aufrufe werden gemäß der entsprechenden API separat abgerechnet. Der Dollarpreis der Credits hängt vom Aufladepaket ab; maßgeblich ist der aktuelle Preis in der Konsole.
+
+`session.usage.updated.usage.seconds` ist die kumulierte Nutzung. Wenn beispielsweise zuerst 12 Sekunden und dann 15 Sekunden empfangen werden, beträgt die Gesamtsumme 15 Sekunden. Die Plattform rechnet nur die neu hinzugekommene Dauer ab und summiert Snapshots nicht mehrfach.
+
+Senden Sie beim Beenden `session.close` und empfangen Sie weiter, bis `session.closed` eingeht; schließen Sie dann die Verbindung und geben Sie das Mikrofon frei. Eine erzwungene Trennung kann dazu führen, dass die endgültige Nutzung nicht bestätigt wird, was die Benutzeroberfläche klar anzeigen sollte. Bei unzureichendem Guthaben, fehlgeschlagener Abrechnung oder Erreichen des Sitzungslimits wird die Verbindung beendet. Standardmäßig dauert ein einzelner Anruf höchstens 30 Minuten.
+
+Parameterfehler werden über das Ereignis `error` zurückgegeben; `error.client_event_id` entspricht dem fehlgeschlagenen Befehl. Bei einem Startfehler sollte die Aufnahme gestoppt und der Fehler angezeigt werden; das Modell darf nicht automatisch gewechselt oder erneut versucht werden, wenn dadurch neue Kosten entstehen.

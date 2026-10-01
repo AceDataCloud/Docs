@@ -1,0 +1,46 @@
+---
+title: "GPT-Live 실시간 음성 대화"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live는 들으면서 말하기, 양방향 자막 및 백그라운드 작업을 지원합니다. Studio의 ChatGPT 음성 통화는 `gpt-live-1`을 사용하여 음성을 처리하며, 복잡한 질문은 계속해서 현재 선택된 채팅 모델이 처리합니다.
+
+## 연결
+
+플랫폼 API Token을 사용하여 `wss://realtime.acedata.cloud/v1/live/sessions`에 연결합니다. Studio 또는 채팅 서비스 자격 증명은 `wss://realtime.acedata.cloud/aichat2/live`를 사용합니다. 서버는 `Authorization: Bearer <token>`을 통해 인증하며, 브라우저는 URL에 기록되지 않도록 WebSocket 하위 프로토콜을 통해 자격 증명을 전달합니다:
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+`session.started`를 기다린 후 `session.input_audio.append`를 연속으로 전송합니다. 여기서 `audio`는 WAV 파일 헤더를 포함하지 않는 24 kHz, 모노, 16비트 리틀 엔디언 PCM 원시 오디오의 Base64입니다. 실제 샘플링 속도에 맞춰 오디오를 전송하고, 무음 구간도 연속성을 유지해야 합니다.
+
+순서대로 `session.output_audio.delta.delta`를 재생합니다. 사용자와 어시스턴트의 자막은 각각 `session.input_transcript.delta`와 `session.output_transcript.delta`에서 가져오며, 각 `delta`, `start_ms`, `end_ms`를 보존합니다. 양측 자막은 동시에 늘어날 수 있습니다. Live에는 개별 음성 답변 종료 이벤트가 없으므로, 로컬 재생 대기열을 기준으로 “답변 중” 상태를 업데이트해야 합니다.
+
+## 백그라운드 작업
+
+현재 `client` 위임 모드를 지원합니다. `session.delegation.created`를 받은 후, 애플리케이션은 음성 자막과 저장된 컨텍스트에 따라 자체 백그라운드를 호출하고, 해당 `delegation_id` 및 최대 500 token의 일반 텍스트 `content`를 포함하여 `session.thinking.append` 또는 `session.commentary.append`를 통해 결과를 반환합니다. 결과는 완료된 백그라운드 작업에서 가져와야 하며, 음성이 중단되었다고 해서 백그라운드 작업이 취소된 것은 아닙니다.
+
+현재 호스팅된 Responses 위임, 녹음 저장, `session.update`, 세션 복구 또는 자동 재연결은 지원하지 않습니다. 모델은 `gpt-live-1`으로 고정되며, 오디오는 24 kHz PCM16으로 고정되고, 음색은 통화 시작 시 선택합니다. 기존 Realtime API는 계속 사용할 수 있습니다.
+
+## 과금 및 통화 종료
+
+음성은 활성 세션 시간에 따라 과금됩니다: **0.01 Credits/초, 즉 0.6 Credits/분**이며, 분 단위로 올림하지 않습니다. 사용자가 말하는 시간, 어시스턴트가 말하는 시간, 무음, 양측 침묵 및 백그라운드 작업 대기 시간 모두 과금됩니다. 백그라운드 모델 또는 도구 호출은 해당 API에 따라 별도로 과금됩니다. Credits에 해당하는 달러 가격은 충전 패키지에 따라 달라지며, 콘솔의 현재 가격을 기준으로 합니다.
+
+`session.usage.updated.usage.seconds`는 누적 사용량입니다. 예를 들어 먼저 12초를 받고 이후 15초를 받았다면, 총계는 15초입니다. 플랫폼은 증가한 시간만 정산하며, 스냅샷을 중복 누적하지 않습니다.
+
+종료 시 `session.close`를 전송하고, `session.closed`를 받을 때까지 계속 수신한 후 연결을 닫고 마이크를 해제합니다. 강제 연결 해제는 최종 사용량이 확인되지 않을 수 있으므로, 인터페이스에서 명확히 보고해야 합니다. 잔액 부족, 과금 실패 또는 세션 제한 도달 시 연결이 종료됩니다. 기본적으로 단일 통화는 최대 30분입니다.
+
+매개변수 오류는 `error` 이벤트를 통해 반환되며, `error.client_event_id`는 실패한 명령에 대응합니다. 시작 실패 시 녹음을 중지하고 오류를 표시해야 하며, 자동으로 모델을 전환하거나 새로운 비용을 발생시키는 재시도를 해서는 안 됩니다.
