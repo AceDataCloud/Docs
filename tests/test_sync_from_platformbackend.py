@@ -2,6 +2,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -13,6 +14,21 @@ SPEC.loader.exec_module(sync)
 
 
 class SyncFromPlatformBackendTests(unittest.TestCase):
+    def test_shared_kling_assets_guide_uses_localized_element_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backend = root / "backend"
+            (backend / "docs").mkdir(parents=True)
+            (backend / "docs/development_kling_assets.md").write_text("# 中文资产指南", encoding="utf-8")
+            localized = {sync.normalize("kling_elements"): {
+                "content": "# Kling Assets\n\nVoice creation costs 0.07 Credits.", "title": "Kling Elements"}}
+            with patch.object(sync, "load_localized_guides", return_value=localized):
+                sync.sync_guides(backend, root / "out", {"kling": {"display_name": "Kling"}},
+                                 {"kling_assets": "kling"}, ["en"])
+            content = (root / "out/en/guides/kling/kling_assets.mdx").read_text(encoding="utf-8")
+            self.assertIn("Voice creation costs 0.07 Credits.", content)
+            self.assertNotIn("中文", content)
+
     def test_build_doc_service_map_reads_flattened_docs_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             backend_dir = Path(temporary_directory)

@@ -28,6 +28,7 @@ START = time.time()
 
 BASE_URL = "https://api.acedata.cloud"
 DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/?limit=1000"
+SHARED_GUIDE_ALIASES = {"kling_assets": ("kling_elements", "kling_voices")}
 TRANSACTION_FILE = ".docs-sync-transaction.json"
 BACKUP_DIR = ".docs-sync-backup"
 EXACT_MAP_PATH = Path(__file__).parent / "data" / "coding-docs-map.json"
@@ -1049,6 +1050,11 @@ def sync_guides(
             exact = (exact_records or {}).get(doc_key)
             relative_output = Path(exact["output_path"]) if exact else Path("guides") / service_alias / f"{doc_key}.mdx"
             localized_guide = localized_guides.get(normalize(doc_key)) if localized_guides else None
+            if localized_guides and not localized_guide:
+                for alias in SHARED_GUIDE_ALIASES.get(doc_key, ()):
+                    localized_guide = localized_guides.get(normalize(alias))
+                    if localized_guide:
+                        break
             if localized_guides and not localized_guide:
                 missing_guides.append(doc_key)
                 fallback = fallback_root / output_language / relative_output if fallback_root else None
