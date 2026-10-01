@@ -189,6 +189,17 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertEqual(guides["sunovoices"]["title"], "Suno Voice Clone API Integration Instructions")
         self.assertEqual(guides["sunovoices"]["content"], "Localized integration guide")
 
+    def test_index_localized_guides_resolves_namespaced_operation_id(self) -> None:
+        payload = {"items": [{
+            "alias": "flux-videos",
+            "api": {"path": "/flux/videos", "method": "POST", "definition": {
+                "paths": {"/flux/videos": {"post": {"operationId": "flux_generate_video"}}}
+            }},
+            "sibling": {"alias": "flux-videos-integration", "content": "# FLUX Video"},
+        }]}
+        guides = sync.index_localized_guides(payload, "en")
+        self.assertEqual(guides["fluxgeneratevideo"]["content"], "# FLUX Video")
+
     def test_index_localized_guides_rejects_empty_feed(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "No localized guides"):
             sync.index_localized_guides({"items": []}, "en")
