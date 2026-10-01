@@ -926,6 +926,12 @@ def index_localized_guides(payload: Any, language: str) -> dict[str, dict[str, s
 
         candidates = [item.get("alias", ""), sibling.get("alias", "").removesuffix("-integration")]
         api_path = (api.get("path") or "").strip("/").replace("/", "_")
+        definition = api.get("definition") or {}
+        operation = definition.get("paths", {}).get(api.get("path"), {}).get((api.get("method") or "").lower(), {})
+        operation_id = operation.get("operationId")
+        namespace = (api.get("path") or "").strip("/").split("/")[0]
+        if isinstance(operation_id, str) and operation_id.startswith(namespace + "_"):
+            candidates.append(operation_id)
 
         guide = {
             "content": sibling["content"],
