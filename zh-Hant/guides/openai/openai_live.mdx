@@ -1,0 +1,46 @@
+---
+title: "GPT-Live 即時語音對話"
+description: "OpenAI generation 整合指南 - Ace Data Cloud"
+---
+
+GPT-Live 支援邊聽邊說、雙向字幕和背景任務。Studio 的 ChatGPT 語音通話使用 `gpt-live-1` 處理語音，複雜問題繼續由目前選擇的聊天模型處理。
+
+## 連線
+
+使用平台 API Token 連線 `wss://realtime.acedata.cloud/v1/live/sessions`。Studio 或聊天服務憑證使用 `wss://realtime.acedata.cloud/aichat2/live`。伺服器透過 `Authorization: Bearer <token>` 驗證；瀏覽器透過 WebSocket 子協定傳遞憑證，避免寫入 URL：
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+等待 `session.started` 後持續傳送 `session.input_audio.append`，其中 `audio` 是 24 kHz、單聲道、16 位元小端 PCM 原始音訊的 Base64，不包含 WAV 檔案標頭。依實際採樣速度傳送音訊，靜音片段也要保持連續。
+
+依序播放 `session.output_audio.delta.delta`。使用者和助理字幕分別來自 `session.input_transcript.delta` 與 `session.output_transcript.delta`，保留每段 `delta`、`start_ms`、`end_ms`；雙方字幕可能同時增長。Live 沒有逐條語音回覆結束事件，應根據本機播放佇列更新「正在回答」狀態。
+
+## 背景任務
+
+目前支援 `client` 委派模式。收到 `session.delegation.created` 後，應用程式根據語音字幕和已儲存上下文呼叫自己的背景作業，並透過 `session.thinking.append` 或 `session.commentary.append` 回傳結果，攜帶對應的 `delegation_id` 和最多 500 token 的純文字 `content`。結果應來自已完成的背景操作；語音被打斷不表示背景任務已取消。
+
+暫不支援受管 Responses 委派、錄音儲存、`session.update`、工作階段恢復或自動重新連線。模型固定為 `gpt-live-1`，音訊固定為 24 kHz PCM16，音色在開始通話時選擇。舊的 Realtime API 仍可使用。
+
+## 計費與結束通話
+
+語音按活躍工作階段時長計費：**0.01 Credits/秒，即 0.6 Credits/分鐘**，不按整分鐘向上取整。使用者說話、助理說話、靜音、雙方沉默和等待背景任務的時間均計費。背景模型或工具呼叫按對應 API 另行計費。Credits 對應的美元價格取決於儲值方案，以控制台目前價格為準。
+
+`session.usage.updated.usage.seconds` 是累計用量。例如先收到 12 秒、再收到 15 秒，總計為 15 秒。平台只結算新增時長，不重複累加快照。
+
+結束時傳送 `session.close`，繼續接收，直到收到 `session.closed`，再關閉連線並釋放麥克風。強制中斷可能導致最終用量未確認，介面應明確報告。餘額不足、計費失敗或達到工作階段限制時，連線會結束。預設單次通話最多 30 分鐘。
+
+參數錯誤透過 `error` 事件回傳；`error.client_event_id` 對應失敗命令。啟動失敗應停止錄音並顯示錯誤，不自動切換模型或重試產生新費用。

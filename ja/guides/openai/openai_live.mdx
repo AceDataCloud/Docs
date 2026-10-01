@@ -1,0 +1,46 @@
+---
+title: "GPT-Live リアルタイム音声会話"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live は、聞きながら話すこと、双方向字幕、およびバックグラウンドタスクをサポートしています。Studio の ChatGPT 音声通話は `gpt-live-1` を使用して音声を処理し、複雑な問題は引き続き現在選択されているチャットモデルで処理されます。
+
+## 接続
+
+プラットフォーム API Token を使用して `wss://realtime.acedata.cloud/v1/live/sessions` に接続します。Studio またはチャットサービスの認証情報は `wss://realtime.acedata.cloud/aichat2/live` を使用します。サーバーは `Authorization: Bearer <token>` を通じて認証します。ブラウザは WebSocket サブプロトコルを通じて認証情報を渡し、URL への書き込みを回避します。
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '簡潔かつ親しみやすく回答し、ユーザーの言語を使用してください。複雑な問題はバックグラウンドで処理してください。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+`session.started` を待ってから、`session.input_audio.append` を連続して送信します。ここで `audio` は、WAV ファイルヘッダーを含まない、24 kHz、モノラル、16 ビットリトルエンディアン PCM 生音声の Base64 です。実際のサンプリング速度で音声を送信し、無音区間も連続性を維持してください。
+
+`session.output_audio.delta.delta` を順番に再生します。ユーザーとアシスタントの字幕はそれぞれ `session.input_transcript.delta` と `session.output_transcript.delta` から取得し、各 `delta`、`start_ms`、`end_ms` を保持します。双方の字幕は同時に増加する可能性があります。Live には音声応答ごとの終了イベントがないため、ローカル再生キューに基づいて「回答中」状態を更新する必要があります。
+
+## バックグラウンドタスク
+
+現在は `client` 委任モードをサポートしています。`session.delegation.created` を受信した後、アプリケーションは音声字幕と保存済みコンテキストに基づいて独自のバックグラウンドを呼び出し、対応する `delegation_id` と最大 500 token のプレーンテキスト `content` を含めて、`session.thinking.append` または `session.commentary.append` を通じて結果を返します。結果は完了済みのバックグラウンド操作から取得する必要があります。音声が中断されても、バックグラウンドタスクがキャンセルされたことを意味しません。
+
+ホスト型 Responses 委任、録音保存、`session.update`、セッション復元、または自動再接続は現在サポートされていません。モデルは `gpt-live-1` に固定され、音声は 24 kHz PCM16 に固定され、音声は通話開始時に選択されます。従来の Realtime API は引き続き使用できます。
+
+## 課金と通話終了
+
+音声はアクティブなセッション時間に基づいて課金されます：**0.01 Credits/秒、すなわち 0.6 Credits/分**。分単位への切り上げは行われません。ユーザーの発話、アシスタントの発話、無音、双方の沈黙、およびバックグラウンドタスクの待機時間はいずれも課金対象です。バックグラウンドモデルまたはツール呼び出しは、対応する API に基づいて別途課金されます。Credits に対応する米ドル価格はチャージプランによって異なり、コンソールの現在価格が基準となります。
+
+`session.usage.updated.usage.seconds` は累積使用量です。たとえば最初に 12 秒を受信し、その後 15 秒を受信した場合、合計は 15 秒です。プラットフォームは追加時間のみを精算し、スナップショットを重複して加算しません。
+
+終了時には `session.close` を送信し、`session.closed` を受信するまで受信を継続してから、接続を閉じてマイクを解放します。強制切断により最終使用量が確認されない可能性があるため、インターフェースで明確に報告する必要があります。残高不足、課金失敗、またはセッション制限に達した場合、接続は終了します。デフォルトでは、1 回の通話は最大 30 分です。
+
+パラメーターエラーは `error` イベントを通じて返されます。`error.client_event_id` は失敗したコマンドに対応します。開始に失敗した場合は録音を停止してエラーを表示し、モデルを自動的に切り替えたり、新たな料金を発生させる再試行を行ったりしないでください。
