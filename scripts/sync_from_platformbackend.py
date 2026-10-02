@@ -65,8 +65,20 @@ EXCLUDED_SERVICES = {
 }
 DOC_ONLY_SERVICES = {"coding"}
 
+# Hold these operations even when the Backend mapping has not yet refreshed.
+PRIVATE_API_PATHS = {
+    "/kling/apparel",
+    "/kling/virtual-try-on",
+    "/kling/voices",
+    "/kling/elements",
+}
+
 SKIP_DOC_KEYS = {
     "acedataext",
+    # These endpoints are private pending successful production acceptance.
+    "kling_apparel",
+    "kling_virtual_try_on",
+    "kling_assets",
     "application_remaining_amount",
     "nexior_vercel_deployment",
     "acedatacloud_chat_api_integration_article",
@@ -776,7 +788,8 @@ def merge_openapi_specs(backend_dir: Path, service: dict[str, Any]) -> dict[str,
         if not spec:
             log(f"  WARNING: missing OpenAPI spec for {api.get('id')} ({service.get('alias')})")
             continue
-        merged["paths"].update(spec.get("paths", {}))
+        merged["paths"].update({path: operation for path, operation in spec.get("paths", {}).items()
+                                if path not in PRIVATE_API_PATHS})
         for key in ("schemas", "requestBodies", "responses", "parameters"):
             values = spec.get("components", {}).get(key)
             if values:
