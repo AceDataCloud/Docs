@@ -1,32 +1,552 @@
 ---
-title: "دليل تكامل فيديوهات FLUX"
+title: "دليل تكامل Flux Videos API"
 description: "Flux API guide - Ace Data Cloud"
 ---
 
-أرسل المهام عبر `POST /flux/videos`، واستخدم `action` لاختيار الإنشاء أو التحرير أو الارتقاء بالدقة. حذف `action` يعادل `generate`. استخدم `POST /flux/tasks` الموجود للاستعلام عن مهام المنصة. يدعم `async=true` و`callback_url`؛ تتضمن النتيجة المكتملة رابط فيديو المنصة والمدة والأبعاد ومعدل الإطارات المقاسة من الخادم.
+يستخدم Flux Videos API ‏`POST /flux/videos` لإكمال إنشاء الفيديو، وإنشاء فيديو من الصور ذات الإطارات الرئيسية، واستكمال الفيديو، وتحسين المسودة. يميّز `action` بين الإنشاء والتحرير والرفع الفائق، ويختار `mode` وضع الإنشاء؛ ويستخدم الاستعلام عن النتائج بشكل موحد `POST /flux/tasks` الموجود بالفعل.
 
-## الإنشاء: action=generate
+> الإصدار الحالي Beta. تم فتح إنشاء الفيديو من النص، وإنشاء الفيديو من الصور، واستكمال الفيديو، وتحسين المسودة. أظهرت الاختبارات الفعلية بتاريخ 2026-10-02 أن تحرير الفيديو والرفع الفائق يعيدان `service_unavailable`، وهذان الخياران غير متاحين مؤقتًا، ولا تُخصم رسوم الإنشاء للمهام الفاشلة. يشير HTTP 200 ومعرّف المهمة فقط إلى قبول المهمة، ويجب متابعة الاستعلام عن النتيجة النهائية.
 
-يدعم `mode=t2v/i2v/v2v/draft_enhance`. يدعم الإنشاء العادي مدة صحيحة من 5–20 ثانية أو `auto`؛ ويدعم تمديد الفيديو مدة من 5–15 ثانية. يمكن لـ i2v توفير 1–10 إطارات رئيسية، ويدعم أزواج `[الثواني، الصورة]` المرتبة. دقة الإخراج هي hd/fhd/qhd/uhd، ويدعم الصوت المتزامن. المسودة تُخرج hd فقط، وتُرجع `draft_task_id` الخاص بالمنصة؛ تتطلب إعادة استخدام المسودة نفس الانتماء، وتخضع لحد فترة صلاحية ذاكرة التخزين المؤقت للإنشاء. لا يمكن لاستعادة المسودة الكتابة فوق المطالبة والمواد الأصلية.
+## 1. الحصول على API Token
 
-```json
-{"action":"generate","model":"flux-3","mode":"t2v","prompt":"海边日落","duration":5,"resolution":"hd","async":true}
+1. سجّل أو سجّل الدخول في [وحدة تحكم Ace Data Cloud](https://platform.acedata.cloud/console/applications)، وأنشئ تطبيقًا واحصل على API Token. يمكن لـ API Token عام استدعاء خدمات المنصة؛ يرجى التأكد من أن التطبيق لديه صلاحية استدعاء خدمة Flux ورصيد متاح.
+2. اعرض الباقات وأسعار كل عملية في [صفحة خدمة Flux](https://platform.acedata.cloud/services/flux?tab=pricing). عند عدم كفاية الرصيد، أعد الشحن في [صفحة رصيد وحدة التحكم](https://platform.acedata.cloud/console/coin).
+3. تستخدم الطلبات `Authorization: Bearer &lt;رمز Token الخاص بك>`. يجب حفظ Token في متغيرات بيئة الخادم، ولا تكتبه في صفحات الواجهة الأمامية أو المستودعات العامة أو لقطات الشاشة أو عناوين URL الخاصة برد الاتصال.
+
+![طلب API Token من وحدة التحكم](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+يقرأ كود هذه المقالة متغير البيئة بشكل موحد:
+
+```bash
+export ACEDATACLOUD_API_TOKEN='替换为你自己的 API Token'
 ```
 
-## التحرير: action=edit
+| البند      | القيمة                                               |
+| ------- | ----------------------------------------------- |
+| عنوان جذر API | `https://api.acedata.cloud`                     |
+| إرسال مهمة فيديو  | `POST /flux/videos`                             |
+| الاستعلام عن مهمة موجودة  | `POST /flux/tasks`                              |
+| المصادقة      | `Authorization: Bearer $ACEDATACLOUD_API_TOKEN` |
+| صيغة الطلب    | `Content-Type: application/json`                |
 
-مرّر `video` و`prompt`. تُحتسب رسوم التحرير حسب الثواني الفعلية للإخراج، ولا يقبل حقول الإنشاء مثل `mode` و`duration`.
+للاطلاع على الحقول الكاملة والتصحيح عبر الإنترنت، راجع [Flux Videos API](https://platform.acedata.cloud/documents/flux-videos)، ولاستعلامات المهام راجع [Flux Tasks API](https://platform.acedata.cloud/documents/flux-tasks).
 
-```json
-{"action":"edit","video":"https://example.com/video.mp4","prompt":"将场景改为蓝色调","async":true}
+## 2. اختيار العملية والإدخال
+
+| action                      | mode            | الإدخال                       | النتيجة            |
+| --------------------------- | --------------- | ------------------------ | ------------- |
+| `generate`（القيمة الافتراضية عند حذف action） | `t2v`           | `prompt`                 | إنشاء فيديو من النص       |
+| `generate`                  | `i2v`           | `prompt`、`keyframes`     | إنشاء فيديو من إطار رئيسي واحد أو عدة إطارات رئيسية |
+| `generate`                  | `v2v`           | `prompt`、`start_video`   | استكمال بناءً على فيديو الإدخال      |
+| `generate`                  | `draft_enhance` | `draft_task_id` لمسودة أكملتها بنفسك | تحسين تلك المسودة         |
+| `edit`                      | لا يُرسل              | `video`、`prompt`         | تحرير الفيديو (غير متاح مؤقتًا)    |
+| `upscale`                   | لا يُرسل              | `input_video`            | الرفع الفائق للفيديو (غير متاح مؤقتًا)    |
+
+نموذج الإنشاء هو `flux-3`. يستخدم التحرير والرفع الفائق حقولهما الخاصة، ولا تُرسل معلمات الإنشاء مثل `model` و`mode` و`duration` و`draft`. إن `action=upsale` خطأ إملائي، والصحيح هو `upscale`.
+
+### معلمات الإنشاء العامة
+
+| المعلمة                 | الوصف                                                           |
+| ------------------ | ------------------------------------------------------------ |
+| `mode`             | مطلوب؛ `t2v` أو `i2v` أو `v2v` أو `draft_enhance`                       |
+| `prompt`           | مطلوب للإنشاء العادي؛ لا يسمح تحسين المسودة بالكتابة فوق النص الأصلي                                        |
+| `duration`         | لـ t2v/i2v عدد صحيح من 5–20 ثانية، ولـ v2v عدد صحيح من 5–15 ثانية، أو `auto`؛ قد تختلف مدة الإخراج النهائية قليلًا عن القيمة المطلوبة |
+| `resolution`       | `hd` أو `fhd` أو `qhd` أو `uhd`؛ القيمة الافتراضية للإنشاء العادي هي `hd`، ولتحسين المسودة هي `fhd`              |
+| `aspect_ratio`     | `auto` أو `21:9` أو `2:1` أو `16:9` أو `4:3` أو `1:1` أو `3:4` أو `9:16` أو `9:21`   |
+| `draft`            | ما إذا كان سيتم إنشاء مسودة أولًا؛ تدعم المسودة `hd` فقط                                           |
+| `generate_audio`   | ما إذا كان سيتم إنشاء صوت متزامن؛ `false` قيمة صالحة، يرجى الاحتفاظ بالقيمة المنطقية الصريحة                               |
+| `safety_tolerance` | اختياري؛ عدد صحيح من 0–4                                                   |
+| `async`            | يُوصى بتعيينه إلى `true`، لإرجاع معرّف مهمة المنصة فورًا ثم استطلاع النتيجة                                |
+| `callback_url`     | اختياري؛ عنوان HTTP(S) لتلقي نتيجة JSON النهائية؛ وبعد تعيينه ستتم المعالجة أيضًا بصورة غير متزامنة                        |
+
+يجب أن يكون عنوان URL للمادة قابلًا للقراءة من قبل الخدمة. عند استخدام عنوان URL موقّع مؤقت، يجب تخصيص مدة صلاحية كافية للتنزيل والمعالجة. لا تستخدم عنوان صفحة ويب باعتباره عنوان ملف صورة أو فيديو.
+
+## 3. إنشاء فيديو من النص: طلب ونتيجة كاملان من اختبار فعلي
+
+تم تنفيذ الطلب التالي بنجاح على واجهة الإنتاج قبل تعديل الأسعار بتاريخ 2026-10-02. أثبت حذف `action` سلوك الإنشاء الافتراضي؛ ويتجنب `async=true` الانتظار الطويل لاتصال HTTP.
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/videos' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light, steady camera, no text.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": true,
+    "async": true
+  }'
 ```
 
-## الارتقاء بالدقة: action=upscale
-
-مرّر `input_video`، ويمكن اختيار `upscale_factor` (1.5–3) و`creativity` (0 للدقة، و1 للإبداع). تُحتسب الرسوم حسب MP·ثانية الفعلية للإخراج: `المدة × العرض × الارتفاع / 1048576 × معدل الإطارات / 24`، حيث 1 MP = 1024×1024. لا يقبل معلمات الإنشاء.
+استجابة القبول (معرّف مهمة حقيقي):
 
 ```json
-{"action":"upscale","input_video":"https://example.com/video.mp4","upscale_factor":2,"creativity":0,"async":true}
+{
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607"
+}
 ```
 
-تستخدم كل عملية معاملات التسعير المرجعية الحالية لـ FLUX، وتُحتسب الرسوم حسب الإخراج الفعلي. لا تُفرض رسوم إنشاء على المهام الفاشلة؛ وتعتمد الرسوم النهائية للمهام ذات التسعير الديناميكي على نتيجة الإكمال. لا تقبل العمليات المختلفة إلا معلماتها الخاصة، وتُرجع قيمة action غير المعروفة خطأً في المعلمات.
+احفظ `task_id` في استجابتك الخاصة، وتابع الاستعلام؛ لا تستخدم معرّف المهمة الموجود في مثال الوثائق للاستعلام عن نتائج حسابات أخرى.
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"retrieve","id":"替换为本次返回的 task_id"}'
+```
+
+يحتوي حقل `response` الذي يعيده استعلام المهمة على نتيجة العمل النهائية. ما يلي هو `response` الناجح من هذا الاختبار الفعلي، مع حذف بيانات تعريف المهمة الخارجية. تم استبدال عنوان URL للفيديو في الوثائق بنسخة من الملف نفسه على CDN تجريبي طويل الأمد (SHA-256 متطابق)، وستُرجع الاستدعاءات الفعلية عنوان URL لنتيجة هذه المهمة نفسها:
+```json
+{
+  "success": true,
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607",
+  "data": [
+    {
+      "id": "4341eb66-3845-4972-bb86-712a6cfae845",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24,
+      "draft_task_id": "4341eb66-3845-4972-bb86-712a6cfae845"
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": true
+  },
+  "cost": {
+    "amount": 2.6884689277500002,
+    "currency": "credit",
+    "list_amount": 2.9871876975000005
+  }
+}
+```
+
+[عرض فيديو الاختبار الفعلي هذا](https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4)。يؤكد فحص الوسائط أن الناتج هو MP4 بدقة 1280×704، وبمعدل 24 fps، ومدة 5.041667 ثانية، وحجم ملف 2,607,276 بايت.
+
+| حقل الاستجابة                              | الاستخدام                                       |
+| --------------------------------- | ---------------------------------------- |
+| `success`                         | ما إذا كانت المهمة النهائية قد نجحت؛ لا تعني إعادة task_id في مرحلة القبول أن success=true |
+| `task_id`                         | معرّف مهمة المنصة، يُستخدم للاستعلام الدوري والمعالجة المتكررة للأعمال                      |
+| `trace_id`                        | يُقدَّم لموظفي الدعم عند استكشاف المشكلات وإصلاحها                             |
+| `data[].video_url`                | عنوان نتيجة الفيديو القابل للقراءة                               |
+| `data[].seconds/width/height/fps` | المدة الفعلية للناتج، والأبعاد، ومعدل الإطارات التي يقيسها الخادم                       |
+| `data[].draft_task_id`            | معرّف إدخال تحسين المسودة؛ يظهر فقط عند إرجاع مسودة قابلة لإعادة الاستخدام                  |
+| `usage`                           | مقدار الاستخدام النهائي للفوترة؛ لا تستخدم duration الخاص بالطلب لاستبدال seconds الفعلية      |
+| `cost.amount`                     | Credits التي خُصمت نهائيًا هذه المرة؛ `currency=credit` ليست دولارًا أمريكيًا   |
+| `cost.list_amount`                | Credits لاستهلاك مستخدم التطبيق قبل الخصم؛ تُعاد عند الاقتضاء                 |
+
+هذا اختبار فعلي تاريخي قبل تعديل السعر: `list_amount=2.9871876975` Credits، وكان الحساب يتمتع حينها بخصم استهلاك قدره 10%، وكانت `amount=2.68846892775` Credits الفعلية. خُفِّض السعر الجديد في 2026-10-02 بنحو 6.33%؛ وتبلغ تكلفة المسودة نفسها لمدة 5.041667 ثانية بالسعر الحالي 2.798125185 Credits (قبل خصم الاستهلاك)، وإذا كان خصم الاستهلاك البالغ 10% لا يزال متاحًا، فتبلغ 2.5183126665 Credits. لا يُعاد احتساب فواتير المهام التاريخية. قد تختلف الباقات والخصومات للحسابات الأخرى؛ وهذا ليس سعرًا ثابتًا بالدولار الأمريكي لجميع المستخدمين.
+
+## 4. تحويل الصور إلى فيديو: عادي ومع إطارات رئيسية زمنية
+
+فيما يلي أمثلة للمعلمات، ويجب استبدال روابط URL للمواد، وليست تصريحًا بأن هذا المثال قد تم تنفيذه بنجاح. بعد اكتمال التوليد، استعلم وفق العملية المذكورة أعلاه، وبنية النتيجة هي نفسها.
+
+تستخدم صورة واحدة أو صورتان مصفوفة عادية:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "The camera slowly moves around the product in soft studio light.",
+  "keyframes": ["https://example.com/first-frame.jpg"],
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "async": true
+}
+```
+
+عند تحديد لحظات الإطارات الرئيسية، استخدم زوج `[عدد الثواني، رابط URL للصورة]`:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "A smooth transition from morning light to a warm sunset.",
+  "keyframes": [[0, "https://example.com/start.jpg"], [5, "https://example.com/end.jpg"]],
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+يُسمح بـ 1–10 إطارات رئيسية. يجب أن تكون المصفوفة ذات التوقيت مرتبة تصاعديًا حسب الوقت، ويجب أن يكون الوقت من 0–20 ثانية، ولا يمكن خلط روابط URL العادية والعناصر ذات التوقيت. يجب تحديد duration صراحةً لثلاثة إطارات رئيسية عادية أو أكثر، ولا يمكن استخدام auto.
+
+### ناتج الاختبار الفعلي لتحويل الصور إلى فيديو
+
+إدخال المطابقة لهذا الاختبار الفعلي كما يلي (يُستعاض فقط بوصف نصي عن base64 الكامل، أما الحقول الأخرى فهي الطلب الحقيقي):
+
+```json
+{
+  "async": true,
+  "action": "generate",
+  "model": "flux-3",
+  "prompt": "The toy sailboat drifts slowly across calm water. A steady camera, gentle daylight, no people or text.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "draft": false,
+  "mode": "i2v",
+  "keyframes": [
+    "<下图 PNG 文件的原始 base64 字符串>"
+  ]
+}
+```
+
+![الإطار الرئيسي المرجعي لتحويل الصور إلى فيديو في هذا الاختبار](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png)
+
+بعد [تنزيل إطار PNG الرئيسي هذا](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png)، يمكن استخدام `base64.b64encode(image_bytes).decode("ascii")` في Python للحصول على السلسلة الأصلية ووضعها في مصفوفة keyframes. لا تستخدم النص التوضيحي في الوثيقة كإدخال للصورة.
+
+فيما يلي response النهائي الحقيقي لمهمة الإنتاج بتاريخ 2026-10-01 (وليس استجابة محاكاة)؛ تم استبدال رابط URL للفيديو فقط بنسخة مثال طويلة الأمد لها الهاش نفسه. استخدم إدخال الاختبار الفعلي سلسلة base64 الأصلية لملف PNG بدقة 1280×720 كإطار رئيسي واحد؛ وإدخال URL أعلاه هو مثال مستقل للمعلمات.
+
+```json
+{
+  "success": true,
+  "task_id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+  "trace_id": "f62d5c56-cfb2-4f8f-b339-ef019d4c0d10",
+  "data": [
+    {
+      "id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "i2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+[عرض فيديو الاختبار الفعلي](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4)。
+
+## 5. متابعة الفيديو
+
+يمرّر `start_video` عنوان ملف فيديو موجود، مع `mode=v2v`، وبمدة تصل إلى 15 ثانية كحد أقصى. وهو حقل مختلف عن `video` المستخدم في التحرير.
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "prompt": "Continue the sailboat drifting forward with the same steady camera.",
+  "start_video": "https://example.com/source.mp4",
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+### مخرجات الاختبار الفعلي لمتابعة الفيديو
+
+فيما يلي إدخال الاختبار الفعلي الكامل لهذه المرة؛ عند إعادة تنفيذ تحسين المسودة، يجب استبداله بمعرّف المسودة الخاص بك. يستخدم عنوان URL للمادة نسخة مثال طويلة الأمد من الملف نفسه:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "start_video": "https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4",
+  "prompt": "Continue the same sailboat drifting gently across calm water in the same continuous steady shot.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "async": true
+}
+```
+
+فيما يلي الـ response النهائي الحقيقي لمهمة الإنتاج بتاريخ 2026-10-01 (وليس استجابة محاكاة)؛ تم فقط استبدال عنوان URL للفيديو بنسخة مثال طويلة الأمد لها الهاش نفسه.
+
+```json
+{
+  "success": true,
+  "task_id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+  "trace_id": "4fb49afc-abca-4039-bbaa-adb66e293544",
+  "data": [
+    {
+      "id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4",
+      "seconds": 5,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5,
+    "output_mp_seconds": 4.296875,
+    "mode": "v2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 18.219375,
+    "currency": "credit",
+    "list_amount": 20.24375
+  }
+}
+```
+
+[عرض فيديو الاختبار الفعلي](https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4)。
+
+كان `start_video` في إدخال الاختبار الفعلي هو [فيديو المسودة المكتمل](https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4)، وكانت المعلمات الأخرى هي duration=5 وresolution=hd وgenerate_audio=false.
+
+## 6. المسودة أولاً، ثم التحسين
+
+1. أنشئ مسودة باستخدام `draft=true` و`resolution=hd` وانتظر النجاح.
+2. استخرج معرّف مسودة المنصة من `data[0].draft_task_id` النهائي.
+3. أرسل طلب التحسين باستخدام بيانات اعتماد التطبيق ذات الملكية نفسها:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "替换为自己的已完成草稿 ID",
+  "resolution": "fhd",
+  "async": true
+}
+```
+
+لا يمكن لتحسين المسودة تمرير `prompt` أو `duration` أو `aspect_ratio` أو `version` أو `generate_audio` أو `draft` أو `keyframes` أو `start_video` لتجاوز المحتوى الأصلي. ذاكرة التخزين المؤقت للمسودة هي مورد مؤقت، لذا يرجى تحسينها في الوقت المناسب؛ ولا يوجد التزام بالحفظ الدائم أو بعدد أيام احتفاظ ثابت. لا يمكن إعادة استخدام مسودات غيرك/غير التطبيق الحالي، والمسودات غير المكتملة، وذاكرات التخزين المؤقت المنتهية الصلاحية. المسودة والتحسين مهمتان منفصلتان، ويتم احتساب الرسوم لكل منهما بعد النجاح.
+
+### مخرجات الاختبار الفعلي لتحسين المسودة
+
+فيما يلي إدخال الاختبار الفعلي الكامل لهذه المرة؛ عند إعادة تنفيذ تحسين المسودة، يجب استبداله بمعرّف المسودة الخاص بك. يستخدم عنوان URL للمادة نسخة مثال طويلة الأمد من الملف نفسه:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "b41293be-94c0-4dc7-9f39-ce04f0a8798d",
+  "resolution": "hd",
+  "async": true
+}
+```
+
+فيما يلي الـ response النهائي الحقيقي لمهمة الإنتاج بتاريخ 2026-10-01 (وليس استجابة محاكاة)؛ تم فقط استبدال عنوان URL للفيديو بنسخة مثال طويلة الأمد لها الهاش نفسه.
+
+```json
+{
+  "success": true,
+  "task_id": "1db6243b-4a05-4484-828c-25bb17de7108",
+  "trace_id": "64f93fa1-8d18-4c8b-a6d2-888009eb7cfa",
+  "data": [
+    {
+      "id": "1db6243b-4a05-4484-828c-25bb17de7108",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+
+[عرض فيديو الاختبار الفعلي](https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4)。
+
+كان إدخال الاختبار الفعلي هو draft_task_id=b41293be-94c0-4dc7-9f39-ce04f0a8798d وresolution=hd الخاصين بك؛ ويشير usage.mode=t2v النهائي إلى وضع المسودة الأصلي. تُفرض رسوم على هذه المهمة وعلى المسودة الأصلية بشكل منفصل.
+
+## 7. استدعاء Python من البداية إلى النهاية
+
+ثبّت `requests`، واضبط Token الخاص بك، ثم شغّل البرنامج النصي أدناه لإكمال «إرسال مرة واحدة → استطلاع → إخراج عنوان URL للفيديو». يجب أن يستخدم كلٌّ من الاستعلام وإعادة محاولة الشبكة معرّف task_id الأصلي، لتجنب إعادة إرسال مهام مدفوعة مكررة.
+```python
+import os
+import time
+import requests
+
+base_url = "https://api.acedata.cloud"
+headers = {
+    "Authorization": "Bearer " + os.environ["ACEDATACLOUD_API_TOKEN"],
+    "Accept": "application/json",
+}
+payload = {
+    "action": "generate",
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": True,
+    "async": True,
+}
+submitted = requests.post(base_url + "/flux/videos", json=payload, headers=headers, timeout=120)
+submitted.raise_for_status()
+accepted = submitted.json()
+if accepted.get("error"):
+    raise RuntimeError(accepted["error"])
+task_id = accepted["task_id"]
+print("Task ID:", task_id)  # 持久化保存，用于恢复轮询
+
+# 30 分钟是本示例的客户端等待上限，不是服务的完成时限承诺。
+deadline = time.monotonic() + 30 * 60
+while time.monotonic() < deadline:
+    polled = requests.post(
+        base_url + "/flux/tasks",
+        json={"action": "retrieve", "id": task_id},
+        headers=headers,
+        timeout=30,
+    )
+    polled.raise_for_status()
+    task = polled.json()
+    if task.get("error"):
+        raise RuntimeError(task["error"])
+    result = task.get("response") or task.get("result")
+    if isinstance(result, dict) and result.get("success") is True:
+        print("Video:", result["data"][0]["video_url"])
+        print("Usage:", result.get("usage"))
+        print("Cost:", result.get("cost"))
+        break
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    time.sleep(10)
+else:
+    raise TimeoutError("Still processing; resume polling with task_id=" + task_id)
+```
+
+بعد انتهاء مهلة الشبكة، لا تعامل الحالة غير المعروفة على أنها فشل ولا تعِد الإرسال فورًا. إذا تم الحصول على `task_id`، فاستمر في الاستعلام عن هذه المهمة؛ وسجّل `task_id` و`trace_id` لتسهيل التحقيق. لا تفرض واجهة الاستقصاء نفسها رسوم إنشاء.
+
+## 8. استخدام رد الاتصال
+
+أضف `callback_url` عند الإرسال، وبعد اكتمال المهمة سيتم إرسال نتيجة JSON النهائية عبر POST إلى هذا العنوان. تكون بنية النجاح مطابقة لـ response المذكور سابقًا، بينما يتضمن الفشل error.
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "t2v",
+  "prompt": "A small sailboat on calm water.",
+  "duration": 5,
+  "resolution": "hd",
+  "draft": true,
+  "callback_url": "https://your-server.example/flux-callback"
+}
+```
+
+يجب أن يكون عنوان رد الاتصال قابلًا للوصول من الإنترنت العام. بعد تلقي الإشعار، عالجه بشكل متكرر آمن وفقًا لـ task_id، وأعِد 2xx في أسرع وقت ممكن؛ ويمكن وضع معالجة الأعمال في قائمة انتظار. لا يعلن هذا النص أن رد الاتصال يتضمن مصادقة بالتوقيع: قبل الإجراءات الحساسة مثل منح مزايا الأعمال، استخدم Token الخاص بك للاستعلام عن المهمة نفسها للتحقق من النتيجة. إذا لم يتم تلقي رد الاتصال، يمكنك أيضًا متابعة الاستقصاء، ولا تُعِد الإنشاء.
+
+## 9. تحرير الفيديو والترقية الفائقة (غير متاحين مؤقتًا)
+
+لا تزال هاتان العمليتان تختاران عبر action في `/flux/videos`، ويعرض ما يلي عقد المعلمات فقط، ولا ينبغي حاليًا الاعتماد على تسليمهما بنجاح.
+
+التحرير:
+
+```json
+{
+  "action": "edit",
+  "video": "https://example.com/source.mp4",
+  "prompt": "Change the scene to warm sunset lighting.",
+  "async": true
+}
+```
+
+الترقية الفائقة:
+
+```json
+{
+  "action": "upscale",
+  "input_video": "https://example.com/source.mp4",
+  "upscale_factor": 1.5,
+  "creativity": 0,
+  "async": true
+}
+```
+
+تتراوح قيمة `upscale_factor` بين 1.5–3، و`creativity=0` للترقية الفائقة الدقيقة، و`1` للترقية الفائقة الإبداعية. ليست سلسلة نصية، ولا تُهمِل القيمة الصريحة 0. يتراوح طول prompt الخاص بالتحرير بين 1–4096 حرفًا. لا تخلط حقول الإنشاء.
+
+في 2026-10-02، أعادت مهمة تحرير مختبرة فعليًا response النهائي التالي بعد قبولها، وكانت رسوم الفوترة المتحقق منها 0؛ كما أعادت الترقية الفائقة المختبرة الخطأ نفسه لعدم التوفر، وكانت الرسوم 0:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "service_unavailable",
+    "message": "The video operation is currently unavailable"
+  },
+  "trace_id": "7374a332-097a-431f-8207-ecee73dbb740",
+  "task_id": "67671cbf-2464-42e1-aa03-afadeb0eabc3"
+}
+```
+
+## 10. الفوترة الحالية وجدول الأسعار
+
+تحديث 2026-10-02: تم تخفيض أسعار الوحدات لكل فئة في واجهة الفيديو هذه بنحو 6.33%، بينما تظل طريقة القياس والباقات وقواعد خصومات الاستهلاك دون تغيير. إن cost في response للاختبارات الفعلية التاريخية أعلاه هو فاتورة وقت اكتمال المهمة، ولا يمثل العرض الحالي.
+
+يتم احتساب الإنشاء والتحرير وفقًا لـ **الثواني الفعلية للإخراج**؛ وتُحتسب الترقية الفائقة وفقًا لـ **MP·ثانية الفعلية للإخراج**. فيما يلي أسعار وحدات Credits الحالية قبل تطبيق خصومات استهلاك الحساب، وهي متسقة مع قواعد [صفحة أسعار Flux](https://platform.acedata.cloud/services/flux?tab=pricing).
+
+| العملية/الوضع                   | الدقة  | سعر وحدة Credits |
+| ----------------------- | ---- | ------------: |
+| مسودة t2v / i2v            | hd   |     0.555 / ثانية |
+| مسودة v2v                  | hd   |      1.11 / ثانية |
+| t2v / i2v / تحسين المسودة المقابل      | hd   |    1.5725 / ثانية |
+| كما سبق                      | fhd  |    2.6825 / ثانية |
+| كما سبق                      | qhd  |       3.7 / ثانية |
+| كما سبق                      | uhd  |       7.4 / ثانية |
+| v2v / تحسين المسودة المقابل            | hd   |    3.7925 / ثانية |
+| كما سبق                      | fhd  |    4.9025 / ثانية |
+| كما سبق                      | qhd  |    6.0125 / ثانية |
+| كما سبق                      | uhd  |    8.7875 / ثانية |
+| التحرير (غير متاح مؤقتًا)                | —    |    0.2775 / ثانية |
+| الترقية الفائقة الدقيقة creativity=0 (غير متاحة مؤقتًا) | الإخراج الفعلي | 0.6475 / MP·ثانية |
+| الترقية الفائقة الإبداعية creativity=1 (غير متاحة مؤقتًا) | الإخراج الفعلي |  0.925 / MP·ثانية |
+
+معادلة استخدام الترقية الفائقة: `seconds × width × height / 1048576 × fps / 24`، حيث 1 MP = 1024×1024 بكسل. لا يتم الاحتساب ببساطة وفقًا لمدة الفيديو المُدخل أو عامل التكبير المستهدف.
+
+التحويل إلى الدولار الأمريكي: `التكلفة الفعلية (USD) = cost.amount (Credits) × سعر الباقة / كمية الباقة`. تؤثر شرائح إعادة الشحن وخصومات الاستهلاك في السعر الفعلي، ولا يمكن اعتبار Credits مباشرةً كـ USD. لا تُفرض رسوم إنشاء على المهام الفاشلة؛ ويُعتد بالمبلغ النهائي وفقًا لنتيجة الإكمال وسجل الاستدعاءات في وحدة التحكم.
+
+## 11. الأسئلة الشائعة واستكشاف الأخطاء وإصلاحها
+| الحالة                       | التوصية                                           |
+| ------------------------ | -------------------------------------------- |
+| خطأ في المعلمات (400)                | تحقق من تهجئة action وmode وduration وتنسيق الإطارات الرئيسية؛ لا تخلط حقول العمليات المختلفة |
+| خطأ في المصادقة (401)                | تحقق من Bearer Token وأذونات التطبيق وما إذا كانت بيانات الاعتماد صالحة                  |
+| رفض مراجعة المحتوى (403)              | عدّل المواد والكلمات التوجيهية، ولا تُعد الإرسال بشكل متكرر كما هي                            |
+| تحديد المعدل (429)                  | خفّض التزامن، وأعد المحاولة بتراجع                                    |
+| service_unavailable (503) | العملية الحالية غير متاحة؛ قد تُبلّغ المهام غير المتزامنة التي تم قبولها عن هذا الخطأ في response النهائي        |
+| تم إرجاع task_id ولكن لا يوجد فيديو بعد        | استمر في الاستعلام عن response، ولا تعتبر HTTP 200 اكتمال الإنشاء             |
+| لا يمكن إعادة استخدام المسودة                   | تأكد من المستخدم/التطبيق الحالي، ومن اكتمال المهمة، وأن الطلب الأصلي draft=true، وتحقق مما إذا كانت ذاكرة التخزين المؤقت المؤقتة لا تزال صالحة  |
+
+عند تقديم الملاحظات، وفّر task_id وtrace_id ووقت الطلب والمعلمات المنزوعة الحساسية، ولا ترسل API Token. لمزيد من الطرق، راجع [دليل تكامل Flux MCP](https://platform.acedata.cloud/documents/flux-mcp).

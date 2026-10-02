@@ -1,32 +1,552 @@
 ---
-title: "Guide d’intégration vidéo FLUX"
+title: "Guide d’intégration de l’API Flux Videos"
 description: "Flux API guide - Ace Data Cloud"
 ---
 
-Soumettez une tâche via `POST /flux/videos`, utilisez `action` pour sélectionner la génération, l’édition ou la super-résolution. Omettre `action` équivaut à `generate`. Utilisez le `POST /flux/tasks` existant pour interroger les tâches de la plateforme. `async=true` et `callback_url` sont pris en charge ; les résultats terminés incluent le lien vidéo de la plateforme ainsi que la durée, les dimensions et la fréquence d’images mesurées côté serveur.
+L’API Flux Videos utilise `POST /flux/videos` pour effectuer la génération de vidéos, la génération de vidéos à partir d’images avec images-clés, la continuation de vidéos et l’amélioration de brouillons. `action` distingue la génération, l’édition et la super-résolution, tandis que `mode` sélectionne le mode de génération ; pour interroger les résultats, utilisez uniformément l’existant `POST /flux/tasks`.
 
-## Génération : action=generate
+> Actuellement en Beta. La génération de vidéos à partir de texte, la génération de vidéos à partir d’images, la continuation de vidéos et l’amélioration de brouillons sont disponibles. Les tests du 2026-10-02 indiquent que l’édition vidéo et la super-résolution renvoient `service_unavailable` ; ces deux fonctions sont temporairement indisponibles, et les tâches échouées ne déduisent pas de frais de génération. HTTP 200 et l’ID de tâche indiquent uniquement que la tâche a été acceptée ; vous devez continuer à interroger le résultat final.
 
-Prend en charge `mode=t2v/i2v/v2v/draft_enhance`. La génération standard prend en charge des nombres entiers de 5 à 20 secondes ou `auto` ; la continuation vidéo prend en charge 5 à 15 secondes. i2v peut fournir 1 à 10 images clés et prend en charge des paires `[secondes, image]` dans l’ordre. Les résolutions de sortie sont hd/fhd/qhd/uhd, avec prise en charge de l’audio synchronisé. Les brouillons ne produisent que du hd et renvoient le `draft_task_id` de la plateforme ; la réutilisation d’un brouillon doit avoir la même appartenance et est soumise à la durée de validité du cache de génération. La reproduction de brouillon ne peut pas remplacer l’invite et les éléments source d’origine.
+## 1. Obtenir un API Token
 
-```json
-{"action":"generate","model":"flux-3","mode":"t2v","prompt":"海边日落","duration":5,"resolution":"hd","async":true}
+1. Inscrivez-vous ou connectez-vous à la [console Ace Data Cloud](https://platform.acedata.cloud/console/applications), créez une application et obtenez un API Token. Un API Token universel peut appeler les services de la plateforme ; veuillez confirmer que l’application dispose de l’autorisation d’appel au service Flux et d’un solde disponible.
+2. Consultez les forfaits et les prix de chaque opération sur la [page du service Flux](https://platform.acedata.cloud/services/flux?tab=pricing). Si le solde est insuffisant, rechargez sur la [page de solde de la console](https://platform.acedata.cloud/console/coin).
+3. Les requêtes utilisent `Authorization: Bearer <votre Token>`. Le Token doit être conservé dans des variables d’environnement côté serveur ; ne l’écrivez pas dans les pages front-end, dépôts publics, captures d’écran ou URL de rappel.
+
+![Demander un API Token dans la console](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Le code de cet article lit uniformément les variables d’environnement :
+
+```bash
+export ACEDATACLOUD_API_TOKEN='替换为你自己的 API Token'
 ```
 
-## Édition : action=edit
+| Élément      | Valeur                                          |
+| ------- | ----------------------------------------------- |
+| Adresse racine de l’API | `https://api.acedata.cloud`                     |
+| Soumettre une tâche vidéo  | `POST /flux/videos`                             |
+| Interroger une tâche existante  | `POST /flux/tasks`                              |
+| Authentification      | `Authorization: Bearer $ACEDATACLOUD_API_TOKEN` |
+| Format de requête    | `Content-Type: application/json`                |
 
-Fournissez `video` et `prompt`. L’édition est facturée selon les secondes réelles de sortie et n’accepte pas les champs de génération tels que `mode`, `duration`.
+Pour les champs complets et le débogage en ligne, consultez [Flux Videos API](https://platform.acedata.cloud/documents/flux-videos), et pour l’interrogation des tâches, consultez [Flux Tasks API](https://platform.acedata.cloud/documents/flux-tasks).
 
-```json
-{"action":"edit","video":"https://example.com/video.mp4","prompt":"将场景改为蓝色调","async":true}
+## 2. Choisir l’opération et les entrées
+
+| action                      | mode            | Entrée                       | Résultat            |
+| --------------------------- | --------------- | ------------------------ | ------------- |
+| `generate`（valeur par défaut lorsque action est omis） | `t2v`           | `prompt`                 | Générer une vidéo à partir de texte       |
+| `generate`                  | `i2v`           | `prompt`、`keyframes`     | Générer une vidéo à partir d’une ou plusieurs images-clés |
+| `generate`                  | `v2v`           | `prompt`、`start_video`   | Continuer à partir de la vidéo d’entrée      |
+| `generate`                  | `draft_enhance` | `draft_task_id` d’un brouillon que vous avez déjà terminé | Améliorer ce brouillon         |
+| `edit`                      | Ne pas envoyer              | `video`、`prompt`         | Édition vidéo（temporairement indisponible）    |
+| `upscale`                   | Ne pas envoyer              | `input_video`            | Super-résolution vidéo（temporairement indisponible）    |
+
+Le modèle de génération est `flux-3`. L’édition et la super-résolution utilisent leurs propres champs ; ne transmettez pas les paramètres de génération tels que `model`, `mode`, `duration`, `draft`. `action=upsale` est une faute d’orthographe ; la valeur correcte est `upscale`.
+
+### Paramètres de génération communs
+
+| Paramètre                 | Description                                                           |
+| ------------------ | ------------------------------------------------------------ |
+| `mode`             | Obligatoire ; `t2v`, `i2v`, `v2v` ou `draft_enhance`                       |
+| `prompt`           | Obligatoire pour la génération normale ; l’amélioration de brouillon ne permet pas d’écraser le prompt d’origine                                        |
+| `duration`         | Pour t2v/i2v, entier de 5 à 20 secondes ; pour v2v, entier de 5 à 15 secondes, ou `auto` ; la durée finale de sortie peut légèrement différer de la valeur demandée |
+| `resolution`       | `hd`, `fhd`, `qhd`, `uhd` ; la valeur par défaut de la génération normale est `hd`, celle de l’amélioration de brouillon est `fhd`              |
+| `aspect_ratio`     | `auto`, `21:9`, `2:1`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `9:21`   |
+| `draft`            | Indique s’il faut d’abord générer un brouillon ; les brouillons prennent uniquement en charge `hd`                                           |
+| `generate_audio`   | Indique s’il faut générer un audio synchronisé ; `false` est une valeur valide, veuillez conserver une valeur booléenne explicite                               |
+| `safety_tolerance` | Facultatif ; entier de 0 à 4                                                   |
+| `async`            | Il est recommandé de définir `true`, pour renvoyer immédiatement l’ID de tâche de la plateforme, puis interroger le résultat                                |
+| `callback_url`     | Facultatif ; adresse HTTP(S) recevant le résultat JSON final ; la tâche sera également acceptée de manière asynchrone après sa définition                        |
+
+L’URL de la ressource doit pouvoir être lue par le service. Si vous utilisez une URL signée temporaire, prévoyez une durée de validité suffisante pour le téléchargement et le traitement. N’utilisez pas une adresse de page web comme adresse de fichier image ou vidéo.
+
+## 3. Génération de vidéo à partir de texte : requête complète testée et résultat
+
+La requête suivante a été exécutée avec succès sur l’interface de production avant l’ajustement tarifaire du 2026-10-02. L’omission de `action` a validé le comportement de génération par défaut ; `async=true` évite une longue attente de connexion HTTP.
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/videos' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light, steady camera, no text.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": true,
+    "async": true
+  }'
 ```
 
-## Super-résolution : action=upscale
-
-Fournissez `input_video`, avec `upscale_factor` (1.5–3) et `creativity` (0 pour précis, 1 pour créatif) facultatifs. La facturation se fait selon les MP·secondes réelles de sortie : `durée × largeur × hauteur / 1048576 × fréquence d’images / 24`, 1 MP = 1024×1024. Les paramètres de génération ne sont pas acceptés.
+Réponse d’acceptation (ID de tâche réel) :
 
 ```json
-{"action":"upscale","input_video":"https://example.com/video.mp4","upscale_factor":2,"creativity":0,"async":true}
+{
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607"
+}
 ```
 
-Chaque opération adopte les coefficients tarifaires de référence FLUX actuels et est facturée selon la sortie réelle. Les tâches échouées ne sont pas facturées pour la génération ; le coût final des tâches à tarification dynamique dépend du résultat terminé. Les différentes opérations n’acceptent que leurs propres paramètres, et une action inconnue renvoie une erreur de paramètre.
+Enregistrez le `task_id` de votre propre réponse et continuez l’interrogation ; n’utilisez pas l’ID de tâche des exemples de documentation pour interroger les résultats d’autres comptes.
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"retrieve","id":"替换为本次返回的 task_id"}'
+```
+
+Le champ `response` renvoyé par l’interrogation de tâche contient le résultat métier final. Ce qui suit est le `response` obtenu avec succès lors de ce test ; les métadonnées externes de la tâche ont été omises. L’URL vidéo dans la documentation a été remplacée par une copie du même fichier sur un CDN d’exemple à long terme (SHA-256 identique) ; les appels réels renverront l’URL de résultat propre à cette tâche :
+```json
+{
+  "success": true,
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607",
+  "data": [
+    {
+      "id": "4341eb66-3845-4972-bb86-712a6cfae845",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24,
+      "draft_task_id": "4341eb66-3845-4972-bb86-712a6cfae845"
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": true
+  },
+  "cost": {
+    "amount": 2.6884689277500002,
+    "currency": "credit",
+    "list_amount": 2.9871876975000005
+  }
+}
+```
+
+[Voir la vidéo de ce test](https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4). La vérification du média confirme que la sortie est un MP4 de 1280×704, 24 fps et 5.041667 secondes, d’une taille de fichier de 2,607,276 octets.
+
+| Champ de réponse                              | Utilisation                                       |
+| --------------------------------- | ---------------------------------------- |
+| `success`                         | Si la tâche finale a réussi ; au stade d’acceptation, le retour de task_id n’équivaut pas à success=true |
+| `task_id`                         | ID de tâche de la plateforme, utilisé pour l’interrogation et le traitement d’idempotence métier                      |
+| `trace_id`                        | À fournir au personnel de support lors du diagnostic de problèmes                             |
+| `data[].video_url`                | Adresse du résultat vidéo pouvant être lue                               |
+| `data[].seconds/width/height/fps` | Durée, dimensions et fréquence d’images réelles de sortie mesurées côté serveur                       |
+| `data[].draft_task_id`            | ID d’entrée pour l’amélioration du brouillon ; apparaît uniquement lorsqu’un brouillon réutilisable est renvoyé                  |
+| `usage`                           | Utilisation finale facturée ; ne pas utiliser la duration de la requête pour remplacer les seconds réelles      |
+| `cost.amount`                     | Credits finalement débités pour cette fois ; `currency=credit` n’est pas en dollars américains   |
+| `cost.list_amount`                | Credits avant la remise de consommation de l’utilisateur de l’application ; renvoyés le cas échéant                 |
+
+Il s’agit d’un test historique avant l’ajustement des prix : `list_amount=2.9871876975` Credits, le compte bénéficiait alors d’une remise de consommation de 10 %, et le montant réel `amount=2.68846892775` Credits. Le nouveau prix du 2026-10-02 a été réduit d’environ 6.33 % ; le même brouillon de 5.041667 secondes coûte au prix actuel 2.798125185 Credits (avant remise de consommation), ou 2.5183126665 Credits si une remise de consommation de 10 % est toujours appliquée. Les factures des tâches historiques ne sont pas recalculées. Les forfaits et remises d’autres comptes peuvent différer ; il ne s’agit pas d’un prix fixe en dollars américains pour tous les utilisateurs.
+
+## 4. Image vers vidéo : standard et avec images clés temporelles
+
+Voici des exemples de paramètres ; les URL des ressources doivent être remplacées, et ils ne constituent pas une déclaration que cet exemple a déjà été exécuté avec succès. Une fois la génération terminée, interrogez selon le processus ci-dessus ; la structure du résultat est identique.
+
+Une ou deux images utilisent un tableau standard :
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "The camera slowly moves around the product in soft studio light.",
+  "keyframes": ["https://example.com/first-frame.jpg"],
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "async": true
+}
+```
+
+Lors de la spécification des instants des images clés, utilisez des paires `[secondes, URL de l’image]` :
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "A smooth transition from morning light to a warm sunset.",
+  "keyframes": [[0, "https://example.com/start.jpg"], [5, "https://example.com/end.jpg"]],
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+1 à 10 images clés sont autorisées. Le tableau avec temps doit être en ordre croissant de temps, le temps est de 0 à 20 secondes, et les URL standard et les éléments avec temps ne peuvent pas être mélangés. Trois images clés standard ou plus doivent spécifier explicitement duration, auto ne peut pas être utilisé.
+
+### Sortie testée d’image vers vidéo
+
+L’entrée correspondante de ce test est la suivante (seul le texte descriptif remplace le base64 complet, les autres champs sont la requête réelle) :
+
+```json
+{
+  "async": true,
+  "action": "generate",
+  "model": "flux-3",
+  "prompt": "The toy sailboat drifts slowly across calm water. A steady camera, gentle daylight, no people or text.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "draft": false,
+  "mode": "i2v",
+  "keyframes": [
+    "<下图 PNG 文件的原始 base64 字符串>"
+  ]
+}
+```
+
+![Image clé de référence de cette image vers vidéo](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png)
+
+Après avoir [téléchargé cette image clé PNG](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png), vous pouvez utiliser `base64.b64encode(image_bytes).decode("ascii")` de Python pour obtenir la chaîne originale, puis la placer dans le tableau keyframes. Ne mettez pas le texte descriptif du document comme entrée d’image.
+
+Ce qui suit est la véritable response finale d’une tâche de production du 2026-10-01 (et non une réponse simulée) ; seule l’URL de la vidéo a été remplacée par une copie d’exemple à long terme ayant le même hachage. L’entrée testée utilise la chaîne base64 originale d’un PNG 1280×720 comme image clé unique ; l’entrée URL ci-dessus est un exemple de paramètre indépendant.
+
+```json
+{
+  "success": true,
+  "task_id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+  "trace_id": "f62d5c56-cfb2-4f8f-b339-ef019d4c0d10",
+  "data": [
+    {
+      "id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "i2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+[Voir la vidéo testée](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4)。
+
+## 5. Prolongement de vidéo
+
+`start_video` transmet l’adresse d’un fichier vidéo existant, `mode=v2v`, avec une durée maximale de 15 secondes. Il s’agit d’un champ différent de `video` utilisé pour l’édition.
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "prompt": "Continue the sailboat drifting forward with the same steady camera.",
+  "start_video": "https://example.com/source.mp4",
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+### Sortie testée du prolongement de vidéo
+
+L’entrée complète de ce test est la suivante ; lors de la reproduction de l’amélioration de brouillon, vous devez la remplacer par votre propre ID de brouillon. L’URL du média utilise une copie d’exemple à long terme du même fichier :
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "start_video": "https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4",
+  "prompt": "Continue the same sailboat drifting gently across calm water in the same continuous steady shot.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "async": true
+}
+```
+
+Voici la response finale réelle d’une tâche de production du 2026-10-01 (réponse non simulée) ; seule l’URL de la vidéo a été remplacée par une copie d’exemple à long terme avec le même hachage.
+
+```json
+{
+  "success": true,
+  "task_id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+  "trace_id": "4fb49afc-abca-4039-bbaa-adb66e293544",
+  "data": [
+    {
+      "id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4",
+      "seconds": 5,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5,
+    "output_mp_seconds": 4.296875,
+    "mode": "v2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 18.219375,
+    "currency": "credit",
+    "list_amount": 20.24375
+  }
+}
+```
+
+[Voir la vidéo testée](https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4)。
+
+Le `start_video` de l’entrée testée est une [vidéo de brouillon terminée](https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4), les autres paramètres étant duration=5, resolution=hd, generate_audio=false。
+
+## 6. D’abord le brouillon, puis l’amélioration
+
+1. Générez un brouillon avec `draft=true`, `resolution=hd` et attendez la réussite.
+2. Récupérez l’ID de brouillon de la plateforme depuis le `data[0].draft_task_id` final.
+3. Soumettez une requête d’amélioration avec les identifiants de l’application de même appartenance :
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "替换为自己的已完成草稿 ID",
+  "resolution": "fhd",
+  "async": true
+}
+```
+
+L’amélioration de brouillon ne peut pas transmettre `prompt`, `duration`, `aspect_ratio`, `version`, `generate_audio`, `draft`, `keyframes`, `start_video` pour remplacer le contenu d’origine. Le cache de brouillon est une ressource temporaire, veuillez l’améliorer rapidement ; sa conservation permanente ou un nombre fixe de jours de conservation ne sont pas garantis. Les brouillons ne vous appartenant pas/ne relevant pas de l’application actuelle, les brouillons non terminés et les caches expirés ne peuvent pas être réutilisés. Le brouillon et l’amélioration sont deux tâches distinctes, facturées séparément après réussite.
+
+### Sortie testée de l’amélioration de brouillon
+
+L’entrée complète de ce test est la suivante ; lors de la reproduction de l’amélioration de brouillon, vous devez la remplacer par votre propre ID de brouillon. L’URL du média utilise une copie d’exemple à long terme du même fichier :
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "b41293be-94c0-4dc7-9f39-ce04f0a8798d",
+  "resolution": "hd",
+  "async": true
+}
+```
+
+Voici la response finale réelle d’une tâche de production du 2026-10-01 (réponse non simulée) ; seule l’URL de la vidéo a été remplacée par une copie d’exemple à long terme avec le même hachage.
+
+```json
+{
+  "success": true,
+  "task_id": "1db6243b-4a05-4484-828c-25bb17de7108",
+  "trace_id": "64f93fa1-8d18-4c8b-a6d2-888009eb7cfa",
+  "data": [
+    {
+      "id": "1db6243b-4a05-4484-828c-25bb17de7108",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+
+[Voir la vidéo testée](https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4)。
+
+L’entrée testée utilise votre propre draft_task_id=b41293be-94c0-4dc7-9f39-ce04f0a8798d, resolution=hd ; le usage.mode final=t2v indique le mode de brouillon d’origine. Cette tâche est facturée séparément du brouillon d’origine.
+
+## 7. Appel Python de bout en bout
+
+Installez `requests`, configurez votre propre Token, puis exécutez le script ci-dessous pour effectuer « une soumission → un sondage → l’affichage de l’URL de la vidéo ». La requête et les nouvelles tentatives réseau doivent toutes utiliser le task_id d’origine afin d’éviter de soumettre à nouveau des tâches payantes.
+```python
+import os
+import time
+import requests
+
+base_url = "https://api.acedata.cloud"
+headers = {
+    "Authorization": "Bearer " + os.environ["ACEDATACLOUD_API_TOKEN"],
+    "Accept": "application/json",
+}
+payload = {
+    "action": "generate",
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": True,
+    "async": True,
+}
+submitted = requests.post(base_url + "/flux/videos", json=payload, headers=headers, timeout=120)
+submitted.raise_for_status()
+accepted = submitted.json()
+if accepted.get("error"):
+    raise RuntimeError(accepted["error"])
+task_id = accepted["task_id"]
+print("Task ID:", task_id)  # 持久化保存，用于恢复轮询
+
+# 30 分钟是本示例的客户端等待上限，不是服务的完成时限承诺。
+deadline = time.monotonic() + 30 * 60
+while time.monotonic() < deadline:
+    polled = requests.post(
+        base_url + "/flux/tasks",
+        json={"action": "retrieve", "id": task_id},
+        headers=headers,
+        timeout=30,
+    )
+    polled.raise_for_status()
+    task = polled.json()
+    if task.get("error"):
+        raise RuntimeError(task["error"])
+    result = task.get("response") or task.get("result")
+    if isinstance(result, dict) and result.get("success") is True:
+        print("Video:", result["data"][0]["video_url"])
+        print("Usage:", result.get("usage"))
+        print("Cost:", result.get("cost"))
+        break
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    time.sleep(10)
+else:
+    raise TimeoutError("Still processing; resume polling with task_id=" + task_id)
+```
+
+Après un délai d’expiration réseau, ne considérez pas un état inconnu comme un échec et ne soumettez pas immédiatement à nouveau. Si `task_id` a déjà été obtenu, continuez à interroger cette tâche ; enregistrez `task_id` et `trace_id` afin de faciliter le diagnostic. L’interface d’interrogation elle-même ne facture pas de frais de génération.
+
+## 8. Utiliser les rappels
+
+Ajoutez `callback_url` lors de la soumission ; une fois la tâche terminée, le résultat JSON final sera envoyé par POST à cette adresse. La structure en cas de succès est identique au response précédent, tandis qu’en cas d’échec, elle contient error.
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "t2v",
+  "prompt": "A small sailboat on calm water.",
+  "duration": 5,
+  "resolution": "hd",
+  "draft": true,
+  "callback_url": "https://your-server.example/flux-callback"
+}
+```
+
+L’adresse de rappel doit être accessible depuis Internet. Après réception de la notification, traitez-la de manière idempotente selon task_id et retournez rapidement 2xx ; le traitement métier peut être mis en file d’attente. Ce document ne déclare pas que les rappels disposent d’une authentification par signature : avant des opérations sensibles telles que l’attribution d’avantages métier, utilisez votre propre Token pour interroger la même tâche afin de vérifier le résultat. Si le rappel n’est pas reçu, vous pouvez également continuer l’interrogation ; ne régénérez pas.
+
+## 9. Édition vidéo et super-résolution (actuellement indisponibles)
+
+Ces deux opérations sont toujours sélectionnées via l’action de `/flux/videos`. Seul le contrat de paramètres est présenté ci-dessous ; il ne faut actuellement pas dépendre de leur livraison réussie.
+
+Édition :
+
+```json
+{
+  "action": "edit",
+  "video": "https://example.com/source.mp4",
+  "prompt": "Change the scene to warm sunset lighting.",
+  "async": true
+}
+```
+
+Super-résolution :
+
+```json
+{
+  "action": "upscale",
+  "input_video": "https://example.com/source.mp4",
+  "upscale_factor": 1.5,
+  "creativity": 0,
+  "async": true
+}
+```
+
+`upscale_factor` va de 1.5 à 3, `creativity=0` correspond à une super-résolution précise, et `1` à une super-résolution créative. Ce n’est pas une chaîne de caractères, et n’omettez pas non plus le 0 explicite. La longueur du prompt d’édition est de 1 à 4096 caractères. Ne mélangez pas les champs de génération.
+
+Le 2026-10-02, les tests d’édition ont renvoyé le response final suivant après l’acceptation de la tâche ; la vérification de la facturation indiquait une déduction de 0. Les tests de super-résolution ont également renvoyé la même erreur d’indisponibilité, avec une déduction de 0 :
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "service_unavailable",
+    "message": "The video operation is currently unavailable"
+  },
+  "trace_id": "7374a332-097a-431f-8207-ecee73dbb740",
+  "task_id": "67671cbf-2464-42e1-aa03-afadeb0eabc3"
+}
+```
+
+## 10. Facturation actuelle et grille tarifaire
+
+Mise à jour du 2026-10-02 : les prix unitaires de chaque niveau de cette interface vidéo ont été réduits d’environ 6,33 %, tandis que le mode de mesure, les forfaits et les règles de remise à la consommation restent inchangés. Les cost dans les response de tests historiques précédents correspondent à la facture au moment de l’achèvement de la tâche et ne représentent pas l’offre actuelle.
+
+La génération et l’édition sont facturées selon les **secondes de sortie réelles** ; la super-résolution est facturée selon les **MP·secondes de sortie réelles**. Ci-dessous figurent les prix unitaires actuels en Credits avant application des remises de consommation du compte, conformément aux règles de la [page de tarification Flux](https://platform.acedata.cloud/services/flux?tab=pricing).
+
+| Opération/mode                   | Résolution  | Prix unitaire en Credits |
+| ----------------------- | ---- | ------------: |
+| brouillon t2v / i2v            | hd   |     0.555 / seconde |
+| brouillon v2v                  | hd   |      1.11 / seconde |
+| t2v / i2v / amélioration de brouillon correspondante      | hd   |    1.5725 / seconde |
+| idem                      | fhd  |    2.6825 / seconde |
+| idem                      | qhd  |       3.7 / seconde |
+| idem                      | uhd  |       7.4 / seconde |
+| v2v / amélioration de brouillon correspondante            | hd   |    3.7925 / seconde |
+| idem                      | fhd  |    4.9025 / seconde |
+| idem                      | qhd  |    6.0125 / seconde |
+| idem                      | uhd  |    8.7875 / seconde |
+| édition (actuellement indisponible)                | —    |    0.2775 / seconde |
+| super-résolution précise creativity=0 (actuellement indisponible) | sortie réelle | 0.6475 / MP·seconde |
+| super-résolution créative creativity=1 (actuellement indisponible) | sortie réelle |  0.925 / MP·seconde |
+
+Formule d’utilisation de la super-résolution : `seconds × width × height / 1048576 × fps / 24`, 1 MP = 1024×1024 pixels. Elle n’est pas simplement facturée selon la durée de la vidéo d’entrée ou le facteur cible.
+
+Conversion en dollars américains : `frais réels (USD) = cost.amount (Credits) × price du forfait / amount du forfait`. Les niveaux de recharge et les remises de consommation influencent le prix réel ; les Credits ne peuvent pas être directement considérés comme des USD. Les tâches échouées ne facturent pas de frais de génération ; le montant final est déterminé par le résultat d’achèvement et les enregistrements d’appels de la console.
+
+## 11. Questions fréquentes et diagnostic
+| Situation                       | Recommandation                                           |
+| ------------------------ | -------------------------------------------- |
+| Erreur de paramètre (400)                | Vérifiez l’orthographe de action, mode, duration, le format des images clés ; ne mélangez pas les champs de différentes opérations |
+| Erreur d’authentification (401)                | Vérifiez le Bearer Token, les autorisations de l’application et la validité des identifiants                  |
+| Rejet par la modération de contenu (403)              | Ajustez les ressources et les invites, ne soumettez pas à répétition exactement le même contenu                            |
+| Limitation de débit (429)                  | Réduisez la concurrence, réessayez avec un délai d’attente progressif                                    |
+| service_unavailable (503) | L’opération actuelle n’est pas disponible ; les tâches asynchrones déjà acceptées peuvent signaler cette erreur dans la response finale        |
+| task_id a été renvoyé mais il n’y a pas encore de vidéo        | Continuez à interroger la response, ne considérez pas HTTP 200 comme une génération terminée             |
+| Le brouillon ne peut pas être réutilisé                   | Confirmez l’utilisateur/l’application actuelle, que la tâche est terminée, que la requête d’origine contient draft=true, et vérifiez si le cache temporaire est toujours valide  |
+
+Lors du retour d’information, fournissez task_id, trace_id, l’heure de la requête et les paramètres masqués, n’envoyez pas l’API Token. Pour plus de méthodes, consultez le [Guide d’intégration Flux MCP](https://platform.acedata.cloud/documents/flux-mcp).
