@@ -67,6 +67,7 @@ DOC_ONLY_SERVICES = {"coding"}
 
 # Hold these operations even when the Backend mapping has not yet refreshed.
 PRIVATE_API_PATHS = {
+    "/flux/videos",
     "/kling/apparel",
     "/kling/virtual-try-on",
     "/kling/voices",
@@ -74,6 +75,7 @@ PRIVATE_API_PATHS = {
 }
 
 SKIP_DOC_KEYS = {
+    "flux_generate_video",
     "acedataext",
     # These endpoints are private pending successful production acceptance.
     "kling_apparel",
@@ -784,9 +786,13 @@ def merge_openapi_specs(backend_dir: Path, service: dict[str, Any]) -> dict[str,
     }
 
     for api in apis:
+        if api.get("private"):
+            continue
         spec = load_openapi_spec(backend_dir, api["id"])
         if not spec:
             log(f"  WARNING: missing OpenAPI spec for {api.get('id')} ({service.get('alias')})")
+            continue
+        if spec.get("x-private"):
             continue
         merged["paths"].update({path: operation for path, operation in spec.get("paths", {}).items()
                                 if path not in PRIVATE_API_PATHS})
