@@ -14,6 +14,50 @@ SPEC.loader.exec_module(sync)
 
 
 class SyncFromPlatformBackendTests(unittest.TestCase):
+    def test_flux_video_hold_preserves_image_and_task_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            backend = Path(temporary_directory)
+            (backend / "openapi").mkdir()
+            service = {"alias": "flux", "apis": []}
+            for index, path in enumerate(["/flux/images", "/flux/tasks", "/flux/videos"]):
+                api_id = str(index)
+                (backend / "openapi" / f"{api_id}.json").write_text(json.dumps({
+                    "paths": {path: {"post": {"responses": {"200": {"description": "OK"}}}}}
+                }), encoding="utf-8")
+                service["apis"].append({"id": api_id, "path": path})
+            merged = sync.merge_openapi_specs(backend, service)
+            self.assertEqual(set(merged["paths"]), {"/flux/images", "/flux/tasks"})
+
+    def test_private_api_marker_is_respected_without_a_path_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            backend = Path(temporary_directory)
+            (backend / "openapi").mkdir()
+            (backend / "openapi/private.json").write_text(json.dumps({
+                "x-private": True, "paths": {"/internal/test": {"post": {}}}
+            }), encoding="utf-8")
+            self.assertIsNone(sync.merge_openapi_specs(backend, {"alias": "test", "apis": [{"id": "private"}]}))
+
+    def test_flux_video_guide_is_not_republished_from_old_localized_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backend = root / "backend"
+            (backend / "docs").mkdir(parents=True)
+            keys = ["flux_generate_video", "flux_generate_image", "flux_tasks"]
+            localized = {}
+            for key in keys:
+                (backend / "docs" / f"development_{key}.md").write_text(f"# {key}", encoding="utf-8")
+                localized[sync.normalize(key)] = {"content": f"# {key}", "title": key}
+                old = root / "old/en/guides/flux" / f"{key}.mdx"
+                old.parent.mkdir(parents=True, exist_ok=True)
+                old.write_text(f"# old {key}", encoding="utf-8")
+            with patch.object(sync, "load_localized_guides", return_value=localized):
+                sync.sync_guides(backend, root / "out", {"flux": {}}, dict.fromkeys(keys, "flux"),
+                                 ["en", "zh-Hans"], fallback_root=root / "old")
+            for language in ["en", "zh-Hans"]:
+                self.assertFalse((root / "out" / language / "guides/flux/flux_generate_video.mdx").exists())
+                for key in keys[1:]:
+                    self.assertTrue((root / "out" / language / f"guides/flux/{key}.mdx").exists())
+
     def test_private_kling_operations_are_excluded_from_stale_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             backend = Path(temporary_directory)
