@@ -14,7 +14,7 @@ SPEC.loader.exec_module(sync)
 
 
 class SyncFromPlatformBackendTests(unittest.TestCase):
-    def test_flux_video_hold_preserves_image_and_task_specs(self) -> None:
+    def test_flux_video_beta_is_published_alongside_image_and_task_specs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             backend = Path(temporary_directory)
             (backend / "openapi").mkdir()
@@ -26,7 +26,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
                 }), encoding="utf-8")
                 service["apis"].append({"id": api_id, "path": path})
             merged = sync.merge_openapi_specs(backend, service)
-            self.assertEqual(set(merged["paths"]), {"/flux/images", "/flux/tasks"})
+            self.assertEqual(set(merged["paths"]), {"/flux/images", "/flux/tasks", "/flux/videos"})
 
     def test_private_api_marker_is_respected_without_a_path_hold(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -37,7 +37,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             }), encoding="utf-8")
             self.assertIsNone(sync.merge_openapi_specs(backend, {"alias": "test", "apis": [{"id": "private"}]}))
 
-    def test_flux_video_guide_is_not_republished_from_old_localized_content(self) -> None:
+    def test_flux_video_guide_is_restored_with_image_and_task_guides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             backend = root / "backend"
@@ -54,8 +54,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
                 sync.sync_guides(backend, root / "out", {"flux": {}}, dict.fromkeys(keys, "flux"),
                                  ["en", "zh-Hans"], fallback_root=root / "old")
             for language in ["en", "zh-Hans"]:
-                self.assertFalse((root / "out" / language / "guides/flux/flux_generate_video.mdx").exists())
-                for key in keys[1:]:
+                for key in keys:
                     self.assertTrue((root / "out" / language / f"guides/flux/{key}.mdx").exists())
 
     def test_private_kling_operations_are_excluded_from_stale_mapping(self) -> None:
