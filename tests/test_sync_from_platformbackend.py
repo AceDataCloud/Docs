@@ -14,6 +14,20 @@ SPEC.loader.exec_module(sync)
 
 
 class SyncFromPlatformBackendTests(unittest.TestCase):
+    def test_private_kling_operations_are_excluded_from_stale_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            backend = Path(temporary_directory)
+            (backend / "openapi").mkdir()
+            paths = sync.PRIVATE_API_PATHS | {"/kling/videos", "/kling/goods-studio", "/kling/video-commerce"}
+            service = {"alias": "kling", "apis": []}
+            for index, path in enumerate(sorted(paths)):
+                api_id = str(index)
+                spec = {"paths": {path: {"post": {"responses": {"200": {"description": "OK"}}}}}}
+                (backend / "openapi" / f"{api_id}.json").write_text(json.dumps(spec), encoding="utf-8")
+                service["apis"].append({"id": api_id, "path": path})
+            merged = sync.merge_openapi_specs(backend, service)
+            self.assertEqual(set(merged["paths"]), paths - sync.PRIVATE_API_PATHS)
+
     def test_shared_kling_assets_guide_uses_localized_element_alias(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -22,12 +36,42 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             (backend / "docs/development_kling_assets.md").write_text("# 中文资产指南", encoding="utf-8")
             localized = {sync.normalize("kling_elements"): {
                 "content": "# Kling Assets\n\nVoice creation costs 0.07 Credits.", "title": "Kling Elements"}}
-            with patch.object(sync, "load_localized_guides", return_value=localized):
+            # Exercise alias resolution independently of the temporary publication hold.
+            with patch.object(sync, "load_localized_guides", return_value=localized), patch.object(
+                sync, "SKIP_DOC_KEYS", sync.SKIP_DOC_KEYS - {"kling_assets"}
+            ):
                 sync.sync_guides(backend, root / "out", {"kling": {"display_name": "Kling"}},
                                  {"kling_assets": "kling"}, ["en"])
             content = (root / "out/en/guides/kling/kling_assets.mdx").read_text(encoding="utf-8")
             self.assertIn("Voice creation costs 0.07 Credits.", content)
             self.assertNotIn("中文", content)
+
+    def test_unverified_kling_guides_stay_hidden_with_localized_and_fallback_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backend = root / "backend"
+            (backend / "docs").mkdir(parents=True)
+            hidden = {"kling_apparel", "kling_virtual_try_on", "kling_assets"}
+            keys = hidden | {"kling_videos"}
+            localized = {}
+            for key in keys:
+                (backend / "docs" / f"development_{key}.md").write_text(f"# {key}", encoding="utf-8")
+                localized[sync.normalize(key)] = {"content": f"# {key}", "title": key}
+                fallback = root / "old" / "en/guides/kling" / f"{key}.mdx"
+                fallback.parent.mkdir(parents=True, exist_ok=True)
+                fallback.write_text("Previously published content", encoding="utf-8")
+            services = [{"alias": "kling", "apis": [{"path": "/kling/videos"}]}]
+            mapping = sync.build_doc_service_map(services, backend)
+            for key in hidden:
+                self.assertIsNone(mapping[key])
+            # Even a stale caller-provided map cannot republish the held guides.
+            with patch.object(sync, "load_localized_guides", return_value=localized):
+                sync.sync_guides(backend, root / "out", {"kling": {}},
+                                 dict.fromkeys(keys, "kling"), ["en", "zh-Hans"], fallback_root=root / "old")
+            for language in ["en", "zh-Hans"]:
+                for key in hidden:
+                    self.assertFalse((root / "out" / language / "guides/kling" / f"{key}.mdx").exists())
+                self.assertTrue((root / "out" / language / "guides/kling/kling_videos.mdx").exists())
 
     def test_build_doc_service_map_reads_flattened_docs_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
