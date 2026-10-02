@@ -1,32 +1,552 @@
 ---
-title: "FLUX ビデオ統合ガイド"
+title: "Flux Videos API 統合ガイド"
 description: "Flux API guide - Ace Data Cloud"
 ---
 
-`POST /flux/videos` を通じてタスクを送信し、`action` で生成、編集、またはアップスケールを選択します。`action` を省略した場合は `generate` と同等です。既存の `POST /flux/tasks` を使用してプラットフォームタスクを照会します。`async=true` と `callback_url` をサポートします。完了結果には、プラットフォームの動画リンクと、サーバー側で測定された長さ、サイズ、フレームレートが含まれます。
+Flux Videos API は `POST /flux/videos` を使用して動画生成、キーフレーム画像からの動画生成、動画の継続、およびドラフト強化を行います。`action` は生成、編集、超解像を区別し、`mode` は生成モードを選択します。結果の照会には、既存の `POST /flux/tasks` を統一して使用します。
 
-## 生成：action=generate
+> 現在は Beta です。テキストからの動画生成、画像からの動画生成、動画の継続、およびドラフト強化はすでに公開されています。2026-10-02 の実測では、動画編集と超解像は `service_unavailable` を返し、この 2 項目は現在利用できません。失敗したタスクでは生成料金は差し引かれません。HTTP 200 とタスク ID はタスクの受理のみを示すため、最終結果を引き続き照会する必要があります。
 
-`mode=t2v/i2v/v2v/draft_enhance` をサポートします。通常生成では 5～20 秒の整数または `auto` をサポートします。動画継続では 5～15 秒をサポートします。i2v では 1～10 枚のキーフレームを指定でき、順序付きの `[秒数, 画像]` ペアをサポートします。出力解像度は hd/fhd/qhd/uhd で、同期オーディオをサポートします。ドラフトは hd のみを出力し、プラットフォームの `draft_task_id` を返します。ドラフトを再利用するには同一の帰属である必要があり、生成キャッシュの有効期限による制限を受けます。ドラフトの再現では、元のプロンプトと素材を上書きできません。
+## 1. API Token を取得する
 
-```json
-{"action":"generate","model":"flux-3","mode":"t2v","prompt":"海边日落","duration":5,"resolution":"hd","async":true}
+1. [Ace Data Cloud コンソール](https://platform.acedata.cloud/console/applications) で登録またはログインし、アプリケーションを作成して API Token を取得します。汎用 API Token 1 つでプラットフォームサービスを呼び出せます。アプリケーションに Flux サービスの呼び出し権限と利用可能な残高があることを確認してください。
+2. [Flux サービスページ](https://platform.acedata.cloud/services/flux?tab=pricing) でプランおよび各操作の価格を確認します。残高が不足している場合は、[コンソール残高ページ](https://platform.acedata.cloud/console/coin) でチャージしてください。
+3. リクエストでは `Authorization: Bearer &lt;あなたの Token>` を使用します。Token はサーバー側の環境変数に保存し、フロントエンドページ、公開リポジトリ、スクリーンショット、またはコールバック URL に書き込まないでください。
+
+![コンソールで API Token を申請](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+本文のコードはすべて環境変数を読み取ります：
+
+```bash
+export ACEDATACLOUD_API_TOKEN='自分の API Token に置き換える'
 ```
 
-## 編集：action=edit
+| 項目      | 値                                               |
+| ------- | ----------------------------------------------- |
+| API ルートアドレス | `https://api.acedata.cloud`                     |
+| 動画タスクを送信  | `POST /flux/videos`                             |
+| 既存タスクを照会  | `POST /flux/tasks`                              |
+| 認証      | `Authorization: Bearer $ACEDATACLOUD_API_TOKEN` |
+| リクエスト形式    | `Content-Type: application/json`                |
 
-`video` と `prompt` を渡します。編集は実際の出力秒数に基づいて課金され、生成用の `mode`、`duration` などのフィールドは受け付けません。
+完全なフィールドとオンラインデバッグについては [Flux Videos API](https://platform.acedata.cloud/documents/flux-videos)、タスク照会については [Flux Tasks API](https://platform.acedata.cloud/documents/flux-tasks) を参照してください。
 
-```json
-{"action":"edit","video":"https://example.com/video.mp4","prompt":"将场景改为蓝色调","async":true}
+## 2. 操作と入力を選択する
+
+| action                      | mode            | 入力                       | 結果            |
+| --------------------------- | --------------- | ------------------------ | ------------- |
+| `generate`（action を省略した場合のデフォルト値） | `t2v`           | `prompt`                 | テキストから動画を生成       |
+| `generate`                  | `i2v`           | `prompt`、`keyframes`     | 1 枚または複数枚のキーフレームから動画を生成 |
+| `generate`                  | `v2v`           | `prompt`、`start_video`   | 入力動画に基づいて継続      |
+| `generate`                  | `draft_enhance` | 自身が完了したドラフトの `draft_task_id` | そのドラフトを強化         |
+| `edit`                      | 渡さない              | `video`、`prompt`         | 動画編集（現在利用不可）    |
+| `upscale`                   | 渡さない              | `input_video`            | 動画超解像（現在利用不可）    |
+
+生成モデルは `flux-3` です。編集と超解像ではそれぞれ固有のフィールドを使用し、生成用の `model`、`mode`、`duration`、`draft` などのパラメータは渡しません。`action=upsale` はスペルミスであり、`upscale` にする必要があります。
+
+### 共通生成パラメータ
+
+| パラメータ                 | 説明                                                           |
+| ------------------ | ------------------------------------------------------------ |
+| `mode`             | 必須；`t2v`、`i2v`、`v2v` または `draft_enhance`                       |
+| `prompt`           | 通常生成では必須；ドラフト強化では元のプロンプトを上書きできない                                        |
+| `duration`         | t2v/i2v は 5～20 秒の整数、v2v は 5～15 秒の整数、または `auto`；最終出力の長さはリクエスト値とわずかに異なる可能性がある |
+| `resolution`       | `hd`、`fhd`、`qhd`、`uhd`；通常生成のデフォルトは `hd`、ドラフト強化のデフォルトは `fhd`              |
+| `aspect_ratio`     | `auto`、`21:9`、`2:1`、`16:9`、`4:3`、`1:1`、`3:4`、`9:16`、`9:21`   |
+| `draft`            | 先にドラフトを生成するかどうか；ドラフトは `hd` のみ対応                                           |
+| `generate_audio`   | 同期音声を生成するかどうか；`false` は有効な値なので、明示的なブール値を保持すること                               |
+| `safety_tolerance` | 任意；0～4 の整数                                                   |
+| `async`            | `true` に設定することを推奨。プラットフォームのタスク ID を即座に返し、その後結果をポーリングする                                |
+| `callback_url`     | 任意；最終 JSON 結果を受け取る HTTP(S) アドレス；設定後も非同期で受理される                        |
+
+素材 URL はサービスから読み取れる必要があります。一時的な署名 URL を使用する場合は、ダウンロードと処理のために十分な有効期間を確保してください。Web ページのアドレスを画像または動画ファイルのアドレスとして使用しないでください。
+
+## 3. テキストから動画：完全な実測リクエストと結果
+
+以下のリクエストは、2026-10-02 の価格改定前に本番インターフェースで正常に実行されました。`action` を省略することでデフォルトの生成動作を検証し、`async=true` により HTTP 接続の長時間待機を回避しています。
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/videos' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light, steady camera, no text.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": true,
+    "async": true
+  }'
 ```
 
-## アップスケール：action=upscale
-
-`input_video` を渡し、オプションで `upscale_factor`（1.5～3）と `creativity`（0 は正確、1 はクリエイティブ）を指定できます。実際の出力 MP・秒に基づいて課金されます：`長さ × 幅 × 高さ / 1048576 × フレームレート / 24`、1 MP = 1024×1024。生成パラメータは受け付けません。
+受理レスポンス（実際のタスク ID）：
 
 ```json
-{"action":"upscale","input_video":"https://example.com/video.mp4","upscale_factor":2,"creativity":0,"async":true}
+{
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607"
+}
 ```
 
-各操作には現在の FLUX 基準価格係数が適用され、実際の出力に基づいて課金されます。失敗したタスクには生成料金は請求されません。動的課金タスクの最終料金は、完了結果によって決まります。異なる操作はそれぞれのパラメータのみを受け付け、未知の action はパラメータエラーを返します。
+自身のレスポンス内の `task_id` を保存して、引き続き照会してください。ドキュメント例のタスク ID を使用して、他のアカウントの結果を照会しないでください。
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"retrieve","id":"今回返された task_id に置き換える"}'
+```
+
+タスク照会で返される `response` フィールドには、最終的なビジネス結果が含まれます。以下は今回の実測で成功した `response` であり、外側のタスクメタデータは省略されています。ドキュメント内の動画 URL は、長期利用可能なサンプル CDN 上の同一ファイルのコピー（SHA-256 は一致）に置き換えられています。実際の呼び出しでは、今回のタスク固有の結果 URL が返されます：
+```json
+{
+  "success": true,
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607",
+  "data": [
+    {
+      "id": "4341eb66-3845-4972-bb86-712a6cfae845",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24,
+      "draft_task_id": "4341eb66-3845-4972-bb86-712a6cfae845"
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": true
+  },
+  "cost": {
+    "amount": 2.6884689277500002,
+    "currency": "credit",
+    "list_amount": 2.9871876975000005
+  }
+}
+```
+
+[今回の実測動画を確認](https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4)。メディア検査により、出力は 1280×704、24 fps、5.041667 秒の MP4 であり、ファイルサイズは 2,607,276 バイトであることを確認しました。
+
+| レスポンスフィールド                              | 用途                                       |
+| --------------------------------- | ---------------------------------------- |
+| `success`                         | 最終タスクが成功したかどうか。受付段階で task_id が返されることは success=true と同義ではない |
+| `task_id`                         | プラットフォームのタスク ID。ポーリングおよび業務上の冪等処理に使用                      |
+| `trace_id`                        | 問題調査時にサポート担当者へ提供                             |
+| `data[].video_url`                | 読み取り可能な動画結果のアドレス                               |
+| `data[].seconds/width/height/fps` | サーバー側で測定された実際の出力時間、サイズ、フレームレート                       |
+| `data[].draft_task_id`            | ドラフト強化の入力 ID。再利用可能なドラフトが返される場合にのみ出現                  |
+| `usage`                           | 最終的な課金使用量。リクエストの duration で実際の seconds を上書きしないこと      |
+| `cost.amount`                     | 今回最終的に差し引かれた Credits。`currency=credit` は米ドルではない   |
+| `cost.list_amount`                | アプリユーザーの割引適用前の Credits。該当する場合に返される                 |
+
+これは価格改定前の過去の実測です：`list_amount=2.9871876975` Credits、アカウントは当時 10% の利用割引を享受しており、実際の `amount=2.68846892775` Credits でした。2026-10-02 に新価格は約 6.33% 引き下げられました。同じ 5.041667 秒のドラフトは現在価格で 2.798125185 Credits（利用割引前）であり、引き続き 10% の利用割引がある場合は 2.5183126665 Credits です。過去のタスクの請求額は再計算されません。他のアカウントのプランや割引は異なる場合があります。これはすべてのユーザーに固定された米ドル価格ではありません。
+
+## 4. 画像から動画：通常と時間付きキーフレーム
+
+以下はパラメータ例であり、素材 URL を置き換える必要があります。この例がすでに正常に実行されたことを示すものではありません。生成完了後は上記のフローに従って照会してください。結果の構造は同じです。
+
+1 枚または 2 枚の画像には通常の配列を使用します：
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "The camera slowly moves around the product in soft studio light.",
+  "keyframes": ["https://example.com/first-frame.jpg"],
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "async": true
+}
+```
+
+キーフレーム時刻を指定する場合は、`[秒数, 画像 URL]` のペアを使用します：
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "A smooth transition from morning light to a warm sunset.",
+  "keyframes": [[0, "https://example.com/start.jpg"], [5, "https://example.com/end.jpg"]],
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+1～10 枚のキーフレームが許可されます。時間付き配列は時間の昇順である必要があり、時間は 0～20 秒です。通常の URL と時間付き項目を混在させることはできません。3 枚以上の通常のキーフレームでは、duration を明示的に指定する必要があり、auto は使用できません。
+
+### 画像から動画の実測出力
+
+今回の実測に対応する入力は以下のとおりです（完全な base64 の代わりに説明文のみを使用し、その他のフィールドは実際のリクエストです）：
+
+```json
+{
+  "async": true,
+  "action": "generate",
+  "model": "flux-3",
+  "prompt": "The toy sailboat drifts slowly across calm water. A steady camera, gentle daylight, no people or text.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "draft": false,
+  "mode": "i2v",
+  "keyframes": [
+    "<下图 PNG 文件的原始 base64 字符串>"
+  ]
+}
+```
+
+![今回の画像から動画の参照キーフレーム](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png)
+
+[この PNG キーフレームをダウンロード](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png)した後、Python の `base64.b64encode(image_bytes).decode("ascii")` を使用して元の文字列を取得し、keyframes 配列に配置できます。ドキュメント内の説明文を画像入力として使用しないでください。
+
+以下は 2026-10-01 の本番タスクにおける実際の最終 response（シミュレーションレスポンスではありません）です。動画 URL のみ、ハッシュが同一の長期サンプルコピーに置き換えられています。実測入力では、1280×720 PNG の元の base64 文字列を単一のキーフレームとして使用しました。上記の URL 入力は独立したパラメータ例です。
+
+```json
+{
+  "success": true,
+  "task_id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+  "trace_id": "f62d5c56-cfb2-4f8f-b339-ef019d4c0d10",
+  "data": [
+    {
+      "id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "i2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+[実測動画を見る](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4)。
+
+## 5. 動画の継続
+
+`start_video` に既存の動画ファイル URL を渡し、`mode=v2v`、長さは最大 15 秒です。これは編集で使用する `video` とは異なるフィールドです。
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "prompt": "Continue the sailboat drifting forward with the same steady camera.",
+  "start_video": "https://example.com/source.mp4",
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+### 動画継続の実測出力
+
+今回の完全な実測入力は以下のとおりです。ドラフト強化を再現する際は、自身のドラフト ID に置き換える必要があります。素材 URL には同一ファイルの長期サンプルコピーを使用しています。
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "start_video": "https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4",
+  "prompt": "Continue the same sailboat drifting gently across calm water in the same continuous steady shot.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "async": true
+}
+```
+
+以下は 2026-10-01 の本番タスクにおける実際の最終 response（シミュレーション応答ではありません）です。動画 URL のみ、ハッシュが同一の長期サンプルコピーに変更されています。
+
+```json
+{
+  "success": true,
+  "task_id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+  "trace_id": "4fb49afc-abca-4039-bbaa-adb66e293544",
+  "data": [
+    {
+      "id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4",
+      "seconds": 5,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5,
+    "output_mp_seconds": 4.296875,
+    "mode": "v2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 18.219375,
+    "currency": "credit",
+    "list_amount": 20.24375
+  }
+}
+```
+
+[実測動画を見る](https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4)。
+
+実測入力の `start_video` は[完了済みのドラフト動画](https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4)であり、その他のパラメータは duration=5、resolution=hd、generate_audio=false です。
+
+## 6. まずドラフト、その後に強化
+
+1. `draft=true`、`resolution=hd` でドラフトを生成し、成功するまで待機します。
+2. 最終的な `data[0].draft_task_id` からプラットフォームのドラフト ID を取得します。
+3. 同じ帰属のアプリケーション認証情報を使用して強化リクエストを送信します。
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "替换为自己的已完成草稿 ID",
+  "resolution": "fhd",
+  "async": true
+}
+```
+
+ドラフト強化では、`prompt`、`duration`、`aspect_ratio`、`version`、`generate_audio`、`draft`、`keyframes`、`start_video` を渡して元の内容を上書きすることはできません。ドラフトキャッシュは一時リソースのため、速やかに強化してください。永続保存または固定された保存日数は保証されません。本人以外／現在のアプリケーション以外のドラフト、未完了のドラフト、期限切れのキャッシュは再利用できません。ドラフトと強化は 2 回のタスクであり、成功後にそれぞれ課金されます。
+
+### ドラフト強化の実測出力
+
+今回の完全な実測入力は以下のとおりです。ドラフト強化を再現する際は、自身のドラフト ID に置き換える必要があります。素材 URL には同一ファイルの長期サンプルコピーを使用しています。
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "b41293be-94c0-4dc7-9f39-ce04f0a8798d",
+  "resolution": "hd",
+  "async": true
+}
+```
+
+以下は 2026-10-01 の本番タスクにおける実際の最終 response（シミュレーション応答ではありません）です。動画 URL のみ、ハッシュが同一の長期サンプルコピーに変更されています。
+
+```json
+{
+  "success": true,
+  "task_id": "1db6243b-4a05-4484-828c-25bb17de7108",
+  "trace_id": "64f93fa1-8d18-4c8b-a6d2-888009eb7cfa",
+  "data": [
+    {
+      "id": "1db6243b-4a05-4484-828c-25bb17de7108",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+
+[実測動画を見る](https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4)。
+
+実測入力は自身の draft_task_id=b41293be-94c0-4dc7-9f39-ce04f0a8798d、resolution=hd です。最終的な usage.mode=t2v は元のドラフトモードを示します。このタスクと元のドラフトにはそれぞれ課金されます。
+
+## 7. Python エンドツーエンド呼び出し
+
+`requests` をインストールし、自身の Token を設定して、以下のスクリプトを実行すれば「1 回送信 → ポーリング → 動画 URL の出力」を完了できます。クエリとネットワーク再試行はいずれも元の task_id を使用し、課金タスクの重複送信を避ける必要があります。
+```python
+import os
+import time
+import requests
+
+base_url = "https://api.acedata.cloud"
+headers = {
+    "Authorization": "Bearer " + os.environ["ACEDATACLOUD_API_TOKEN"],
+    "Accept": "application/json",
+}
+payload = {
+    "action": "generate",
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": True,
+    "async": True,
+}
+submitted = requests.post(base_url + "/flux/videos", json=payload, headers=headers, timeout=120)
+submitted.raise_for_status()
+accepted = submitted.json()
+if accepted.get("error"):
+    raise RuntimeError(accepted["error"])
+task_id = accepted["task_id"]
+print("Task ID:", task_id)  # 持久化保存，用于恢复轮询
+
+# 30 分钟是本示例的客户端等待上限，不是服务的完成时限承诺。
+deadline = time.monotonic() + 30 * 60
+while time.monotonic() < deadline:
+    polled = requests.post(
+        base_url + "/flux/tasks",
+        json={"action": "retrieve", "id": task_id},
+        headers=headers,
+        timeout=30,
+    )
+    polled.raise_for_status()
+    task = polled.json()
+    if task.get("error"):
+        raise RuntimeError(task["error"])
+    result = task.get("response") or task.get("result")
+    if isinstance(result, dict) and result.get("success") is True:
+        print("Video:", result["data"][0]["video_url"])
+        print("Usage:", result.get("usage"))
+        print("Cost:", result.get("cost"))
+        break
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    time.sleep(10)
+else:
+    raise TimeoutError("Still processing; resume polling with task_id=" + task_id)
+```
+
+ネットワークタイムアウト後、未知の状態を失敗と見なして直ちに再送信しないでください。すでに task_id を取得している場合は、そのタスクを継続して照会してください。調査のために task_id と trace_id を記録してください。ポーリングインターフェース自体には生成料金はかかりません。
+
+## 8. コールバックの使用
+
+送信時に `callback_url` を追加すると、タスク完了後にそのアドレスへ最終 JSON 結果が POST されます。成功時の構造は前述の response と一致し、失敗時には error が含まれます。
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "t2v",
+  "prompt": "A small sailboat on calm water.",
+  "duration": 5,
+  "resolution": "hd",
+  "draft": true,
+  "callback_url": "https://your-server.example/flux-callback"
+}
+```
+
+コールバックアドレスはパブリックネットワークからアクセス可能である必要があります。通知を受信した後は、task_id に基づいて冪等に処理し、できるだけ早く 2xx を返してください。業務処理はキューに入れることができます。本書では、コールバックに署名認証があるとは宣言しません。業務上の権益の付与などの機密操作を行う前に、自身の Token を使用して同じタスクを照会し、結果を照合してください。コールバックを受信しない場合でもポーリングを継続できるため、再生成しないでください。
+
+## 9. 動画編集と超解像（現在利用不可）
+
+これら 2 種類の操作も `/flux/videos` の action で選択します。以下ではパラメータ契約のみを示しており、現在は正常な提供を前提としないでください。
+
+編集：
+
+```json
+{
+  "action": "edit",
+  "video": "https://example.com/source.mp4",
+  "prompt": "Change the scene to warm sunset lighting.",
+  "async": true
+}
+```
+
+超解像：
+
+```json
+{
+  "action": "upscale",
+  "input_video": "https://example.com/source.mp4",
+  "upscale_factor": 1.5,
+  "creativity": 0,
+  "async": true
+}
+```
+
+`upscale_factor` は 1.5～3 であり、`creativity=0` は正確な超解像、`1` はクリエイティブな超解像です。これは文字列ではなく、明示的な 0 を省略しないでください。編集 prompt の長さは 1～4096 文字です。生成フィールドを混在させないでください。
+
+2026-10-02 の編集実測では、タスク受理後に以下の最終 response が返され、請求確認での課金は 0 でした。超解像の実測でも同じ利用不可エラーが返され、課金は 0 でした。
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "service_unavailable",
+    "message": "The video operation is currently unavailable"
+  },
+  "trace_id": "7374a332-097a-431f-8207-ecee73dbb740",
+  "task_id": "67671cbf-2464-42e1-aa03-afadeb0eabc3"
+}
+```
+
+## 10. 現在の課金と価格表
+
+2026-10-02 更新：今回、動画インターフェースの各料金帯の単価は約 6.33% 引き下げられましたが、計量方式、プラン、および利用割引ルールは変更されていません。前述の過去の実測 response 内の cost はタスク完了時の請求額であり、現在の価格を表すものではありません。
+
+生成と編集は**実際の出力秒数**に基づいて課金されます。超解像は**実際の出力 MP・秒数**に基づいて課金されます。以下は、アカウント利用割引を適用していない現在の Credits 単価であり、[Flux 価格ページ](https://platform.acedata.cloud/services/flux?tab=pricing) のルールと一致しています。
+
+| 操作/モード                   | 解像度  |    Credits 単価 |
+| ----------------------- | ---- | ------------: |
+| t2v / i2v ドラフト            | hd   |     0.555 / 秒 |
+| v2v ドラフト                  | hd   |      1.11 / 秒 |
+| t2v / i2v / 対応するドラフト強化      | hd   |    1.5725 / 秒 |
+| 同上                      | fhd  |    2.6825 / 秒 |
+| 同上                      | qhd  |       3.7 / 秒 |
+| 同上                      | uhd  |       7.4 / 秒 |
+| v2v / 対応するドラフト強化            | hd   |    3.7925 / 秒 |
+| 同上                      | fhd  |    4.9025 / 秒 |
+| 同上                      | qhd  |    6.0125 / 秒 |
+| 同上                      | uhd  |    8.7875 / 秒 |
+| 編集（現在利用不可）                | —    |    0.2775 / 秒 |
+| 正確な超解像 creativity=0（現在利用不可） | 実際の出力 | 0.6475 / MP・秒 |
+| クリエイティブ超解像 creativity=1（現在利用不可） | 実際の出力 |  0.925 / MP・秒 |
+
+超解像の使用量計算式：`seconds × width × height / 1048576 × fps / 24`、1 MP = 1024×1024 ピクセルです。入力動画の長さや目標倍率だけに基づく課金ではありません。
+
+米ドルへの換算：`実際の料金（USD）= cost.amount（Credits）× プラン price / プラン amount`。チャージプランと利用割引は実際の価格に影響し、Credits を直接 USD と見なすことはできません。失敗したタスクには生成料金はかかりません。最終金額は完了結果およびコンソールの呼び出し記録に従います。
+
+## 11. よくある質問とトラブルシューティング
+| 状況                       | 推奨                                           |
+| ------------------------ | -------------------------------------------- |
+| パラメータエラー（400）                | action のスペル、mode、duration、キーフレーム形式を確認する；異なる操作のフィールドを混在させない |
+| 認証エラー（401）                | Bearer Token、アプリケーション権限および認証情報が有効か確認する                  |
+| コンテンツ審査による拒否（403）              | 素材とプロンプトを調整し、そのまま繰り返し送信しない                            |
+| レート制限（429）                  | 並行実行数を減らし、バックオフして再試行する                                    |
+| service_unavailable（503） | 現在の操作は利用不可；受理済みの非同期タスクは最終 response でこのエラーを報告する可能性がある        |
+| task_id は返されたがまだ動画がない        | response を引き続き照会し、HTTP 200 を生成完了と見なさない             |
+| 下書きを再利用できない                   | 本人／現在のアプリケーションであること、タスクが完了していること、元のリクエストが draft=true であることを確認し、一時キャッシュがまだ有効か確認する  |
+
+フィードバック時には task_id、trace_id、リクエスト時刻およびマスキング済みパラメータを提供し、API Token を送信しない。その他の方法については[Flux MCP 統合ガイド](https://platform.acedata.cloud/documents/flux-mcp)を参照。

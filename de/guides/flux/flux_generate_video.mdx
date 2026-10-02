@@ -1,43 +1,552 @@
 ---
-title: "FLUX Video Integration Guide"
+title: "Flux Videos API-Integrationsleitfaden"
 description: "Flux API guide - Ace Data Cloud"
 ---
 
-Submit tasks via `POST /flux/videos`, using `action` to select generation, editing, or upscaling. Omitting `action` is equivalent to `generate`. Use the existing `POST /flux/tasks` to query platform tasks. `async=true` and `callback_url` are supported; completed results include the platform video link and the server-measured duration, dimensions, and frame rate.
+Die Flux Videos API verwendet `POST /flux/videos` zur Durchführung von Videogenerierung, Bild-zu-Video mit Keyframes, Video-Fortsetzung und Entwurfsverbesserung. `action` unterscheidet Generierung, Bearbeitung und Upscaling, `mode` wählt den Generierungsmodus; für die Abfrage von Ergebnissen wird einheitlich das bestehende `POST /flux/tasks` verwendet.
 
-## Generation: action=generate
+> Derzeit Beta. Text-zu-Video, Bild-zu-Video, Video-Fortsetzung und Entwurfsverbesserung sind verfügbar. Am 2026-10-02 haben Videobearbeitung und Upscaling im Test `service_unavailable` zurückgegeben; diese beiden Funktionen sind vorübergehend nicht verfügbar, fehlgeschlagene Aufgaben verursachen keine Generierungskosten. HTTP 200 und die Aufgaben-ID bedeuten nur, dass die Aufgabe angenommen wurde; das Endergebnis muss weiterhin abgefragt werden.
 
-Supports `mode=t2v/i2v/v2v/draft_enhance`. Standard generation supports integer durations of 5–20 seconds or `auto`; video continuation supports 5–15 seconds. i2v can provide 1–10 keyframes and supports ordered `[seconds, image]` pairs. Output resolutions are hd/fhd/qhd/uhd, with synchronized audio supported. Drafts output hd only and return the platform `draft_task_id`; reusing a draft requires the same ownership and is subject to the generation cache validity period. Draft reproduction cannot override the original prompt and assets.
+## 1. API-Token erhalten
 
-```json
-{"action":"generate","model":"flux-3","mode":"t2v","prompt":"海边日落","duration":5,"resolution":"hd","async":true}
+1. Registrieren Sie sich oder melden Sie sich in der [Ace Data Cloud-Konsole](https://platform.acedata.cloud/console/applications) an, erstellen Sie eine Anwendung und erhalten Sie einen API-Token. Ein universeller API-Token kann Plattformdienste aufrufen; bitte bestätigen Sie, dass die Anwendung über die Aufrufberechtigung für den Flux-Dienst und ein verfügbares Guthaben verfügt.
+2. Sehen Sie auf der [Flux-Dienstseite](https://platform.acedata.cloud/services/flux?tab=pricing) die Tarife und Preise für die einzelnen Vorgänge ein. Bei unzureichendem Guthaben laden Sie auf der [Konsolen-Guthabenseite](https://platform.acedata.cloud/console/coin) Guthaben auf.
+3. Anfragen verwenden `Authorization: Bearer <Ihr Token>`. Der Token sollte in serverseitigen Umgebungsvariablen gespeichert werden; schreiben Sie ihn nicht in Frontend-Seiten, öffentliche Repositories, Screenshots oder Callback-URLs.
+
+![API-Token in der Konsole beantragen](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Der Code in diesem Artikel liest einheitlich die Umgebungsvariable:
+
+```bash
+export ACEDATACLOUD_API_TOKEN='替换为你自己的 API Token'
 ```
 
-## Editing: action=edit
+| Element      | Wert                                            |
+| ------- | ----------------------------------------------- |
+| API-Stammadresse | `https://api.acedata.cloud`                     |
+| Videoaufgabe übermitteln  | `POST /flux/videos`                             |
+| Bestehende Aufgabe abfragen  | `POST /flux/tasks`                              |
+| Authentifizierung      | `Authorization: Bearer $ACEDATACLOUD_API_TOKEN` |
+| Anfrageformat    | `Content-Type: application/json`                |
 
-Pass `video` and `prompt`. Editing is billed based on the actual output duration in seconds and does not accept generation fields such as `mode`, `duration`, and others.
+Vollständige Felder und Online-Debugging finden Sie unter [Flux Videos API](https://platform.acedata.cloud/documents/flux-videos), die Aufgabenabfrage unter [Flux Tasks API](https://platform.acedata.cloud/documents/flux-tasks).
+
+## 2. Vorgang und Eingabe auswählen
+
+| action                      | mode            | Eingabe                       | Ergebnis            |
+| --------------------------- | --------------- | ------------------------ | ------------- |
+| `generate` (Standardwert, wenn action weggelassen wird) | `t2v`           | `prompt`                 | Video aus Text generieren       |
+| `generate`                  | `i2v`           | `prompt`、`keyframes`     | Video aus einem oder mehreren Keyframes generieren |
+| `generate`                  | `v2v`           | `prompt`、`start_video`   | Fortsetzung basierend auf dem Eingabevideo      |
+| `generate`                  | `draft_enhance` | `draft_task_id` eines selbst fertiggestellten Entwurfs | Diesen Entwurf verbessern         |
+| `edit`                      | Nicht übergeben              | `video`、`prompt`         | Videobearbeitung (vorübergehend nicht verfügbar)    |
+| `upscale`                   | Nicht übergeben              | `input_video`            | Video-Upscaling (vorübergehend nicht verfügbar)    |
+
+Das Generierungsmodell ist `flux-3`. Bearbeitung und Upscaling verwenden ihre jeweiligen Felder; übergeben Sie keine Generierungsparameter wie `model`, `mode`, `duration`, `draft` usw. `action=upsale` ist ein Schreibfehler; korrekt ist `upscale`.
+
+### Allgemeine Generierungsparameter
+
+| Parameter                 | Beschreibung                                                           |
+| ------------------ | ------------------------------------------------------------ |
+| `mode`             | Erforderlich; `t2v`, `i2v`, `v2v` oder `draft_enhance`                       |
+| `prompt`           | Für normale Generierung erforderlich; bei Entwurfsverbesserung darf der ursprüngliche Prompt nicht überschrieben werden                                        |
+| `duration`         | Bei t2v/i2v eine Ganzzahl von 5–20 Sekunden, bei v2v eine Ganzzahl von 5–15 Sekunden oder `auto`; die endgültige Ausgabedauer kann leicht vom angeforderten Wert abweichen |
+| `resolution`       | `hd`, `fhd`, `qhd`, `uhd`; Standard für normale Generierung ist `hd`, für Entwurfsverbesserung `fhd`              |
+| `aspect_ratio`     | `auto`, `21:9`, `2:1`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`, `9:21`   |
+| `draft`            | Ob zunächst ein Entwurf generiert werden soll; Entwürfe unterstützen nur `hd`                                           |
+| `generate_audio`   | Ob synchronisiertes Audio generiert werden soll; `false` ist ein gültiger Wert, behalten Sie den expliziten booleschen Wert bei                               |
+| `safety_tolerance` | Optional; Ganzzahl von 0–4                                                   |
+| `async`            | Es wird empfohlen, `true` festzulegen, um sofort die Plattform-Aufgaben-ID zurückzugeben und anschließend das Ergebnis abzufragen                                |
+| `callback_url`     | Optional; HTTP(S)-Adresse zum Empfang des endgültigen JSON-Ergebnisses; nach dem Setzen wird die Aufgabe ebenfalls asynchron angenommen                        |
+
+Material-URLs müssen für den Dienst lesbar sein. Falls temporäre signierte URLs verwendet werden, sollte ausreichend Gültigkeitsdauer für Download und Verarbeitung vorgesehen werden. Verwenden Sie keine Webseitenadressen als Adressen von Bild- oder Videodateien.
+
+## 3. Text-zu-Video: vollständige getestete Anfrage und Ergebnis
+
+Die folgende Anfrage wurde am 2026-10-02 vor der Preisanpassung erfolgreich über die Produktionsschnittstelle ausgeführt. Das Weglassen von `action` bestätigt das Standard-Generierungsverhalten; `async=true` vermeidet langes Warten auf die HTTP-Verbindung.
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/videos' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light, steady camera, no text.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": true,
+    "async": true
+  }'
+```
+
+Annahmeantwort (echte Aufgaben-ID):
 
 ```json
 {
-  "action": "edit",
-  "video": "https://example.com/video.mp4",
-  "prompt": "将场景改为蓝色调",
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607"
+}
+```
+
+Speichern Sie die `task_id` aus Ihrer eigenen Antwort und fragen Sie weiter ab; verwenden Sie nicht die Aufgaben-ID aus dem Dokumentationsbeispiel, um Ergebnisse anderer Konten abzufragen.
+
+```bash
+curl -X POST 'https://api.acedata.cloud/flux/tasks' \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"retrieve","id":"替换为本次返回的 task_id"}'
+```
+
+Das Feld `response` in der Aufgabenabfrage enthält das endgültige Geschäftsergebnis. Nachfolgend ist das bei diesem Test erfolgreich zurückgegebene `response`; die äußeren Aufgabenmetadaten wurden weggelassen. Die Video-URL in der Dokumentation wurde durch eine Kopie derselben Datei auf einem langfristigen Beispiel-CDN ersetzt (SHA-256 identisch); der tatsächliche Aufruf gibt die Ergebnis-URL der jeweiligen Aufgabe zurück:
+```json
+{
+  "success": true,
+  "task_id": "4341eb66-3845-4972-bb86-712a6cfae845",
+  "trace_id": "b0f851bd-0925-43ca-acc3-6f634c70d607",
+  "data": [
+    {
+      "id": "4341eb66-3845-4972-bb86-712a6cfae845",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24,
+      "draft_task_id": "4341eb66-3845-4972-bb86-712a6cfae845"
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": true
+  },
+  "cost": {
+    "amount": 2.6884689277500002,
+    "currency": "credit",
+    "list_amount": 2.9871876975000005
+  }
+}
+```
+
+[Dieses tatsächlich getestete Video ansehen](https://cdn.acedata.cloud/assets/examples/flux/4341eb66-3845-4972-bb86-712a6cfae845-5f4391e1942c.mp4)。Die Medienprüfung bestätigt, dass die Ausgabe eine MP4-Datei mit 1280×704, 24 fps und 5.041667 Sekunden ist, mit einer Dateigröße von 2,607,276 Byte.
+
+| Antwortfeld                              | Zweck                                       |
+| --------------------------------- | ---------------------------------------- |
+| `success`                         | Ob die endgültige Aufgabe erfolgreich war; die Rückgabe von task_id in der Annahmephase ist nicht gleichbedeutend mit success=true |
+| `task_id`                         | Plattform-Aufgaben-ID, für Abfragen und idempotente Geschäftsverarbeitung                      |
+| `trace_id`                        | Bei der Fehlerbehebung dem Supportpersonal bereitstellen                             |
+| `data[].video_url`                | Abrufbare Adresse des Videoergebnisses                               |
+| `data[].seconds/width/height/fps` | Die serverseitig gemessene tatsächliche Ausgabedauer, Größe und Bildrate                       |
+| `data[].draft_task_id`            | Eingabe-ID für die Entwurfsverbesserung; erscheint nur bei Rückgabe eines wiederverwendbaren Entwurfs                  |
+| `usage`                           | Endgültige abgerechnete Nutzungsmenge; überschreiben Sie die tatsächlichen seconds nicht mit der angeforderten duration      |
+| `cost.amount`                     | Die diesmal endgültig abgezogenen Credits; `currency=credit` bedeutet nicht US-Dollar   |
+| `cost.list_amount`                | Credits vor Verbrauchsrabatt für Anwendungsnutzer; wird zurückgegeben, wenn zutreffend                 |
+
+Dies ist ein historischer tatsächlicher Test vor der Preisanpassung: `list_amount=2.9871876975` Credits, das Konto hatte damals einen Verbrauchsrabatt von 10 %, und der tatsächliche `amount` betrug 2.68846892775 Credits. Der neue Preis vom 2026-10-02 wurde um etwa 6.33 % gesenkt; derselbe Entwurf mit 5.041667 Sekunden kostet zum aktuellen Preis 2.798125185 Credits (vor Verbrauchsrabatt), und bei weiterhin 10 % Verbrauchsrabatt 2.5183126665 Credits. Rechnungen historischer Aufgaben werden nicht neu berechnet. Tarife und Rabatte anderer Konten können abweichen; dies ist kein fester US-Dollar-Preis für alle Nutzer.
+
+## 4. Bild-zu-Video: normal und mit zeitlichen Keyframes
+
+Im Folgenden finden Sie Parameterbeispiele; die Material-URLs müssen ersetzt werden. Dies ist keine Erklärung, dass dieses Beispiel bereits erfolgreich ausgeführt wurde. Nach Abschluss der Generierung fragen Sie gemäß dem obigen Ablauf ab; die Ergebnisstruktur ist identisch.
+
+Für ein oder zwei Bilder verwenden Sie ein normales Array:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "The camera slowly moves around the product in soft studio light.",
+  "keyframes": ["https://example.com/first-frame.jpg"],
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
   "async": true
 }
 ```
 
-## Upscaling: action=upscale
+Wenn Sie Zeitpunkte für Keyframes angeben, verwenden Sie Paare aus `[Sekunden, Bild-URL]`:
 
-Pass `input_video`, with optional `upscale_factor` (1.5–3) and `creativity` (0 for precise, 1 for creative). Billed based on actual output MP·seconds: `duration × width × height / 1048576 × frame rate / 24`, where 1 MP = 1024×1024. Generation parameters are not accepted.
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "i2v",
+  "prompt": "A smooth transition from morning light to a warm sunset.",
+  "keyframes": [[0, "https://example.com/start.jpg"], [5, "https://example.com/end.jpg"]],
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+1–10 Keyframes sind erlaubt. Arrays mit Zeitangaben müssen in aufsteigender Zeitreihenfolge vorliegen, die Zeit beträgt 0–20 Sekunden, und normale URLs und Einträge mit Zeitangaben dürfen nicht gemischt werden. Bei drei oder mehr normalen Keyframes muss duration ausdrücklich angegeben werden; auto kann nicht verwendet werden.
+
+### Tatsächlich getestete Ausgabe für Bild-zu-Video
+
+Die übereinstimmende Eingabe dieses tatsächlichen Tests lautet wie folgt (nur der vollständige base64-Wert wurde durch Beschreibungstext ersetzt; die übrigen Felder sind die echte Anfrage):
+
+```json
+{
+  "async": true,
+  "action": "generate",
+  "model": "flux-3",
+  "prompt": "The toy sailboat drifts slowly across calm water. A steady camera, gentle daylight, no people or text.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "draft": false,
+  "mode": "i2v",
+  "keyframes": [
+    "<下图 PNG 文件的原始 base64 字符串>"
+  ]
+}
+```
+
+![Referenz-Keyframe dieses Bild-zu-Video-Tests](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png)
+
+Nach dem [Herunterladen dieses PNG-Keyframes](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-input-b0525db595d2.png) können Sie mit `base64.b64encode(image_bytes).decode("ascii")` in Python die ursprüngliche Zeichenfolge erhalten und sie in das keyframes-Array einfügen. Verwenden Sie nicht den Beschreibungstext im Dokument als Bildeingabe.
+
+Nachfolgend ist die echte endgültige response einer Produktionsaufgabe vom 2026-10-01 (keine simulierte Antwort); nur die Video-URL wurde durch eine langfristige Beispielkopie mit demselben Hash ersetzt. Die tatsächlich getestete Eingabe verwendete die ursprüngliche base64-Zeichenfolge eines 1280×720-PNG als einzelnen Keyframe; die oben genannte URL-Eingabe ist ein eigenständiges Parameterbeispiel.
+
+```json
+{
+  "success": true,
+  "task_id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+  "trace_id": "f62d5c56-cfb2-4f8f-b339-ef019d4c0d10",
+  "data": [
+    {
+      "id": "b1106de8-d586-4e23-b489-381e2f86a10f",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "i2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+[Gemessenes Video ansehen](https://cdn.acedata.cloud/assets/examples/flux/b1106de8-d586-4e23-b489-381e2f86a10f-bef14458cc9d.mp4)。
+
+## 5. Video-Fortsetzung
+
+`start_video` übergibt die Adresse einer vorhandenen Videodatei, `mode=v2v`, die Dauer beträgt maximal 15 Sekunden. Es ist ein anderes Feld als das für die Bearbeitung verwendete `video`.
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "prompt": "Continue the sailboat drifting forward with the same steady camera.",
+  "start_video": "https://example.com/source.mp4",
+  "duration": 5,
+  "resolution": "hd",
+  "async": true
+}
+```
+
+### Tatsächliche Ausgabe der Video-Fortsetzung
+
+Die vollständige tatsächliche Eingabe dieses Tests lautet wie folgt; bei der Reproduktion der Entwurfsverbesserung muss sie durch die eigene Entwurfs-ID ersetzt werden. Die Material-URL verwendet eine langfristige Beispielkopie derselben Datei:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "v2v",
+  "start_video": "https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4",
+  "prompt": "Continue the same sailboat drifting gently across calm water in the same continuous steady shot.",
+  "duration": 5,
+  "resolution": "hd",
+  "generate_audio": false,
+  "async": true
+}
+```
+
+Im Folgenden ist die tatsächliche endgültige response der Produktionsaufgabe vom 2026-10-01 (keine simulierte Antwort); nur die Video-URL wurde durch eine langfristige Beispielkopie mit demselben Hash ersetzt.
+
+```json
+{
+  "success": true,
+  "task_id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+  "trace_id": "4fb49afc-abca-4039-bbaa-adb66e293544",
+  "data": [
+    {
+      "id": "8af9aa42-7e4d-47a4-bd61-144d97440c91",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4",
+      "seconds": 5,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5,
+    "output_mp_seconds": 4.296875,
+    "mode": "v2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 18.219375,
+    "currency": "credit",
+    "list_amount": 20.24375
+  }
+}
+```
+
+[Gemessenes Video ansehen](https://cdn.acedata.cloud/assets/examples/flux/8af9aa42-7e4d-47a4-bd61-144d97440c91-a512d6574811.mp4)。
+
+Das tatsächlich verwendete `start_video` ist das [fertiggestellte Entwurfsvideo](https://cdn.acedata.cloud/assets/examples/flux/b41293be-94c0-4dc7-9f39-ce04f0a8798d-c055a3079059.mp4), die übrigen Parameter sind duration=5、resolution=hd、generate_audio=false。
+
+## 6. Zuerst Entwurf, dann Verbesserung
+
+1. Einen Entwurf mit `draft=true`、`resolution=hd` erstellen und auf Erfolg warten.
+2. Die Plattform-Entwurfs-ID aus dem endgültigen `data[0].draft_task_id` entnehmen.
+3. Eine Verbesserungsanfrage mit Anwendungsanmeldedaten derselben Zugehörigkeit übermitteln:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "替换为自己的已完成草稿 ID",
+  "resolution": "fhd",
+  "async": true
+}
+```
+
+Die Entwurfsverbesserung darf nicht `prompt`、`duration`、`aspect_ratio`、`version`、`generate_audio`、`draft`、`keyframes`、`start_video` übergeben, um den ursprünglichen Inhalt zu überschreiben. Der Entwurfscache ist eine temporäre Ressource, bitte zeitnah verbessern; eine dauerhafte Speicherung oder eine festgelegte Anzahl von Aufbewahrungstagen wird nicht zugesichert. Entwürfe, die nicht dem Benutzer/nicht der aktuellen Anwendung gehören, unvollständige Entwürfe und abgelaufene Caches können nicht wiederverwendet werden. Entwurf und Verbesserung sind zwei Aufgaben und werden nach Erfolg jeweils separat abgerechnet.
+
+### Tatsächliche Ausgabe der Entwurfsverbesserung
+
+Die vollständige tatsächliche Eingabe dieses Tests lautet wie folgt; bei der Reproduktion der Entwurfsverbesserung muss sie durch die eigene Entwurfs-ID ersetzt werden. Die Material-URL verwendet eine langfristige Beispielkopie derselben Datei:
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "draft_enhance",
+  "draft_task_id": "b41293be-94c0-4dc7-9f39-ce04f0a8798d",
+  "resolution": "hd",
+  "async": true
+}
+```
+
+Im Folgenden ist die tatsächliche endgültige response der Produktionsaufgabe vom 2026-10-01 (keine simulierte Antwort); nur die Video-URL wurde durch eine langfristige Beispielkopie mit demselben Hash ersetzt.
+
+```json
+{
+  "success": true,
+  "task_id": "1db6243b-4a05-4484-828c-25bb17de7108",
+  "trace_id": "64f93fa1-8d18-4c8b-a6d2-888009eb7cfa",
+  "data": [
+    {
+      "id": "1db6243b-4a05-4484-828c-25bb17de7108",
+      "model": "flux-3",
+      "video_url": "https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4",
+      "seconds": 5.041667,
+      "width": 1280,
+      "height": 704,
+      "fps": 24
+    }
+  ],
+  "usage": {
+    "action": "generate",
+    "seconds": 5.041667,
+    "output_mp_seconds": 4.3326825781250005,
+    "mode": "t2v",
+    "resolution": "hd",
+    "draft": false
+  },
+  "cost": {
+    "amount": 7.617328628625,
+    "currency": "credit",
+    "list_amount": 8.46369847625
+  }
+}
+```
+
+[Gemessenes Video ansehen](https://cdn.acedata.cloud/assets/examples/flux/1db6243b-4a05-4484-828c-25bb17de7108-058d92166607.mp4)。
+
+Die tatsächliche Eingabe lautet eigene draft_task_id=b41293be-94c0-4dc7-9f39-ce04f0a8798d、resolution=hd；das endgültige usage.mode=t2v zeigt den ursprünglichen Entwurfsmodus an. Diese Aufgabe wird getrennt vom ursprünglichen Entwurf abgerechnet.
+
+## 7. Python-End-to-End-Aufruf
+
+`requests` installieren, den eigenen Token festlegen und das folgende Skript ausführen, um „einmal übermitteln → abfragen → Video-URL ausgeben“ abzuschließen. Sowohl für Abfragen als auch für Netzwerk-Wiederholungsversuche sollte die ursprüngliche task_id verwendet werden, um eine erneute Übermittlung kostenpflichtiger Aufgaben zu vermeiden.
+```python
+import os
+import time
+import requests
+
+base_url = "https://api.acedata.cloud"
+headers = {
+    "Authorization": "Bearer " + os.environ["ACEDATACLOUD_API_TOKEN"],
+    "Accept": "application/json",
+}
+payload = {
+    "action": "generate",
+    "model": "flux-3",
+    "mode": "t2v",
+    "prompt": "A small toy sailboat floating on calm blue water in warm morning light.",
+    "duration": 5,
+    "resolution": "hd",
+    "draft": True,
+    "async": True,
+}
+submitted = requests.post(base_url + "/flux/videos", json=payload, headers=headers, timeout=120)
+submitted.raise_for_status()
+accepted = submitted.json()
+if accepted.get("error"):
+    raise RuntimeError(accepted["error"])
+task_id = accepted["task_id"]
+print("Task ID:", task_id)  # 持久化保存，用于恢复轮询
+
+# 30 分钟是本示例的客户端等待上限，不是服务的完成时限承诺。
+deadline = time.monotonic() + 30 * 60
+while time.monotonic() < deadline:
+    polled = requests.post(
+        base_url + "/flux/tasks",
+        json={"action": "retrieve", "id": task_id},
+        headers=headers,
+        timeout=30,
+    )
+    polled.raise_for_status()
+    task = polled.json()
+    if task.get("error"):
+        raise RuntimeError(task["error"])
+    result = task.get("response") or task.get("result")
+    if isinstance(result, dict) and result.get("success") is True:
+        print("Video:", result["data"][0]["video_url"])
+        print("Usage:", result.get("usage"))
+        print("Cost:", result.get("cost"))
+        break
+    if isinstance(result, dict) and result.get("error"):
+        raise RuntimeError(result["error"])
+    time.sleep(10)
+else:
+    raise TimeoutError("Still processing; resume polling with task_id=" + task_id)
+```
+
+Behandle nach einer Netzwerkzeitüberschreitung einen unbekannten Status nicht als Fehler und sende nicht sofort erneut. Wenn bereits eine task_id erhalten wurde, frage diese Aufgabe weiter ab; protokolliere task_id und trace_id zur Fehleranalyse. Die Abfrage-Schnittstelle selbst erhebt keine Generierungskosten.
+
+## 8. Verwendung von Callbacks
+
+Füge beim Absenden `callback_url` hinzu; nach Abschluss der Aufgabe wird das endgültige JSON-Ergebnis per POST an diese Adresse gesendet. Die Erfolgsstruktur entspricht der zuvor beschriebenen response, bei Fehlern ist error enthalten.
+
+```json
+{
+  "action": "generate",
+  "model": "flux-3",
+  "mode": "t2v",
+  "prompt": "A small sailboat on calm water.",
+  "duration": 5,
+  "resolution": "hd",
+  "draft": true,
+  "callback_url": "https://your-server.example/flux-callback"
+}
+```
+
+Die Callback-Adresse sollte aus dem öffentlichen Internet erreichbar sein. Verarbeite nach Erhalt der Benachrichtigung anhand der task_id idempotent und gib so schnell wie möglich 2xx zurück; die Geschäftsverarbeitung kann in eine Warteschlange gestellt werden. Dieses Dokument erklärt nicht, dass Callbacks eine Signaturauthentifizierung haben: Überprüfe vor sensiblen Vorgängen wie der Gewährung geschäftlicher Vorteile die Ergebnisse durch Abfrage derselben Aufgabe mit deinem eigenen Token. Wenn kein Callback empfangen wurde, kann auch weiter abgefragt werden; nicht erneut generieren.
+
+## 9. Videobearbeitung und Upscaling (derzeit nicht verfügbar)
+
+Diese beiden Vorgänge werden weiterhin über die action von `/flux/videos` ausgewählt. Nachfolgend wird nur der Parametervertrag gezeigt; derzeit sollte man sich nicht auf ihre erfolgreiche Bereitstellung verlassen.
+
+Bearbeitung:
+
+```json
+{
+  "action": "edit",
+  "video": "https://example.com/source.mp4",
+  "prompt": "Change the scene to warm sunset lighting.",
+  "async": true
+}
+```
+
+Upscaling:
 
 ```json
 {
   "action": "upscale",
-  "input_video": "https://example.com/video.mp4",
-  "upscale_factor": 2,
+  "input_video": "https://example.com/source.mp4",
+  "upscale_factor": 1.5,
   "creativity": 0,
   "async": true
 }
 ```
 
-Each operation uses the current FLUX reference pricing coefficients and is billed based on actual output. Failed tasks are not charged generation fees; the final cost of dynamically billed tasks depends on the completed result. Different operations accept only their respective parameters, and an unknown action returns a parameter error.
+`upscale_factor` liegt bei 1.5–3, `creativity=0` steht für präzises Upscaling, `1` für kreatives Upscaling. Es ist kein String, und ein explizites 0 darf nicht weggelassen werden. Die Länge des Bearbeitungs-prompts beträgt 1–4096 Zeichen. Keine Generierungsfelder einmischen.
+
+Am 2026-10-02 gaben Bearbeitungsaufgaben im Praxistest nach Annahme die folgende endgültige response zurück; die Rechnungsprüfung zeigte Kosten von 0. Auch der Praxistest für Upscaling gab denselben Nichtverfügbarkeitsfehler zurück, die Kosten betrugen 0:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "service_unavailable",
+    "message": "The video operation is currently unavailable"
+  },
+  "trace_id": "7374a332-097a-431f-8207-ecee73dbb740",
+  "task_id": "67671cbf-2464-42e1-aa03-afadeb0eabc3"
+}
+```
+
+## 10. Aktuelle Abrechnung und Preisliste
+
+Aktualisierung vom 2026-10-02: Die Stückpreise jeder Stufe der Videoschnittstelle wurden dieses Mal um etwa 6.33 % gesenkt; Abrechnungsmethode, Pakete und Verbrauchsrabattregeln bleiben unverändert. Der cost in den historischen, zuvor gemessenen responses ist die Rechnung zum Zeitpunkt des Aufgabenabschlusses und stellt nicht das aktuelle Angebot dar.
+
+Generierung und Bearbeitung werden nach der **tatsächlich ausgegebenen Sekundenzahl** abgerechnet; Upscaling wird nach den **tatsächlich ausgegebenen MP·Sekunden** abgerechnet. Nachfolgend sind die aktuellen Credits-Stückpreise ohne angewendete Verbrauchsrabatte des Kontos aufgeführt, die mit den Regeln der [Flux-Preisseite](https://platform.acedata.cloud/services/flux?tab=pricing) übereinstimmen.
+
+| Vorgang/Modus                   | Auflösung  | Credits-Stückpreis |
+| ----------------------- | ---- | ------------: |
+| t2v / i2v Entwurf            | hd   |     0.555 / Sekunde |
+| v2v Entwurf                  | hd   |      1.11 / Sekunde |
+| t2v / i2v / entsprechende Entwurfsverbesserung      | hd   |    1.5725 / Sekunde |
+| Wie oben                      | fhd  |    2.6825 / Sekunde |
+| Wie oben                      | qhd  |       3.7 / Sekunde |
+| Wie oben                      | uhd  |       7.4 / Sekunde |
+| v2v / entsprechende Entwurfsverbesserung            | hd   |    3.7925 / Sekunde |
+| Wie oben                      | fhd  |    4.9025 / Sekunde |
+| Wie oben                      | qhd  |    6.0125 / Sekunde |
+| Wie oben                      | uhd  |    8.7875 / Sekunde |
+| Bearbeitung (derzeit nicht verfügbar)                | —    |    0.2775 / Sekunde |
+| Präzises Upscaling creativity=0 (derzeit nicht verfügbar) | Tatsächliche Ausgabe | 0.6475 / MP·Sekunde |
+| Kreatives Upscaling creativity=1 (derzeit nicht verfügbar) | Tatsächliche Ausgabe |  0.925 / MP·Sekunde |
+
+Formel für die Upscaling-Nutzung: `seconds × width × height / 1048576 × fps / 24`, 1 MP = 1024×1024 Pixel. Es wird nicht einfach nach der Dauer des Eingabevideos oder dem Zielfaktor abgerechnet.
+
+Umrechnung in USD: `Tatsächliche Kosten (USD) = cost.amount (Credits) × Paket price / Paket amount`. Aufladestufen und Verbrauchsrabatte beeinflussen den tatsächlichen Preis; Credits können nicht direkt als USD betrachtet werden. Für fehlgeschlagene Aufgaben werden keine Generierungskosten berechnet; der endgültige Betrag richtet sich nach dem Abschlussergebnis und den Aufrufprotokollen der Konsole.
+
+## 11. Häufige Fragen und Fehlerbehebung
+| Situation                       | Empfehlung                                           |
+| ------------------------ | -------------------------------------------- |
+| Parameterfehler (400)                | Überprüfen Sie die Schreibweise von action, mode, duration und das Keyframe-Format; mischen Sie keine Felder verschiedener Vorgänge |
+| Authentifizierungsfehler (401)                | Überprüfen Sie Bearer Token, Anwendungsberechtigungen und ob die Anmeldedaten gültig sind                  |
+| Ablehnung durch Inhaltsprüfung (403)              | Passen Sie Materialien und Prompts an, reichen Sie sie nicht wiederholt unverändert ein                            |
+| Ratenbegrenzung (429)                  | Verringern Sie die Parallelität, versuchen Sie es mit Backoff erneut                                    |
+| service_unavailable (503) | Der aktuelle Vorgang ist nicht verfügbar; angenommene asynchrone Aufgaben können diesen Fehler in der endgültigen response melden        |
+| task_id wurde zurückgegeben, aber es gibt noch kein Video        | Fragen Sie response weiter ab, betrachten Sie HTTP 200 nicht als Abschluss der Generierung             |
+| Entwürfe können nicht wiederverwendet werden                   | Bestätigen Sie, dass es sich um Sie selbst/die aktuelle Anwendung handelt, die Aufgabe abgeschlossen ist, die ursprüngliche Anfrage draft=true hatte, und prüfen Sie, ob der temporäre Cache noch gültig ist  |
+
+Geben Sie bei Rückmeldungen task_id, trace_id, Anfragezeit und maskierte Parameter an, senden Sie keinen API Token. Weitere Möglichkeiten finden Sie im [Flux MCP-Integrationsleitfaden](https://platform.acedata.cloud/documents/flux-mcp).
