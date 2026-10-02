@@ -67,7 +67,6 @@ DOC_ONLY_SERVICES = {"coding"}
 
 # Hold these operations even when the Backend mapping has not yet refreshed.
 PRIVATE_API_PATHS = {
-    "/flux/videos",
     "/kling/apparel",
     "/kling/virtual-try-on",
     "/kling/voices",
@@ -75,7 +74,6 @@ PRIVATE_API_PATHS = {
 }
 
 SKIP_DOC_KEYS = {
-    "flux_generate_video",
     "acedataext",
     # These endpoints are private pending successful production acceptance.
     "kling_apparel",
