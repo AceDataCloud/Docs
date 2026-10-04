@@ -21,6 +21,25 @@ def catalog(language="en", records=None):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_source_and_platform_links_resolve_without_rewriting_examples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            routes = {"development_maestro_videos": Path("guides/maestro/videos.mdx"),
+                      "development_maestro_tasks": Path("guides/maestro/tasks.mdx"),
+                      "development_waiting": Path("guides/platform/waiting.mdx")}
+            for key in ["development_maestro_videos", "development_maestro_tasks"]:
+                file = root / "en" / routes[key]
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("[`Tasks`](development_maestro_tasks.md#result) [Platform](/documents/example) "
+                                "[Pending](development_waiting.md)\n\n`[Example](development_maestro_tasks.md)`")
+            catalogs = {"en": {"records": {key: {"aliases": ["waiting-guide"]} for key in routes}}}
+            sync.rewrite_generated_links(root, catalogs, routes)
+            result = (root / "en" / routes["development_maestro_videos"]).read_text()
+            self.assertIn("[`Tasks`](/en/guides/maestro/tasks#result)", result)
+            self.assertIn("[Platform](https://platform.acedata.cloud/documents/example)", result)
+            self.assertIn("[Pending](https://platform.acedata.cloud/documents/waiting-guide)", result)
+            self.assertIn("`[Example](development_maestro_tasks.md)`", result)
+
     def test_existing_legacy_locale_pages_remain_in_the_reconciliation_scope(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

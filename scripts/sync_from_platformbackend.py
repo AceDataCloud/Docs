@@ -402,7 +402,7 @@ def validate_manifest(manifest: Any) -> None:
             raise RuntimeError("Invalid Docs sync transaction item")
         relative = Path(item["relative"])
         parts = relative.parts
-        allowed = relative in {Path("openapi"), Path("docs.json")} or (len(parts) == 2 and parts[0] in LANGUAGE_SOURCE_DIRS and parts[1] in {"guides", "mcp"})
+        allowed = relative in {Path("openapi"), Path("docs.json")} or (len(parts) == 2 and parts[0] in LANGUAGE_SOURCE_DIRS and parts[1] in {"guides", "mcp", "api-reference.mdx"})
         if relative.is_absolute() or ".." in parts or not allowed or item["relative"] in seen:
             raise RuntimeError("Unsafe Docs sync transaction path")
         seen.add(item["relative"])
@@ -991,9 +991,9 @@ def guide_description(output_language: str, service_name: str) -> str:
 
 
 def sanitize_html_for_mdx(content: str) -> str:
-    parts = re.split(r"(^```.*?^```|^~~~.*?^~~~)", content, flags=re.MULTILINE | re.DOTALL)
+    parts = re.split(r"(^```.*?^```|^~~~.*?^~~~|^\$\$.*?^\$\$)", content, flags=re.MULTILINE | re.DOTALL)
     for index, part in enumerate(parts):
-        if part.startswith(("```", "~~~")):
+        if part.startswith(("```", "~~~", "$$")):
             continue
         part = re.sub(r"(<[a-zA-Z][^>]*)\bclass=", r"\1className=", part)
         for tag in ("img", "br", "hr", "input", "source", "meta", "link"):
@@ -1005,7 +1005,7 @@ def sanitize_html_for_mdx(content: str) -> str:
         # Keep inline code unchanged, just as fenced examples are unchanged.
         escaped = []
         cursor = 0
-        for match in re.finditer(r"(?P<ticks>`+).*?(?P=ticks)", part, flags=re.DOTALL):
+        for match in re.finditer(r"(?P<ticks>`+).*?(?P=ticks)|\$[^$\n]+\$", part, flags=re.DOTALL):
             escaped.append(part[cursor:match.start()].replace("{", "&#123;").replace("}", "&#125;"))
             escaped.append(match[0])
             cursor = match.end()
@@ -1150,6 +1150,13 @@ def refresh_generated_navigation(root: Path, languages: list[str], exact_records
                     directory = f"api-reference/{spec.stem}" if locale == "zh-Hans" else f"{locale}/api-reference/{spec.stem}"
                     api_tab["groups"].append({"group": load_json(spec)["info"]["title"],
                                                "openapi": {"source": source, "directory": directory}})
+            index_path = f"{locale}/api-reference"
+            cards = [f'<Card title="{html.escape(load_json(spec)["info"]["title"], quote=True)}" href="/openapi/{spec.name}">OpenAPI JSON</Card>'
+                     for spec in sorted((root / "openapi").glob("*.json"))]
+            write_text(root / f"{index_path}.mdx", "---\ntitle: " + yaml_quote(api_tab["tab"])
+                       + '\n---\n\n<CardGroup cols={2}>\n' + "\n".join(cards) + "\n</CardGroup>\n")
+            if not any(index_path in group.get("pages", []) for group in api_tab["groups"]):
+                api_tab["groups"].insert(0, {"group": api_tab["tab"], "pages": [index_path]})
         prefixes = (f"{locale}/guides/", f"{locale}/mcp/")
 
         def prune(value: Any) -> None:
@@ -1184,6 +1191,50 @@ def refresh_generated_navigation(root: Path, languages: list[str], exact_records
     write_json(root / "docs.json", config)
 
 
+def rewrite_generated_links(root: Path, catalogs: dict[str, Any], routes: dict[str, Path]) -> None:
+    """Resolve source-file and platform-relative links in the output namespace."""
+    for language, catalog in catalogs.items():
+        def destination(target: str) -> str:
+            parsed = urlsplit(target)
+            if parsed.scheme or parsed.netloc or not parsed.path:
+                return target
+            if parsed.path.startswith("/documents/"):
+                return "https://platform.acedata.cloud" + target
+            key = Path(parsed.path).name.removesuffix(".md").removesuffix(".mdx")
+            if key in routes:
+                relative = Path(language) / routes[key]
+                if (root / relative).is_file():
+                    path = "/" + str(relative.with_suffix(""))
+                else:
+                    aliases = catalog["records"][key].get("aliases") or []
+                    if not aliases:
+                        return target
+                    path = "https://platform.acedata.cloud/documents/" + aliases[0]
+                return path + ("?" + parsed.query if parsed.query else "") + ("#" + parsed.fragment if parsed.fragment else "")
+            if parsed.path.startswith("/") and (root / language / (parsed.path.lstrip("/") + ".mdx")).is_file():
+                return f"/{language}" + target
+            return target
+
+        for relative in routes.values():
+            filename = root / language / relative
+            if not filename.is_file():
+                continue
+            content = filename.read_text(encoding="utf-8")
+            parts = re.split(r"(^```.*?^```|^~~~.*?^~~~)", content, flags=re.MULTILINE | re.DOTALL)
+            tokens = re.compile(r'''(?P<link>\[[^\]\n]*\]\()(?P<target>[^\s)]+)(?P<end>[^)]*\))|(?P<code>`+[^`\n]*`+)|(?P<href>href=["'])(?P<value>[^"']+)(?P<quote>["'])''')
+            def rewrite_token(match: re.Match) -> str:
+                if match["link"]:
+                    return match["link"] + destination(match["target"]) + match["end"]
+                if match["code"]:
+                    return match[0]
+                return match["href"] + destination(match["value"]) + match["quote"]
+            for index, part in enumerate(parts):
+                if part.startswith(("```", "~~~")):
+                    continue
+                parts[index] = tokens.sub(rewrite_token, part)
+            write_text(filename, "".join(parts))
+
+
 def get_docs_languages(output_dir: Path) -> list[str]:
     docs_json = load_json(output_dir / "docs.json")
     languages = [entry["language"] for entry in docs_json.get("navigation", {}).get("languages", [])]
@@ -1198,6 +1249,7 @@ def get_docs_languages(output_dir: Path) -> list[str]:
 def managed_paths(languages: list[str]) -> list[Path]:
     paths = [Path("openapi"), Path("docs.json")]
     paths.extend(Path(language) / folder for language in languages for folder in ("guides", "mcp"))
+    paths.extend(Path(language) / "api-reference.mdx" for language in languages)
     return paths
 
 
@@ -1257,7 +1309,9 @@ def main() -> int:
     managed = managed_paths(languages)
     with tempfile.TemporaryDirectory(prefix="docs-sync-", dir=output_dir.parent) as temporary_directory:
         staging_dir = Path(temporary_directory) / "output"
-        shutil.copytree(output_dir, staging_dir, ignore=shutil.ignore_patterns(".git"))
+        shutil.copytree(output_dir, staging_dir, ignore=shutil.ignore_patterns(
+            ".git", "node_modules", ".cache", "__pycache__", "test-results", "playwright-report"
+        ))
         clear_managed_paths(staging_dir, managed)
         # docs.json is committed atomically with generated pages, not cleared.
         shutil.copy2(output_dir / "docs.json", staging_dir / "docs.json")
@@ -1265,6 +1319,7 @@ def main() -> int:
         results = sync_document_pages(backend_dir, staging_dir, output_dir, catalogs, routes,
                                       {service["alias"]: service for service in services})
         refresh_generated_navigation(staging_dir, languages, exact_records)
+        rewrite_generated_links(staging_dir, catalogs, routes)
         neutralize_generated_tree(staging_dir, denylist)
         validate_generated_tree(staging_dir, denylist)
         pending = [item for item in results if item["status"] != "ready"]
