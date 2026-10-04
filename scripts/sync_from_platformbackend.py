@@ -742,8 +742,7 @@ def get_documented_service_aliases(output_dir: Path) -> set[str]:
 def load_services(backend_dir: Path, documented_aliases: set[str]) -> list[dict[str, Any]]:
     services = load_json(backend_dir / "cost" / "service_api_mapping.json")
     return [
-        service
-        for service in services
+        service for service in services
         if service.get("alias") not in EXCLUDED_SERVICES
         and (not service.get("private") or service.get("alias") in documented_aliases)
     ]
@@ -784,7 +783,7 @@ def merge_openapi_specs(backend_dir: Path, service: dict[str, Any]) -> dict[str,
     }
 
     for api in apis:
-        if api.get("private"):
+        if api.get("private") or not api.get("documented", True):
             continue
         spec = load_openapi_spec(backend_dir, api["id"])
         if not spec:
@@ -867,6 +866,11 @@ def build_doc_service_map(
     alias_norms = sorted(((service["alias"], normalize(service["alias"])) for service in services), key=lambda item: -len(item[1]))
     result: dict[str, str | None] = {}
     zh_docs = backend_dir / "docs"
+    hidden = {
+        Path(api["guide_source"]).stem.removeprefix("development_")
+        for service in services for api in service.get("apis", [])
+        if api.get("guide_source") and (api.get("private") or not api.get("documented", True))
+    }
 
     markdown_files = sorted(zh_docs.glob("development_*.md"))
     if not markdown_files:
@@ -876,7 +880,7 @@ def build_doc_service_map(
         doc_key = markdown_file.stem.removeprefix("development_")
         if doc_key.endswith("_title"):
             continue
-        if doc_key in SKIP_DOC_KEYS:
+        if doc_key in SKIP_DOC_KEYS or doc_key in hidden:
             result[doc_key] = None
             continue
         exact = (exact_records or {}).get(doc_key)
