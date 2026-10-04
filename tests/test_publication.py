@@ -21,6 +21,13 @@ def catalog(language="en", records=None):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_existing_legacy_locale_pages_remain_in_the_reconciliation_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docs.json").write_text(json.dumps({"navigation": {"languages": [{"language": "en"}]}}))
+            (root / "el/guides").mkdir(parents=True)
+            self.assertEqual(sync.get_docs_languages(root), ["en", "el"])
+
     def test_partial_reconciliation_publishes_ready_pages_but_returns_nonzero(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -55,6 +55,9 @@ LANGUAGE_SOURCE_DIRS: dict[str, str] = {
     "sv": "sv",
     "uk": "uk",
     "pl": "pl",
+    "el": "el",
+    "fi": "fi",
+    "sr": "sr",
 }
 
 EXCLUDED_SERVICES = {
@@ -988,15 +991,26 @@ def guide_description(output_language: str, service_name: str) -> str:
 
 
 def sanitize_html_for_mdx(content: str) -> str:
-    parts = re.split(r"(^```.*?^```)", content, flags=re.MULTILINE | re.DOTALL)
+    parts = re.split(r"(^```.*?^```|^~~~.*?^~~~)", content, flags=re.MULTILINE | re.DOTALL)
     for index, part in enumerate(parts):
-        if part.startswith("```"):
+        if part.startswith(("```", "~~~")):
             continue
         part = re.sub(r"(<[a-zA-Z][^>]*)\bclass=", r"\1className=", part)
         for tag in ("img", "br", "hr", "input", "source", "meta", "link"):
             part = re.sub(rf"(<{tag}\b[^>]*?)(?<!/)>", r"\1 />", part)
         part = re.sub(r"<(https?://[^>]+)>", r"[\1](\1)", part)
         part = re.sub(r"<(?![a-zA-Z/!])", r"&lt;", part)
+        # These sources are Markdown, not executable JSX. Literal braces in
+        # prose (including malformed translated code fences) must stay text.
+        # Keep inline code unchanged, just as fenced examples are unchanged.
+        escaped = []
+        cursor = 0
+        for match in re.finditer(r"(?P<ticks>`+).*?(?P=ticks)", part, flags=re.DOTALL):
+            escaped.append(part[cursor:match.start()].replace("{", "&#123;").replace("}", "&#125;"))
+            escaped.append(match[0])
+            cursor = match.end()
+        escaped.append(part[cursor:].replace("{", "&#123;").replace("}", "&#125;"))
+        part = "".join(escaped)
         parts[index] = part
     return "".join(parts)
 
@@ -1173,7 +1187,12 @@ def refresh_generated_navigation(root: Path, languages: list[str], exact_records
 def get_docs_languages(output_dir: Path) -> list[str]:
     docs_json = load_json(output_dir / "docs.json")
     languages = [entry["language"] for entry in docs_json.get("navigation", {}).get("languages", [])]
-    return [language for language in languages if language in LANGUAGE_SOURCE_DIRS]
+    result = [language for language in languages if language in LANGUAGE_SOURCE_DIRS]
+    # Unlisted legacy locale URLs are still served by Mintlify. Existing
+    # generated directories must not remain permanently stale or unparseable.
+    result.extend(language for language in LANGUAGE_SOURCE_DIRS if language not in result
+                  and any((output_dir / language / folder).is_dir() for folder in ("guides", "mcp")))
+    return result
 
 
 def managed_paths(languages: list[str]) -> list[Path]:
