@@ -1,0 +1,75 @@
+---
+title: "WhatsApp 帳號代理使用指南"
+description: "Platform 整合指南 - Ace Data Cloud"
+---
+
+WhatsApp 帳號代理連線**你本人授權的 WhatsApp 帳號**，把既有對話、聯絡人和訊息提供給你的 Agent。每個部署執行個體有獨立的連線、存取權杖和持久儲存。服務本身不包含 AI，也不會自動回覆、群發或主動聯絡任何人。
+
+> 本服務使用 WhatsApp 關聯裝置功能，並非 WhatsApp 官方 Business API；帳號接入方式不受 WhatsApp 官方支援。協議變更、裝置撤銷或帳號限制可能導致中斷。只連線你擁有的帳號，遵守 WhatsApp 條款，不用於垃圾訊息或未經同意的批量發送。
+
+## 部署與本人授權
+
+1. 在控制台建立「WhatsApp 帳號代理」應用程式，開通訂閱後點擊部署。執行個體資源由平台自動設定。
+2. 執行個體就緒後，在管理頁面查看 QR Code。用本人手機開啟 WhatsApp **設定 → 關聯裝置 → 關聯裝置**並掃碼。也可輸入自己的手機號碼請求配對碼，再在手機端確認。
+3. 管理頁面狀態變為「已連線」後，複製專屬 MCP 位址和 Bearer 存取權杖。
+4. 登出帳號會嘗試撤銷關聯裝置並清除本機對話與歷史。若登出結果不確定，請先在手機的「關聯裝置」中撤銷該裝置；銷毀執行個體會移除它的持久磁碟區。
+
+QR Code 和配對碼只能交給帳號本人。正常重新啟動會重複使用該執行個體的對話；手機端撤銷裝置後，執行個體會重新要求授權。
+
+## 驗證與能力
+
+除 `/health` 和 `/readyz` 外，REST、MCP、掃碼與配對介面都要求 `Authorization: Bearer &lt;存取權杖>`。權杖只放請求標頭，不放 URL 或日誌。`GET /api/capabilities` 給出目前執行個體實際支援的操作與保留上限。
+
+目前支援：帳號和連線狀態、同步到關聯裝置的對話與聯絡人、即時訊息事件、本機保留訊息讀取、文字與不超過 10 MiB 的媒體收發、引用回覆、表情回應、標記已讀，以及帳號權限和 WhatsApp 目前規則允許的本人訊息編輯/撤回、群組資訊和單一成員操作。群組修改仍由 WhatsApp 驗證成員和管理員權限。
+
+**歷史範圍**：只能讀取手機端實際同步到關聯裝置的訊息，以及代理在線期間收到的訊息。不能保證取得全部舊訊息；本機最多保留最近 5,000 則訊息和 2,000 個事件。媒體中繼資料存在時，原始媒體也可能已無法下載。
+
+## MCP
+
+部署管理頁面提供 `https://whatsapp-bot-&lt;執行個體 ID>.app.acedata.cloud/mcp`。在支援 Streamable HTTP 和自訂請求標頭的 MCP 用戶端設定該位址，並新增相同的 Bearer 權杖。MCP 工具包括 `whatsapp_capabilities`、`whatsapp_whoami`、`whatsapp_chats`、`whatsapp_contacts`、`whatsapp_messages`、`whatsapp_events`、`whatsapp_send`、`whatsapp_send_status`、`whatsapp_media`、`whatsapp_mark_read`、`whatsapp_group` 與 `whatsapp_group_update`。
+
+Agent 讀取訊息可以依自己的任務執行；向第三方發送訊息、修改訊息或變更群組前，應讓使用者確認具體對象和內容。設定好 MCP 不會自行觸發任何發送。
+
+## REST 範例
+
+```bash
+BASE='https://whatsapp-bot-<实例 ID>.app.acedata.cloud'
+TOKEN='<管理页显示的访问令牌>'
+
+curl "$BASE/api/auth/status" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats?limit=20" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats/123%40s.whatsapp.net/messages?limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+僅向**自己的既有對話或聯絡人**發信。`target` 應使用 `/api/chats` 或 `/api/contacts` 傳回的 JID；不可使用任意手機號碼進行冷發。請先由本人確認收件人和內容。
+
+```bash
+curl -X POST "$BASE/api/messages" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: my-confirmed-message-20261004-1" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"123@s.whatsapp.net","action":"text","text":"你好"}'
+```
+
+`action` 可以是 `text`、`media`、`edit`、`revoke` 或 `reaction`。媒體發送傳 `media_base64` 與 `mime_type`；回覆傳 `reply_to`；編輯和撤回傳本機可查到的本人 `message_id`；回應傳 `message_id` 與 `emoji`。可透過 `GET /api/chats/{target}/messages/{id}/media` 下載媒體，透過 `POST /api/chats/{target}/read` 標記已讀。
+
+發送必須帶 8–128 字元的 `Idempotency-Key`。傳回的 `message_id` 固定，狀態為 `pending`、`accepted`、`unknown`、`delivered` 或 `read`。`accepted` 只表示本機連線接受了發送，**不代表對方收到**。發生 `unknown` 時查詢 `GET /api/sends/{Idempotency-Key}` 和訊息事件；不要換一個新鍵再發同一則訊息，以免重複。代理不會自動重發不確定的操作。
+
+發送記錄不會被自動淘汰；達到 100,000 筆後執行個體拒絕新的發送（HTTP 507），避免舊冪等鍵被清理後發生重複發送。
+
+## 即時事件
+
+`GET /api/events?after=&lt;上次 next_cursor>&wait_ms=25000` 支援最長 25 秒長輪詢；`GET /api/events/stream?after=&lt;游標>` 提供 SSE。事件含單調遞增的 `seq`。回應裡的 `next_cursor` 應儲存到 Agent 的持久狀態；若 `gap=true`，說明舊事件已被清理，應重新拉取目前對話狀態並從 `oldest_cursor` 繼續。訊息事件、發送狀態和連線狀態會獨立回報。
+
+## 常見狀態
+
+| HTTP / 狀態 | 處理方式                              |
+| --------- | --------------------------------- |
+| 401       | 檢查 Bearer 權杖和請求標頭。                 |
+| 404       | 目標對話、聯絡人或訊息不在本執行個體本機記錄中。            |
+| 409       | 帳號未連線，或相同冪等鍵對應了不同內容。              |
+| 413       | 媒體超過 10 MiB。                      |
+| 403 / 429 | 操作被拒絕或觸發頻率限制；若發生在發送時，仍要先查該冪等鍵的結果。 |
+| 502 / 503 | 連線或遠端操作失敗；發送結果不確定時先查操作狀態與事件。      |
+
+不保證無限歷史、所有媒體長期可用，或所有群組操作始終被 WhatsApp 接受。需要檢查具體執行個體時，先看 `/api/auth/status` 與 `/api/capabilities`。

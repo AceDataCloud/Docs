@@ -1,0 +1,75 @@
+---
+title: "Guida all'uso del proxy dell'account WhatsApp"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Il proxy dell'account WhatsApp connette **il tuo account WhatsApp da te autorizzato**, fornendo al tuo Agent le conversazioni, i contatti e i messaggi esistenti. Ogni istanza distribuita dispone di connessione, token di accesso e archiviazione persistente indipendenti. Il servizio stesso non include IA e non risponderà automaticamente, non invierà messaggi di massa né contatterà attivamente nessuno.
+
+> Questo servizio utilizza la funzionalità dei dispositivi collegati di WhatsApp e non l'API Business ufficiale di WhatsApp; questa modalità di connessione dell'account non è supportata ufficialmente da WhatsApp. Modifiche al protocollo, revoca del dispositivo o limitazioni dell'account possono causare interruzioni. Collega solo account di tua proprietà, rispetta i termini di WhatsApp e non utilizzarlo per messaggi indesiderati o invii di massa senza consenso.
+
+## Distribuzione e autorizzazione personale
+
+1. Crea l'applicazione «Proxy dell'account WhatsApp» nella console, attiva l'abbonamento e fai clic su distribuisci. Le risorse dell'istanza vengono configurate automaticamente dalla piattaforma.
+2. Quando l'istanza è pronta, visualizza il codice QR nella pagina di gestione. Apri WhatsApp sul tuo telefono **Impostazioni → Dispositivi collegati → Collega un dispositivo** e scansiona il codice. Puoi anche inserire il tuo numero di telefono per richiedere un codice di associazione, quindi confermare sul telefono.
+3. Dopo che lo stato nella pagina di gestione diventa «Connesso», copia l'indirizzo MCP esclusivo e il token di accesso Bearer.
+4. La disconnessione dall'account tenterà di revocare il dispositivo collegato e di cancellare la sessione locale e la cronologia. Se il risultato della disconnessione è incerto, revoca prima il dispositivo in «Dispositivi collegati» sul telefono; la distruzione dell'istanza rimuoverà il suo volume persistente.
+
+Il codice QR e il codice di associazione possono essere consegnati solo al titolare dell'account. Un riavvio normale riutilizzerà la sessione di tale istanza; dopo che il dispositivo viene revocato sul telefono, l'istanza richiederà nuovamente l'autorizzazione.
+
+## Autenticazione e funzionalità
+
+Ad eccezione di `/health` e `/readyz`, le interfacce REST, MCP, di scansione del codice e di associazione richiedono tutte `Authorization: Bearer <token di accesso>`. Inserisci il token solo nell'intestazione della richiesta, non nell'URL o nei log. `GET /api/capabilities` mostra le operazioni effettivamente supportate dall'istanza corrente e i limiti di conservazione.
+
+Attualmente sono supportati: stato dell'account e della connessione, conversazioni e contatti sincronizzati con il dispositivo collegato, eventi di messaggi in tempo reale, lettura dei messaggi conservati localmente, invio e ricezione di testo e contenuti multimediali fino a 10 MiB, risposte con citazione, reazioni emoji, contrassegno come letto, nonché modifica/revoca dei propri messaggi, informazioni sui gruppi e operazioni su singoli membri consentite dalle autorizzazioni dell'account e dalle regole correnti di WhatsApp. Le modifiche ai gruppi vengono comunque verificate da WhatsApp in base alle autorizzazioni dei membri e degli amministratori.
+
+**Ambito della cronologia**: possono essere letti solo i messaggi effettivamente sincronizzati dal telefono con il dispositivo collegato e i messaggi ricevuti mentre il proxy è online. Non è possibile garantire l'ottenimento di tutti i vecchi messaggi; localmente vengono conservati al massimo gli ultimi 5.000 messaggi e 2.000 eventi. Quando sono presenti metadati multimediali, il contenuto multimediale originale potrebbe comunque non essere più scaricabile.
+
+## MCP
+
+La pagina di gestione della distribuzione fornisce `https://whatsapp-bot-<ID istanza>.app.acedata.cloud/mcp`. Configura questo indirizzo in un client MCP che supporti Streamable HTTP e intestazioni di richiesta personalizzate, quindi aggiungi lo stesso token Bearer. Gli strumenti MCP includono `whatsapp_capabilities`, `whatsapp_whoami`, `whatsapp_chats`, `whatsapp_contacts`, `whatsapp_messages`, `whatsapp_events`, `whatsapp_send`, `whatsapp_send_status`, `whatsapp_media`, `whatsapp_mark_read`, `whatsapp_group` e `whatsapp_group_update`.
+
+L'Agent può leggere i messaggi in base alle proprie attività; prima di inviare messaggi a terzi, modificare messaggi o apportare modifiche ai gruppi, deve fare confermare all'utente il destinatario e il contenuto specifici. La configurazione di MCP non attiverà autonomamente alcun invio.
+
+## Esempi REST
+
+```bash
+BASE='https://whatsapp-bot-<实例 ID>.app.acedata.cloud'
+TOKEN='<管理页显示的访问令牌>'
+
+curl "$BASE/api/auth/status" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats?limit=20" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats/123%40s.whatsapp.net/messages?limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+Invia messaggi solo a **conversazioni o contatti esistenti di tua proprietà**. `target` deve utilizzare il JID restituito da `/api/chats` o `/api/contacts`; non è possibile utilizzare numeri di telefono arbitrari per invii a freddo. Fai prima confermare al titolare dell'account il destinatario e il contenuto.
+
+```bash
+curl -X POST "$BASE/api/messages" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: my-confirmed-message-20261004-1" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"123@s.whatsapp.net","action":"text","text":"你好"}'
+```
+
+`action` può essere `text`, `media`, `edit`, `revoke` o `reaction`. Per l'invio di contenuti multimediali, passa `media_base64` e `mime_type`; per rispondere, passa `reply_to`; per modificare e revocare, passa il proprio `message_id` rintracciabile localmente; per reagire, passa `message_id` e `emoji`. È possibile scaricare i contenuti multimediali tramite `GET /api/chats/{target}/messages/{id}/media` e contrassegnare come letto tramite `POST /api/chats/{target}/read`.
+
+L'invio deve includere una `Idempotency-Key` di 8–128 caratteri. Il `message_id` restituito è fisso e lo stato può essere `pending`, `accepted`, `unknown`, `delivered` o `read`. `accepted` indica solo che la connessione locale ha accettato l'invio, **non che il destinatario lo abbia ricevuto**. Quando si verifica `unknown`, consulta `GET /api/sends/{Idempotency-Key}` e gli eventi dei messaggi; non utilizzare una nuova chiave per inviare nuovamente lo stesso messaggio, per evitare duplicati. Il proxy non ritenterà automaticamente le operazioni incerte.
+
+I record di invio non vengono eliminati automaticamente; dopo aver raggiunto 100.000 record, l'istanza rifiuta nuovi invii (HTTP 507), evitando invii duplicati dopo la pulizia delle vecchie chiavi di idempotenza.
+
+## Eventi in tempo reale
+
+`GET /api/events?after=<ultimo next_cursor>&wait_ms=25000` supporta il long polling fino a 25 secondi; `GET /api/events/stream?after=<cursore>` fornisce SSE. Gli eventi contengono un `seq` monotonicamente crescente. Il `next_cursor` nella risposta deve essere salvato nello stato persistente dell'Agent; se `gap=true`, significa che i vecchi eventi sono stati eliminati, pertanto occorre recuperare nuovamente lo stato attuale delle conversazioni e continuare da `oldest_cursor`. Gli eventi dei messaggi, lo stato di invio e lo stato della connessione vengono riportati separatamente.
+
+## Stati comuni
+
+| HTTP / stato | Modalità di gestione                              |
+| --------- | --------------------------------- |
+| 401       | Controlla il token Bearer e l'intestazione della richiesta.                 |
+| 404       | La conversazione, il contatto o il messaggio di destinazione non è presente nei record locali di questa istanza.            |
+| 409       | L'account non è connesso oppure la stessa chiave di idempotenza corrisponde a contenuti diversi.              |
+| 413       | Il contenuto multimediale supera 10 MiB.                      |
+| 403 / 429 | L'operazione è stata rifiutata o ha attivato un limite di frequenza; se ciò avviene durante l'invio, consulta comunque prima il risultato di quella chiave di idempotenza. |
+| 502 / 503 | Connessione o operazione remota non riuscita; se il risultato dell'invio è incerto, consulta prima lo stato dell'operazione e gli eventi.      |
+
+Non è garantita una cronologia illimitata, la disponibilità a lungo termine di tutti i contenuti multimediali o che tutte le operazioni sui gruppi vengano sempre accettate da WhatsApp. Quando devi controllare un'istanza specifica, consulta prima `/api/auth/status` e `/api/capabilities`.

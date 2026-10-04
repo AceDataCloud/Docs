@@ -1,0 +1,75 @@
+---
+title: "Guía de uso del agente de cuenta de WhatsApp"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+El agente de cuenta de WhatsApp conecta **tu cuenta de WhatsApp autorizada por ti mismo** y proporciona a tu Agent las conversaciones, contactos y mensajes existentes. Cada instancia desplegada tiene conexiones, tokens de acceso y almacenamiento persistente independientes. El servicio en sí no incluye IA, ni responde automáticamente, envía mensajes masivos ni contacta activamente a nadie.
+
+> Este servicio utiliza la capacidad de dispositivos vinculados de WhatsApp, y no la API oficial de WhatsApp Business; el método de acceso a la cuenta no está respaldado oficialmente por WhatsApp. Los cambios de protocolo, la revocación de dispositivos o las restricciones de la cuenta pueden causar interrupciones. Conecta únicamente cuentas que poseas, cumple los términos de WhatsApp y no lo utilices para mensajes no deseados ni envíos masivos sin consentimiento.
+
+## Despliegue y autorización personal
+
+1. Crea la aplicación «Agente de cuenta de WhatsApp» en la consola, activa la suscripción y haz clic en desplegar. Los recursos de la instancia son configurados automáticamente por la plataforma.
+2. Una vez que la instancia esté lista, consulta el código QR en la página de administración. Abre WhatsApp en tu propio teléfono en **Configuración → Dispositivos vinculados → Vincular un dispositivo** y escanea el código. También puedes introducir tu propio número de teléfono para solicitar un código de emparejamiento y luego confirmarlo en el teléfono.
+3. Cuando el estado de la página de administración cambie a «Conectado», copia la dirección MCP exclusiva y el token de acceso Bearer.
+4. Cerrar sesión intentará revocar el dispositivo vinculado y eliminar la sesión local y el historial. Si el resultado del cierre de sesión es incierto, primero revoca ese dispositivo en «Dispositivos vinculados» del teléfono; destruir la instancia eliminará su volumen persistente.
+
+El código QR y el código de emparejamiento solo pueden entregarse al titular de la cuenta. Un reinicio normal reutilizará la sesión de esa instancia; después de revocar el dispositivo desde el teléfono, la instancia volverá a requerir autorización.
+
+## Autenticación y capacidades
+
+Excepto `/health` y `/readyz`, las interfaces REST, MCP, de escaneo y de emparejamiento requieren `Authorization: Bearer <token de acceso>`. El token solo debe colocarse en el encabezado de la solicitud, no en la URL ni en los registros. `GET /api/capabilities` proporciona las operaciones realmente compatibles con la instancia actual y los límites de retención.
+
+Actualmente se admite: estado de cuenta y conexión, conversaciones y contactos sincronizados con el dispositivo vinculado, eventos de mensajes en tiempo real, lectura de mensajes retenidos localmente, envío y recepción de texto y medios de no más de 10 MiB, respuestas citadas, reacciones con emoji, marcado como leído, así como edición/revocación de mensajes propios, información de grupos y operaciones de un solo miembro permitidas por los permisos de la cuenta y las reglas actuales de WhatsApp. Las modificaciones de grupos siguen siendo validadas por WhatsApp según los permisos de miembros y administradores.
+
+**Alcance del historial**: solo pueden leerse los mensajes realmente sincronizados con el dispositivo vinculado desde el teléfono, así como los mensajes recibidos mientras el agente está en línea. No se puede garantizar la obtención de todos los mensajes antiguos; localmente se conservan como máximo los 5.000 mensajes más recientes y 2.000 eventos. Cuando existen metadatos de medios, es posible que los medios originales ya no puedan descargarse.
+
+## MCP
+
+La página de administración del despliegue proporciona `https://whatsapp-bot-&lt;实例 ID>.app.acedata.cloud/mcp`. Configura esta dirección en un cliente MCP compatible con Streamable HTTP y encabezados de solicitud personalizados, y añade el mismo token Bearer. Las herramientas MCP incluyen `whatsapp_capabilities`, `whatsapp_whoami`, `whatsapp_chats`, `whatsapp_contacts`, `whatsapp_messages`, `whatsapp_events`, `whatsapp_send`, `whatsapp_send_status`, `whatsapp_media`, `whatsapp_mark_read`, `whatsapp_group` y `whatsapp_group_update`.
+
+El Agent puede leer mensajes según sus propias tareas; antes de enviar mensajes a terceros, modificar mensajes o cambiar grupos, debe pedir al usuario que confirme el destinatario y el contenido específicos. Configurar MCP no activará ningún envío por sí mismo.
+
+## Ejemplos REST
+
+```bash
+BASE='https://whatsapp-bot-<实例 ID>.app.acedata.cloud'
+TOKEN='<管理页显示的访问令牌>'
+
+curl "$BASE/api/auth/status" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats?limit=20" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats/123%40s.whatsapp.net/messages?limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+Envía mensajes únicamente a **tus propias conversaciones o contactos existentes**. `target` debe utilizar el JID devuelto por `/api/chats` o `/api/contacts`; no se puede utilizar cualquier número de teléfono para envíos en frío. Primero, el titular debe confirmar el destinatario y el contenido.
+
+```bash
+curl -X POST "$BASE/api/messages" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: my-confirmed-message-20261004-1" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"123@s.whatsapp.net","action":"text","text":"你好"}'
+```
+
+`action` puede ser `text`, `media`, `edit`, `revoke` o `reaction`. Para el envío de medios, proporciona `media_base64` y `mime_type`; para respuestas, proporciona `reply_to`; para edición y revocación, proporciona el `message_id` propio que pueda consultarse localmente; para reacciones, proporciona `message_id` y `emoji`. Puedes descargar medios mediante `GET /api/chats/{target}/messages/{id}/media` y marcarlos como leídos mediante `POST /api/chats/{target}/read`.
+
+Los envíos deben incluir una `Idempotency-Key` de 8 a 128 caracteres. El `message_id` devuelto es fijo, y el estado es `pending`, `accepted`, `unknown`, `delivered` o `read`. `accepted` solo indica que la conexión local aceptó el envío y **no significa que el destinatario lo haya recibido**. Cuando ocurra `unknown`, consulta `GET /api/sends/{Idempotency-Key}` y los eventos de mensajes; no uses una clave nueva para reenviar el mismo mensaje, a fin de evitar duplicados. El agente no reintentará automáticamente operaciones inciertas.
+
+Los registros de envío no se eliminan automáticamente; después de alcanzar 100.000 registros, la instancia rechaza nuevos envíos (HTTP 507), para evitar envíos duplicados después de que se limpien claves de idempotencia antiguas.
+
+## Eventos en tiempo real
+
+`GET /api/events?after=&lt;último next_cursor>&wait_ms=25000` admite sondeo largo de hasta 25 segundos; `GET /api/events/stream?after=<cursor>` proporciona SSE. Los eventos contienen un `seq` que aumenta monótonamente. El `next_cursor` de la respuesta debe guardarse en el estado persistente del Agent; si `gap=true`, significa que los eventos antiguos se han eliminado, y se debe volver a obtener el estado actual de la conversación y continuar desde `oldest_cursor`. Los eventos de mensajes, el estado de envío y el estado de conexión se informan de forma independiente.
+
+## Estados comunes
+
+| HTTP / estado | Forma de manejo                              |
+| --------- | --------------------------------- |
+| 401       | Comprueba el token Bearer y el encabezado de solicitud.                 |
+| 404       | La conversación, el contacto o el mensaje de destino no está en el registro local de esta instancia.            |
+| 409       | La cuenta no está conectada, o la misma clave de idempotencia corresponde a contenido diferente.              |
+| 413       | El medio supera los 10 MiB.                      |
+| 403 / 429 | La operación fue rechazada o activó un límite de frecuencia; si ocurre al enviar, primero se debe consultar el resultado de esa clave de idempotencia. |
+| 502 / 503 | Falló la conexión o la operación remota; si el resultado del envío es incierto, primero consulta el estado de la operación y los eventos.      |
+
+No se garantiza un historial ilimitado, la disponibilidad a largo plazo de todos los medios ni que todas las operaciones de grupo sean siempre aceptadas por WhatsApp. Cuando necesites comprobar una instancia específica, primero consulta `/api/auth/status` y `/api/capabilities`.
