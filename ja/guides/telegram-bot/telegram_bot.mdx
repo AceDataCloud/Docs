@@ -1,0 +1,148 @@
+---
+title: "Telegram アカウントプロキシ使用ガイド"
+description: "Telegram Account Proxy API guide - Ace Data Cloud"
+---
+
+Telegram アカウントプロキシは、あなた自身が所有する個人 Telegram アカウントに対して、独立した常駐型の MCP および REST インターフェースを提供します。各インスタンスは 1 つのアカウントのみを提供します。コンテナ内には AI は含まれず、ログインセッションはそのインスタンスの独立した永続ボリュームに保存されます。
+
+> これは Telegram Bot API ボットではありません。スパムメッセージ、大量のコールド送信、または Telegram の制限の回避には使用しないでください。第三者にコンテンツを送信、編集、または削除する前に、あなたの Agent が明確な確認を取得する必要があります。
+
+## デプロイとログイン
+
+1. [コンソール → アプリケーション](https://platform.acedata.cloud/console/applications)で Telegram アカウントプロキシを作成し、サブスクリプションを有効化した後、デプロイをクリックします。インスタンスリソースはプラットフォームによって自動的に設定されます。
+2. インスタンスの準備ができた後、「ログイン QR コードを生成」をクリックします。QR コードは短期間のみ有効で、期限切れ後に再生成できます。
+3. Telegram で**設定 → デバイス → デスクトップデバイスをリンク**を開き、QR コードをスキャンします。
+4. ステータスが `password_required` になった場合、コンソールで Telegram の二段階認証パスワードを入力します。パスワードはあなたのテナントインスタンスにのみ送信され、プラットフォーム設定には書き込まれません。
+5. ステータスが `authenticated` になった後、コンソールには現在のアカウント、MCP アドレス、および Bearer アクセストークンが表示されます。
+
+認証セッションは永続ボリュームに保存され、通常の再起動およびアップグレードでは再利用されます。コンソールの「アカウントからログアウト」は `/api/auth/logout` を呼び出して Telegram セッションを取り消します。「インスタンスを破棄」はさらにワークロードおよび永続ボリュームを削除します。
+
+## 認証とヘルスチェック
+
+`/health` および `/readyz` を除き、ログイン、REST、および MCP インターフェースにはすべて以下が必要です。
+
+```text
+Authorization: Bearer <アクセス トークン>
+```
+
+サービスはリクエストヘッダー認証のみを受け付け、URL にトークンを付加することはサポートしていません。アカウントパスワードと同様に保護してください。
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` は HTTP プロセスが稼働していることのみを示します。
+
+```json
+{"status":"ok"}
+```
+
+`/readyz` は MTProto 接続が利用可能かどうかを示します。接続済みの場合、アカウントがまだ QR コードのスキャン中または二段階認証待ちであっても、HTTP 200 を返します。
+
+```json
+{"status":"ready","gateway_connected":true,"login_state":"login_required"}
+```
+
+切断時、Kubernetes による Pod への直接プローブは HTTP 503 を返し、インスタンスはバックグラウンドで自動的に再接続します。この時点では、Pod は一時的にパブリック Service から外されるため、インスタンスドメイン経由で診断 JSON を読み取れることは保証されません。コンソールで Deployment が Ready に復帰するまでお待ちください。`login_state` の一般的な値には `login_required`、`waiting_scan`、`password_required`、`authenticated` が含まれます。アカウントのメッセージ操作を行う前には、引き続き `authenticated` に到達する必要があります。
+
+## MCP クライアントへの接続
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <アクセス トークン>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Cursor など、静的リクエストヘッダーをサポートするクライアント
+
+クライアントの現在のドキュメントに従って Streamable HTTP アドレスを設定し、`Authorization` リクエストヘッダーを追加します。たとえば、以下の構造をサポートするクライアントでは使用できます。
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <アクセス トークン>"}
+    }
+  }
+}
+```
+
+これはすべての MCP クライアントで共通の設定形式ではありません。Claude Desktop / Claude.ai のリモートコネクタはクラウド側で確立され、ローカルの `claude_desktop_config.json` 内の任意の HTTP リクエストヘッダーを読み取りません。現在、静的 Bearer リクエストヘッダーが必要な場合は、Claude Code またはこの機能を明示的にサポートするクライアントを使用してください。
+
+## MCP ツール
+
+| ツール                         | 機能                |
+| -------------------------- | ----------------- |
+| `telegram_whoami`          | 現在認証されているアカウントを確認 |
+| `telegram_list_chats`      | 最近のチャットを一覧表示し、未読のみも可能 |
+| `telegram_contacts`        | 連絡先を一覧表示             |
+| `telegram_read_messages`   | 指定したチャットの最近のメッセージを読み取る |
+| `telegram_search_messages` | 1 つのチャットまたはすべてのチャットを検索 |
+| `telegram_send_message`    | メッセージを送信し、指定したメッセージに返信可能 |
+| `telegram_edit_message`    | 現在のアカウントが送信したメッセージを編集 |
+| `telegram_delete_message`  | 削除権限のあるメッセージを削除        |
+| `telegram_react`           | Unicode 絵文字でメッセージにリアクション |
+| `telegram_mark_read`       | チャットを既読としてマーク          |
+
+`target` には、チャット ID、ユーザー名、または**完全一致**するチャット名を指定できます。名前が曖昧な場合は、ID またはユーザー名を優先して使用してください。
+
+## REST API
+
+すべての成功レスポンスは `{"data": ...}` を使用し、失敗レスポンスは `{"error": "..."}` を使用します。
+
+### 例
+
+```bash
+# 現在のアカウント
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 最近のチャット
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# Saved Messages にテストメッセージを送信
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### 完全なインターフェース
+
+| メソッドとパス                                                      | 主なパラメータ                      | 機能                    |
+| ---------------------------------------------------------- | ------------------------- | --------------------- |
+| `POST /api/auth/qr`                                        | —                         | ログイン QR コード URL を生成       |
+| `GET /api/auth/status`                                     | —                         | ログイン状態とアカウント情報を照会       |
+| `POST /api/auth/password`                                  | `{password}`              | 二段階認証パスワードを送信              |
+| `POST /api/auth/logout`                                    | —                         | インスタンスに保存されたセッションを取り消す             |
+| `GET /api/whoami`                                          | —                         | 現在のアカウントを確認                |
+| `GET /api/chats`                                           | `?limit=&unread_only=`    | チャットと未読数を一覧表示              |
+| `GET /api/contacts`                                        | —                         | 連絡先を一覧表示                 |
+| `GET /api/chats/{target}/messages`                         | `?limit=`                 | メッセージを読み取る                  |
+| `GET /api/messages/search`                                 | `?q=&target=&limit=`      | メッセージを検索。target を省略するとチャット横断で検索 |
+| `POST /api/messages`                                       | `{target,text,reply_to?}` | メッセージを送信または返信               |
+| `PATCH /api/chats/{target}/messages/{message_id}`          | `{text}`                  | メッセージを編集                  |
+| `DELETE /api/chats/{target}/messages/{message_id}`         | —                         | メッセージを削除                  |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}`                 | Unicode 絵文字リアクションを追加       |
+| `POST /api/chats/{target}/read`                            | —                         | チャットを既読としてマーク                |
+
+## よくある質問
+- **401**：Bearer トークンが欠落しているか、誤っています。トークンが URL クエリパラメータではなく、リクエストヘッダーに置かれていることを確認してください。
+- **503**：プロキシアクセストークンが設定されていないか、Telegram クライアントがまだ準備できていません。まず `/readyz` を確認してください。プロキシアクセストークンが設定されていない場合、保護されたインターフェースも 503 を返します。
+- **400**：パラメータまたは JSON が無効です。検索では `q` を指定する必要があり、`limit` は 1 以上の整数でなければなりません。
+- **403 / 404**：現在のアカウントに権限がないか、target / message ID が存在しません。
+- **429**：Telegram のレート制限が発動しました。`retry_after` を読み取り、待機してください。並行して再試行しないでください。
+- **QR コードがずっと完了しない**：QR コードを再生成し、Telegram の「デスクトップデバイスをリンク」スキャン入口を使用していることを確認してください。
+- **再起動後に再ログインを求められる**：インスタンスの永続ボリュームが正常か確認してください。自発的なログアウト、Telegram のデバイス一覧でのセッション取り消し、またはセッション失効後は、再度スキャンが必要です。
+
+## 検証範囲
+
+ソースコードと自動化テストは、ログイン状態、Bearer のフェイルクローズ、REST パラメータ検証、エラーマッピング、およびセッション永続化の実装をカバーしています。本番利用では、Agent に第三者の会話を操作させる前に、まず `target=me`（Saved Messages）で読み取り専用およびメッセージ作成／編集／削除のスモークテストを完了すべきです。
