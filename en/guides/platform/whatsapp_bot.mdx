@@ -1,0 +1,75 @@
+---
+title: "WhatsApp Account Proxy Usage Guide"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+The WhatsApp account proxy connects **your own authorized WhatsApp account** and provides existing chats, contacts, and messages to your Agent. Each deployment instance has independent connections, access tokens, and persistent storage. The service itself does not include AI and will not automatically reply, send mass messages, or proactively contact anyone.
+
+> This service uses WhatsApp linked-device capabilities and is not the official WhatsApp Business API; the account connection method is not officially supported by WhatsApp. Protocol changes, device revocation, or account restrictions may cause interruptions. Only connect accounts you own, comply with WhatsApp terms, and do not use it for spam messages or bulk sending without consent.
+
+## Deployment and Self-Authorization
+
+1. Create a "WhatsApp Account Proxy" application in the console, enable a subscription, and click deploy. Instance resources are automatically configured by the platform.
+2. After the instance is ready, view the QR code on the management page. On your own phone, open WhatsApp **Settings → Linked Devices → Link a Device** and scan the code. You can also enter your own phone number to request a pairing code, then confirm it on your phone.
+3. After the status on the management page changes to "Connected," copy the dedicated MCP address and Bearer access token.
+4. Logging out will attempt to revoke the linked device and clear local sessions and history. If the logout result is uncertain, first revoke the device in "Linked Devices" on your phone; destroying the instance will remove its persistent volume.
+
+QR codes and pairing codes may only be given to the account owner. Normal restarts will reuse the session of that instance; after the device is revoked on the phone, the instance will require authorization again.
+
+## Authentication and Capabilities
+
+Except for `/health` and `/readyz`, REST, MCP, QR scanning, and pairing interfaces all require `Authorization: Bearer <access token>`. Put the token only in the request header, not in URLs or logs. `GET /api/capabilities` provides the operations actually supported by the current instance and retention limits.
+
+Currently supported: account and connection status, chats and contacts synced to linked devices, real-time message events, locally retained message reading, sending and receiving text and media up to 10 MiB, reply quoting, emoji reactions, marking as read, as well as account-permission- and current-WhatsApp-rule-permitted editing/revoking of your own messages, group information, and single-member operations. Group modifications are still validated by WhatsApp for member and administrator permissions.
+
+**History scope**: Only messages actually synced from the phone to the linked device, and messages received while the proxy is online, can be read. Obtaining all old messages cannot be guaranteed; locally, at most the latest 5,000 messages and 2,000 events are retained. When media metadata exists, the original media may still no longer be downloadable.
+
+## MCP
+
+The deployment management page provides `https://whatsapp-bot-<instance ID>.app.acedata.cloud/mcp`. Configure this address in an MCP client that supports Streamable HTTP and custom request headers, and add the same Bearer token. MCP tools include `whatsapp_capabilities`, `whatsapp_whoami`, `whatsapp_chats`, `whatsapp_contacts`, `whatsapp_messages`, `whatsapp_events`, `whatsapp_send`, `whatsapp_send_status`, `whatsapp_media`, `whatsapp_mark_read`, `whatsapp_group`, and `whatsapp_group_update`.
+
+The Agent may read messages according to its own tasks; before sending messages to third parties, modifying messages, or changing groups, it should ask the user to confirm the specific target and content. Configuring MCP will not trigger any sending by itself.
+
+## REST Examples
+
+```bash
+BASE='https://whatsapp-bot-<instance ID>.app.acedata.cloud'
+TOKEN='<access token displayed on the management page>'
+
+curl "$BASE/api/auth/status" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats?limit=20" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats/123%40s.whatsapp.net/messages?limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+Send messages only to **your own existing chats or contacts**. `target` should use the JID returned by `/api/chats` or `/api/contacts`; arbitrary phone numbers may not be used for cold messaging. Please have the account owner confirm the recipient and content first.
+
+```bash
+curl -X POST "$BASE/api/messages" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: my-confirmed-message-20261004-1" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"123@s.whatsapp.net","action":"text","text":"Hello"}'
+```
+
+`action` can be `text`, `media`, `edit`, `revoke`, or `reaction`. For media sending, provide `media_base64` and `mime_type`; for replies, provide `reply_to`; for editing and revoking, provide your own locally retrievable `message_id`; for reactions, provide `message_id` and `emoji`. Media can be downloaded through `GET /api/chats/{target}/messages/{id}/media`, and messages can be marked as read through `POST /api/chats/{target}/read`.
+
+Sending must include an 8–128-character `Idempotency-Key`. The returned `message_id` is fixed, and statuses are `pending`, `accepted`, `unknown`, `delivered`, or `read`. `accepted` only means that the local connection accepted the send, and **does not mean the recipient received it**. When `unknown` occurs, query `GET /api/sends/{Idempotency-Key}` and message events; do not use a new key to send the same message again, to avoid duplicates. The proxy will not automatically retry uncertain operations.
+
+Send records are not automatically evicted; after reaching 100,000 records, the instance rejects new sends (HTTP 507), preventing duplicate sends after old idempotency keys are cleaned up.
+
+## Real-Time Events
+
+`GET /api/events?after=<previous next_cursor>&wait_ms=25000` supports long polling for up to 25 seconds; `GET /api/events/stream?after=<cursor>` provides SSE. Events contain monotonically increasing `seq`. The `next_cursor` in the response should be saved in the Agent's persistent state; if `gap=true`, old events have been cleaned up, and the current chat state should be fetched again before continuing from `oldest_cursor`. Message events, sending status, and connection status are reported independently.
+
+## Common Statuses
+
+| HTTP / Status | Handling Method                              |
+| --------- | --------------------------------- |
+| 401       | Check the Bearer token and request headers.                 |
+| 404       | The target chat, contact, or message is not in this instance's local records.            |
+| 409       | The account is not connected, or the same idempotency key corresponds to different content.              |
+| 413       | The media exceeds 10 MiB.                      |
+| 403 / 429 | The operation was rejected or triggered rate limiting; if it occurs during sending, still check the result of that idempotency key first. |
+| 502 / 503 | The connection or remote operation failed; if the sending result is uncertain, check the operation status and events first.      |
+
+Unlimited history, long-term availability of all media, or WhatsApp always accepting all group operations are not guaranteed. When checking a specific instance, first look at `/api/auth/status` and `/api/capabilities`.

@@ -1,0 +1,75 @@
+---
+title: "Vodič za korišćenje WhatsApp nalog proksija"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+WhatsApp nalog proksi povezuje **WhatsApp nalog koji ste vi ovlastili**, i pruža postojeće razgovore, kontakte i poruke vašem Agentu. Svaka instanca implementacije ima nezavisnu vezu, pristupni token i trajno skladište. Sama usluga ne uključuje AI, niti automatski odgovara, šalje masovne poruke ili proaktivno kontaktira bilo koga.
+
+> Ova usluga koristi mogućnost povezanih WhatsApp uređaja i nije zvanični WhatsApp Business API; način povezivanja naloga nije zvanično podržan od strane WhatsApp-a. Promene protokola, opoziv uređaja ili ograničenja naloga mogu dovesti do prekida. Povezujte samo naloge koje posedujete, poštujte WhatsApp uslove i ne koristite za neželjene poruke ili masovno slanje bez pristanka.
+
+## Implementacija i lično ovlašćenje
+
+1. Kreirajte aplikaciju „WhatsApp nalog proksi” u konzoli, a nakon aktiviranja pretplate kliknite na implementaciju. Resurse instance platforma automatski konfiguriše.
+2. Nakon što instanca bude spremna, pogledajte QR kod na stranici za upravljanje. Na svom telefonu otvorite WhatsApp **Podešavanja → Povezani uređaji → Poveži uređaj**i skenirajte kod. Takođe možete uneti svoj broj telefona da zatražite kod za uparivanje, a zatim potvrditi na telefonu.
+3. Kada se status na stranici za upravljanje promeni u „Povezano”, kopirajte namensku MCP adresu i Bearer pristupni token.
+4. Odjava sa naloga će pokušati da opozove povezani uređaj i obriše lokalnu sesiju i istoriju. Ako je rezultat odjave neizvestan, prvo opozovite taj uređaj u „Povezanim uređajima” na telefonu; uništavanje instance uklanja njen trajni volumen.
+
+QR kod i kod za uparivanje mogu se predati samo vlasniku naloga. Normalno ponovno pokretanje ponovo koristi sesiju te instance; nakon opoziva uređaja na telefonu, instanca će ponovo zahtevati ovlašćenje.
+
+## Autentifikacija i mogućnosti
+
+Osim `/health` i `/readyz`, REST, MCP, interfejsi za skeniranje koda i uparivanje zahtevaju `Authorization: Bearer <pristupni token>`. Token se stavlja samo u zaglavlje zahteva, ne u URL ili dnevnike. `GET /api/capabilities` daje operacije koje trenutna instanca zaista podržava i ograničenja zadržavanja.
+
+Trenutno je podržano: status naloga i veze, razgovori i kontakti sinhronizovani sa povezanim uređajem, događaji poruka u realnom vremenu, čitanje lokalno zadržanih poruka, slanje i primanje teksta i medija do 10 MiB, odgovori citiranjem, reakcije emodžijima, označavanje kao pročitano, kao i uređivanje/povlačenje sopstvenih poruka, informacije o grupama i operacije nad pojedinačnim članovima koje dozvoljavaju dozvole naloga i trenutna WhatsApp pravila. WhatsApp i dalje proverava dozvole članova i administratora za izmene grupa.
+
+**Opseg istorije**: mogu se čitati samo poruke koje su zaista sinhronizovane sa povezanim uređajem na telefonu, kao i poruke primljene dok je proksi bio na mreži. Ne može se garantovati pristup svim starim porukama; lokalno se zadržava najviše 5.000 najnovijih poruka i 2.000 događaja. Kada metapodaci medija postoje, originalni medij možda više nije moguće preuzeti.
+
+## MCP
+
+Stranica za upravljanje implementacijom pruža `https://whatsapp-bot-&lt;实例 ID>.app.acedata.cloud/mcp`. Konfigurišite tu adresu u MCP klijentu koji podržava Streamable HTTP i prilagođena zaglavlja zahteva, i dodajte isti Bearer token. MCP alati uključuju `whatsapp_capabilities`, `whatsapp_whoami`, `whatsapp_chats`, `whatsapp_contacts`, `whatsapp_messages`, `whatsapp_events`, `whatsapp_send`, `whatsapp_send_status`, `whatsapp_media`, `whatsapp_mark_read`, `whatsapp_group` i `whatsapp_group_update`.
+
+Agent može čitati poruke u skladu sa sopstvenim zadacima; pre slanja poruka trećim stranama, izmene poruka ili promene grupa, treba da zatraži od korisnika potvrdu konkretnog primaoca i sadržaja. Konfigurisanje MCP-a neće samo pokrenuti bilo kakvo slanje.
+
+## REST primeri
+
+```bash
+BASE='https://whatsapp-bot-<实例 ID>.app.acedata.cloud'
+TOKEN='<管理页显示的访问令牌>'
+
+curl "$BASE/api/auth/status" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats?limit=20" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats/123%40s.whatsapp.net/messages?limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+Šaljite poruke samo **sopstvenim postojećim razgovorima ili kontaktima**. `target` treba da koristi JID vraćen od strane `/api/chats` ili `/api/contacts`; nije dozvoljeno koristiti proizvoljne brojeve telefona za hladno slanje. Neka vlasnik prvo potvrdi primaoca i sadržaj.
+
+```bash
+curl -X POST "$BASE/api/messages" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: my-confirmed-message-20261004-1" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"123@s.whatsapp.net","action":"text","text":"你好"}'
+```
+
+`action` može biti `text`, `media`, `edit`, `revoke` ili `reaction`. Za slanje medija prosledite `media_base64` i `mime_type`; za odgovor prosledite `reply_to`; za uređivanje i povlačenje prosledite lokalno dostupni sopstveni `message_id`; za reakciju prosledite `message_id` i `emoji`. Medije možete preuzeti putem `GET /api/chats/{target}/messages/{id}/media`, a označiti kao pročitano putem `POST /api/chats/{target}/read`.
+
+Slanje mora sadržati `Idempotency-Key` od 8–128 znakova. Vraćeni `message_id` je fiksan, a status je `pending`, `accepted`, `unknown`, `delivered` ili `read`. `accepted` samo znači da je lokalna veza prihvatila slanje, **ne znači da je druga strana primila**. Kada dođe do `unknown`, proverite `GET /api/sends/{Idempotency-Key}` i događaje poruka; ne šaljite istu poruku ponovo sa novim ključem, kako biste izbegli duplikate. Proksi neće automatski ponovo slati neizvesne operacije.
+
+Zapisi o slanju neće biti automatski uklonjeni; nakon dostizanja 100.000 zapisa instanca odbija nova slanja (HTTP 507), kako bi se izbeglo ponovljeno slanje nakon čišćenja starih ključeva idempotentnosti.
+
+## Događaji u realnom vremenu
+
+`GET /api/events?after=<poslednji next_cursor>&wait_ms=25000` podržava dugo anketiranje do 25 sekundi; `GET /api/events/stream?after=<kursor>` pruža SSE. Događaji sadrže monotono rastući `seq`. `next_cursor` iz odgovora treba sačuvati u trajnom stanju Agenta; ako je `gap=true`, to znači da su stari događaji uklonjeni, pa treba ponovo preuzeti trenutno stanje razgovora i nastaviti od `oldest_cursor`. Događaji poruka, statusi slanja i statusi veze prijavljuju se nezavisno.
+
+## Uobičajeni statusi
+
+| HTTP / status | Način postupanja                              |
+| --------- | --------------------------------- |
+| 401       | Proverite Bearer token i zaglavlje zahteva.                 |
+| 404       | Ciljni razgovor, kontakt ili poruka nisu u lokalnim zapisima ove instance.            |
+| 409       | Nalog nije povezan ili isti ključ idempotentnosti odgovara različitom sadržaju.              |
+| 413       | Medij premašuje 10 MiB.                      |
+| 403 / 429 | Operacija je odbijena ili je aktivirano ograničenje učestalosti; ako se dogodi pri slanju, i dalje prvo proverite rezultat tog ključa idempotentnosti. |
+| 502 / 503 | Veza ili udaljena operacija nisu uspele; kada je rezultat slanja neizvestan, prvo proverite status operacije i događaje.      |
+
+Ne garantuje se neograničena istorija, dugoročna dostupnost svih medija niti da će WhatsApp uvek prihvatiti sve operacije nad grupama. Kada treba proveriti konkretnu instancu, prvo pogledajte `/api/auth/status` i `/api/capabilities`.

@@ -1,0 +1,75 @@
+---
+title: "Guide för användning av WhatsApp-kontoagent"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+WhatsApp-kontoagenten ansluter **det WhatsApp-konto du själv har godkänt**, och tillhandahåller befintliga chattar, kontakter och meddelanden till din Agent. Varje driftsinstans har en separat anslutning, åtkomsttoken och beständig lagring. Tjänsten i sig innehåller ingen AI och svarar inte automatiskt, skickar inte massutskick eller kontaktar någon på eget initiativ.
+
+> Den här tjänsten använder WhatsApps funktion för länkade enheter och är inte WhatsApps officiella Business API; sättet att ansluta kontot stöds inte officiellt av WhatsApp. Protokolländringar, återkallade enheter eller kontobegränsningar kan orsaka avbrott. Anslut endast konton du äger, följ WhatsApps villkor och använd inte tjänsten för skräppost eller massutskick utan samtycke.
+
+## Driftsättning och eget godkännande
+
+1. Skapa appen ”WhatsApp-kontoagent” i kontrollpanelen, aktivera prenumerationen och klicka på driftsätt. Instansresurser konfigureras automatiskt av plattformen.
+2. När instansen är klar visar du QR-koden på administrationssidan. Öppna WhatsApp på din egen telefon och gå till **Inställningar → Länkade enheter → Länka en enhet** för att skanna koden. Du kan också ange ditt eget telefonnummer för att begära en parkod och sedan bekräfta på telefonen.
+3. När statusen på administrationssidan ändras till ”Ansluten”, kopierar du den exklusiva MCP-adressen och Bearer-åtkomsttokenen.
+4. Att logga ut försöker återkalla den länkade enheten och rensa den lokala sessionen och historiken. Om resultatet av utloggningen är osäkert ska du först återkalla enheten i ”Länkade enheter” på telefonen; att förstöra instansen tar bort dess beständiga volym.
+
+QR-koder och parkoder får endast ges till kontots ägare. En normal omstart återanvänder instansens session; efter att enheten återkallats på telefonen kommer instansen åter att kräva godkännande.
+
+## Autentisering och funktioner
+
+Förutom `/health` och `/readyz` kräver REST-, MCP-, skannings- och parkopplingsgränssnittet `Authorization: Bearer &lt;åtkomsttoken>`. Lägg endast tokenen i begärandehuvudet, inte i URL:en eller loggarna. `GET /api/capabilities` visar de åtgärder och lagringsgränser som den aktuella instansen faktiskt stöder.
+
+Stöds för närvarande: konto- och anslutningsstatus, chattar och kontakter synkroniserade till den länkade enheten, meddelandehändelser i realtid, läsning av lokalt lagrade meddelanden, sändning och mottagning av text och media på högst 10 MiB, citerade svar, emoji-reaktioner, markering som läst, samt redigering/återkallande av egna meddelanden, gruppinformation och åtgärder för enskilda medlemmar som tillåts av kontobehörigheter och WhatsApps aktuella regler. Gruppändringar kontrolleras fortfarande av WhatsApp utifrån medlems- och administratörsbehörigheter.
+
+**Historikomfattning**: Endast meddelanden som faktiskt synkroniserats från telefonen till den länkade enheten, samt meddelanden som tagits emot medan agenten varit online, kan läsas. Det kan inte garanteras att alla gamla meddelanden kan hämtas; lokalt sparas högst de senaste 5 000 meddelandena och 2 000 händelserna. När mediemetadata finns kan originalmediet ändå inte längre gå att ladda ned.
+
+## MCP
+
+Driftsättningens administrationssida tillhandahåller `https://whatsapp-bot-&lt;实例 ID>.app.acedata.cloud/mcp`. Konfigurera denna adress i en MCP-klient som stöder Streamable HTTP och anpassade begärandehuvuden, och lägg till samma Bearer-token. MCP-verktygen omfattar `whatsapp_capabilities`, `whatsapp_whoami`, `whatsapp_chats`, `whatsapp_contacts`, `whatsapp_messages`, `whatsapp_events`, `whatsapp_send`, `whatsapp_send_status`, `whatsapp_media`, `whatsapp_mark_read`, `whatsapp_group` och `whatsapp_group_update`.
+
+Agenten kan läsa meddelanden enligt sina egna uppgifter; innan den skickar meddelanden till tredje part, ändrar meddelanden eller ändrar grupper bör användaren bekräfta det specifika målet och innehållet. Att konfigurera MCP utlöser inte automatiskt någon sändning.
+
+## REST-exempel
+
+```bash
+BASE='https://whatsapp-bot-<实例 ID>.app.acedata.cloud'
+TOKEN='<管理页显示的访问令牌>'
+
+curl "$BASE/api/auth/status" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats?limit=20" -H "Authorization: Bearer $TOKEN"
+curl "$BASE/api/chats/123%40s.whatsapp.net/messages?limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+Skicka endast meddelanden till **dina egna befintliga chattar eller kontakter**. `target` ska använda den JID som returneras av `/api/chats` eller `/api/contacts`; godtyckliga telefonnummer får inte användas för oombedd kontakt. Låt först kontots ägare bekräfta mottagaren och innehållet.
+
+```bash
+curl -X POST "$BASE/api/messages" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: my-confirmed-message-20261004-1" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"123@s.whatsapp.net","action":"text","text":"你好"}'
+```
+
+`action` kan vara `text`, `media`, `edit`, `revoke` eller `reaction`. För mediesändning anges `media_base64` och `mime_type`; för svar anges `reply_to`; för redigering och återkallande anges det egna `message_id` som går att hitta lokalt; för reaktioner anges `message_id` och `emoji`. Media kan laddas ned via `GET /api/chats/{target}/messages/{id}/media`, och meddelanden kan markeras som lästa via `POST /api/chats/{target}/read`.
+
+Sändning måste innehålla en `Idempotency-Key` på 8–128 tecken. Det returnerade `message_id` är fast, och statusen är `pending`, `accepted`, `unknown`, `delivered` eller `read`. `accepted` betyder endast att den lokala anslutningen accepterade sändningen, **inte att mottagaren har tagit emot den**. Vid `unknown` ska du fråga `GET /api/sends/{Idempotency-Key}` och meddelandehändelser; använd inte en ny nyckel för att skicka samma meddelande igen, för att undvika dubbletter. Agenten försöker inte automatiskt skicka osäkra åtgärder igen.
+
+Sändningsposter rensas inte automatiskt; efter 100 000 poster avvisar instansen nya sändningar (HTTP 507), för att undvika dubblettsändningar efter att gamla idempotensnycklar har rensats.
+
+## Realtidshändelser
+
+`GET /api/events?after=<senaste next_cursor>&wait_ms=25000` stöder long polling i högst 25 sekunder; `GET /api/events/stream?after=<cursor>` tillhandahåller SSE. Händelser innehåller ett monotont ökande `seq`. `next_cursor` i svaret ska sparas i Agentens beständiga tillstånd; om `gap=true` betyder det att gamla händelser har rensats, och den aktuella chattstatusen bör hämtas igen innan du fortsätter från `oldest_cursor`. Meddelandehändelser, sändningsstatus och anslutningsstatus rapporteras separat.
+
+## Vanliga statusar
+
+| HTTP / status | Hantering                              |
+| --------- | --------------------------------- |
+| 401       | Kontrollera Bearer-tokenen och begärandehuvudet.                 |
+| 404       | Målchatt, kontakt eller meddelande finns inte i den här instansens lokala register.            |
+| 409       | Kontot är inte anslutet, eller samma idempotensnyckel motsvarar annat innehåll.              |
+| 413       | Mediet överstiger 10 MiB.                      |
+| 403 / 429 | Åtgärden nekas eller har utlöst en frekvensbegränsning; om detta sker vid sändning måste resultatet för denna idempotensnyckel fortfarande kontrolleras först. |
+| 502 / 503 | Anslutningen eller fjärråtgärden misslyckades; om sändningsresultatet är osäkert ska åtgärdsstatus och händelser kontrolleras först.      |
+
+Det garanteras inte att obegränsad historik eller all media förblir tillgänglig långsiktigt, eller att alla gruppåtgärder alltid accepteras av WhatsApp. När en specifik instans behöver kontrolleras, titta först på `/api/auth/status` och `/api/capabilities`.
