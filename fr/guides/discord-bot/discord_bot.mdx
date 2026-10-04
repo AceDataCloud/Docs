@@ -1,0 +1,219 @@
+---
+title: "Documentation d’utilisation de Discord Agent Proxy"
+description: "Discord Agent Proxy API guide - Ace Data Cloud"
+---
+
+Discord Agent Proxy est un service **déployé indépendamment** : il conserve les identifiants de votre propre compte Discord, maintient une connexion persistante avec Discord, et expose les capacités de ce compte via deux interfaces, **MCP** et **REST API**, permettant à une IA ou à un programme d’opérer Discord à votre place.
+
+Aucun **modèle d’IA** n’est inclus dans le conteneur, il est uniquement chargé de l’exécution — les appels sont initiés par votre client IA (Claude, Cursor, etc.) ou votre propre programme.
+
+```
+Client IA  ──MCP /mcp──┐
+                       ├─→ Discord Agent Proxy ──→ Discord
+Votre programme ──REST /api───┘      （conserve les identifiants de votre compte）
+```
+
+## ⚠️ À lire absolument avant utilisation
+
+Automatiser l’utilisation d’un **compte personnel** (self-bot) avec un programme enfreint les conditions d’utilisation de Discord, et votre compte risque d’être banni. C’est une condition inhérente à ce service : vous fournissez les identifiants de votre propre compte et assumez vous-même les risques.
+
+**Il est fortement recommandé d’utiliser un compte secondaire dédié, et non votre compte principal.**
+
+## Déployer le service
+
+Accédez à [Console → Applications](https://platform.acedata.cloud/console/applications), trouvez Discord Agent Proxy et créez une application. Après sa création, activez d’abord l’abonnement, puis accédez à la page de configuration pour renseigner les identifiants de votre compte Discord et déployer. Les ressources de l’instance sont configurées automatiquement par la plateforme, sans qu’il soit nécessaire de choisir une spécification.
+
+Après avoir soumis le déploiement, vous accéderez à la page de gestion de l’application, qui utilise la même disposition « Vue d’ensemble / Journaux / Documentation » que les déploiements Telegram et WeChat. La « Vue d’ensemble » affiche l’état de l’instance et de l’abonnement, et confirme si Discord est connecté via une requête de compte ; le bon fonctionnement du conteneur ne signifie pas nécessairement que le compte est connecté.
+
+La carte du compte Discord dans la « Vue d’ensemble » fournit deux éléments d’accès :
+
+| Élément       | Exemple                                                       | Utilisation         |
+| -------- | -------------------------------------------------------- | ---------- |
+| Adresse d’accès MCP | `https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp` | Configurer dans le client IA |
+| Jeton d’accès     | `V0p7kAWY...`                                            | Pour l’authentification, voir ci-dessous     |
+
+### Consulter et tester les interfaces dans la console
+
+Ouvrez l’onglet « Documentation » de cette application pour consulter les paramètres de requête, la structure de réponse des 14 opérations REST, ainsi que des exemples dans des langages tels que Shell, Python et JavaScript. L’adresse de l’instance et le jeton d’accès seront automatiquement renseignés ; le jeton est masqué par défaut.
+
+Sélectionnez `GET /api/whoami`, puis cliquez sur « Tester » pour confirmer le compte connecté par le proxy. Les opérations telles que l’envoi, la modification ou la suppression de messages agiront sur le véritable compte Discord ; veuillez confirmer le contenu de la requête avant de tester.
+
+« Télécharger OpenAPI (JSON) » permet d’exporter la définition complète de l’interface. Le fichier contient l’adresse de l’instance, mais pas le jeton d’accès. Si vous devez changer les identifiants du compte Discord, sélectionnez « Redéployer » dans la « Vue d’ensemble », renseignez les nouveaux identifiants puis soumettez.
+
+### Comment obtenir les identifiants du compte Discord
+
+1. Connectez-vous à Discord dans le navigateur de votre ordinateur ([discord.com/app](https://discord.com/app))
+2. Appuyez sur `F12` pour ouvrir les outils de développement, puis basculez vers le panneau **Network (Réseau)**
+3. Cliquez sur n’importe quel canal dans Discord et observez la liste des requêtes
+4. Ouvrez n’importe quelle requête envoyée vers `discord.com/api`, puis trouvez le champ `authorization` dans **Request Headers (En-têtes de requête)**
+5. Copiez sa valeur
+
+Cette chaîne d’identifiants équivaut à l’état de connexion de votre compte, **ne la partagez avec personne**. En cas de fuite, modifier votre mot de passe dans Discord la rendra immédiatement invalide.
+
+## Méthode d’authentification
+
+À l’exception de `/health` et `/readyz`, toutes les interfaces nécessitent de transmettre le jeton d’accès dans les **en-têtes de requête** :
+
+```
+Authorization: Bearer <votre jeton d’accès>
+```
+
+> **Remarque : ce service accepte uniquement l’authentification par en-tête de requête et ne prend pas en charge l’ajout d’un jeton après l’URL sous la forme `?token=xxx`.** Ouvrir directement l’adresse de l’interface dans le navigateur renverra `401 unauthorized`, ce qui est normal et ne signifie pas que le déploiement a échoué. Pour confirmer que le processus est actif, accédez à `/health` ; pour confirmer que la connexion Discord peut traiter les requêtes, accédez à `/readyz`. Ces deux sondes ne nécessitent pas d’authentification. Si le jeton d’accès du proxy n’est pas configuré, les interfaces protégées renvoient `503` et ne sont pas ouvertes de manière anonyme.
+
+## Vérifier l’état du service
+
+```bash
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` indique uniquement que le processus HTTP est actif :
+
+```json
+{ "status": "ok" }
+```
+
+`/readyz` indique si Discord Gateway est disponible. Lorsque la connexion est normale, il renvoie HTTP 200 :
+
+```json
+{ "status": "ready", "gateway_ready": true }
+```
+
+Lors de la connexion, lorsque les identifiants sont invalides ou lorsque la connexion est interrompue, la sonde directe de Kubernetes vers le Pod renvoie HTTP 503, et le backend de l’instance réessaie automatiquement. À ce moment-là, le Pod est temporairement retiré du Service public ; il n’est donc pas garanti que ce JSON de diagnostic puisse être lu via le nom de domaine de l’instance. Veuillez consulter l’état du Deployment dans la console, puis appeler MCP / REST après le retour à l’état Ready.
+
+## Utilisation dans un client IA (MCP)
+
+Prenons Claude Code comme exemple :
+
+```bash
+claude mcp add --transport http discord \
+  https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp \
+  --header "Authorization: Bearer <你的访问令牌>"
+```
+
+Pour les clients tels que Cursor qui prennent en charge les en-têtes de requête statiques, veuillez configurer l’adresse Streamable HTTP conformément à leur documentation actuelle. Les clients acceptant la structure suivante peuvent l’utiliser :
+
+```json
+{
+  "mcpServers": {
+    "discord": {
+      "type": "http",
+      "url": "https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {
+        "Authorization": "Bearer <你的访问令牌>"
+      }
+    }
+  }
+}
+```
+
+Il ne s’agit pas d’un format de configuration universel pour tous les clients MCP. Le connecteur distant de Claude Desktop / Claude.ai est établi depuis le cloud et ne lit aucun en-tête de requête HTTP dans le fichier local `claude_desktop_config.json` ; si vous avez actuellement besoin d’un en-tête Bearer statique, veuillez utiliser Claude Code ou un client prenant explicitement en charge cette capacité.
+
+Une fois la configuration terminée, vous pouvez directement diriger l’IA en langage naturel pour opérer Discord, par exemple :
+
+> Regarde s’il y a de nouveaux messages dans le canal « Discussion du projet », et si quelqu’un demande la date de publication, aide-moi à répondre que c’est ce vendredi.
+
+### Outils disponibles
+| Outil MCP                     | Fonction              |
+| ----------------------------- | --------------------- |
+| `discord_whoami`              | Voir quel compte est actuellement utilisé par l’agent |
+| `discord_list_guilds`         | Lister tous les serveurs rejoints par le compte |
+| `discord_list_channels`       | Lister les canaux d’un serveur |
+| `discord_create_text_channel` | Créer un canal textuel |
+| `discord_list_members`        | Lister les membres du serveur |
+| `discord_send_message`        | Envoyer un message (peut spécifier une réponse à un message) |
+| `discord_read_messages`       | Lire les messages récents d’un canal |
+| `discord_edit_message`        | Modifier un message envoyé par soi-même |
+| `discord_delete_message`      | Supprimer un message |
+| `discord_search_messages`     | Rechercher des messages dans un canal |
+| `discord_add_reaction`        | Ajouter une réaction emoji à un message |
+| `discord_pin_message`         | Épingler un message |
+| `discord_create_dm`           | Ouvrir une discussion privée individuelle, renvoyer l’ID du canal |
+| `discord_send_dm`             | Envoyer un message privé à un utilisateur |
+
+## Utilisation dans un programme (API REST)
+
+Toutes les interfaces REST sont montées sous `/api`, le corps de réponse est uniformément `{"data": ...}`, et en cas d’erreur il est `{"error": "..."}`.
+
+### Voir le compte actuel
+
+```bash
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer <你的访问令牌>"
+```
+
+### Envoyer un message
+
+```bash
+curl -X POST https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer <你的访问令牌>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <本次发送的唯一操作 ID>" \
+  -d '{"channel_id": "1234567890", "content": "你好"}'
+```
+
+Lors de la nouvelle tentative du même envoi, réutilisez le même `Idempotency-Key`, le processus renverra le premier résultat sans envoyer à nouveau. Le redémarrage de l’instance efface au maximum 5 000 enregistrements de déduplication en mémoire ; l’appelant doit donc toujours suivre lui-même l’état de livraison à long terme.
+
+Le paramètre facultatif `reply_to` est utilisé pour répondre à un message spécifié :
+
+```json
+{ "channel_id": "1234567890", "content": "收到", "reply_to": "9876543210" }
+```
+
+### Lire les messages
+
+```bash
+curl "https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/channels/1234567890/messages?limit=20" \
+  -H "Authorization: Bearer <你的访问令牌>"
+```
+
+### Liste complète des interfaces
+
+| Méthode et chemin                                                     | Paramètres                         | Fonction           |
+| ----------------------------------------------------------------- | ---------------------------------- | ------------ |
+| `GET /api/whoami`                                                 | —                                  | Informations du compte actuellement utilisé par l’agent |
+| `GET /api/guilds`                                                 | —                                  | Liste des serveurs rejoints par le compte |
+| `GET /api/guilds/{guild_id}/channels`                             | —                                  | Liste des canaux du serveur |
+| `POST /api/guilds/{guild_id}/channels`                            | `{name}`                           | Créer un canal textuel |
+| `GET /api/guilds/{guild_id}/members`                              | `?limit=`（par défaut 100）                  | Liste des membres du serveur |
+| `POST /api/messages`                                              | `{channel_id, content, reply_to?}` | Envoyer un message |
+| `GET /api/channels/{channel_id}/messages`                         | `?limit=`（par défaut 50, maximum 100）            | Lire les messages récents |
+| `GET /api/channels/{channel_id}/messages/search`                  | `?q=`（obligatoire）`&limit=`（par défaut 25）          | Rechercher des messages |
+| `PATCH /api/channels/{channel_id}/messages/{message_id}`          | `{content}`                        | Modifier un message |
+| `DELETE /api/channels/{channel_id}/messages/{message_id}`         | —                                  | Supprimer un message |
+| `POST /api/channels/{channel_id}/messages/{message_id}/reactions` | `{emoji}`                          | Ajouter une réaction emoji |
+| `POST /api/channels/{channel_id}/messages/{message_id}/pin`       | —                                  | Épingler un message |
+| `POST /api/dms`                                                   | `{recipient_id}`                   | Ouvrir une discussion privée, renvoyer l’ID du canal |
+| `POST /api/dms/send`                                              | `{recipient_id, content}`          | Envoyer un message privé |
+
+### Comment obtenir l’ID d’un canal et l’ID d’un utilisateur
+
+Dans le client Discord, ouvrez successivement **Paramètres utilisateur → Paramètres avancés**, puis activez le **mode développeur**. Ensuite, faites un clic droit sur n’importe quel canal ou utilisateur ; l’option « Copier l’ID » apparaîtra dans le menu.
+
+Vous pouvez également appeler directement `GET /api/guilds` et `GET /api/guilds/{guild_id}/channels` pour les énumérer.
+
+## Questions fréquentes
+
+**Retour de `401 unauthorized`**
+
+Le jeton d’accès est incorrect, ou il a été transmis avec la méthode `?token=`. Veuillez confirmer que le jeton est transmis via l’en-tête de requête `Authorization: Bearer <jeton>`, et qu’il correspond à celui affiché dans la console.
+
+**Retour de `503`**
+
+La connexion à Discord n’est pas encore établie. Accédez d’abord à `/readyz` pour vérifier `gateway_ready` ; s’il reste à `false` pendant longtemps, les identifiants du compte sont probablement expirés. Veuillez les obtenir à nouveau et redéployer.
+
+**Retour de `403` ou `404`**
+
+Le compte lui-même ne possède pas les autorisations correspondantes (par exemple, il n’est pas dans ce serveur ou n’a pas le droit de parler dans ce canal), ou l’ID est incorrect. Ce type d’erreur provient de Discord, et non d’un problème du service proxy.
+
+**Retour de `429`**
+
+La limite de fréquence de Discord a été déclenchée ; le champ `retry_after` de la réponse indique le nombre de secondes d’attente recommandé. Veuillez réduire la fréquence des appels.
+
+**Le compte est banni après l’envoi d’un message**
+
+Comme indiqué précédemment, l’automatisation des opérations sur un compte personnel enfreint les conditions d’utilisation de Discord. Veuillez utiliser un compte secondaire dédié et contrôler la fréquence des opérations, en évitant les comportements sensibles tels que l’envoi groupé.
+
+## Périmètre de vérification
+
+Le smoke de production du 1er août 2026 a utilisé un compte dédié pour vérifier le compte, les serveurs, les canaux, les membres, la lecture des messages, la recherche, l’envoi, la modification, les réactions et la suppression. Les tests automatisés couvrent l’authentification, la validation des paramètres, le mappage des erreurs et les signatures de la bibliothèque de dépendances actuelle ; après des modifications du worker ou du chart, le smoke doit toujours être exécuté à nouveau, et la vérification historique ne peut pas être considérée comme une preuve de disponibilité continue.

@@ -1,0 +1,148 @@
+---
+title: "Telegram-tilivälityspalvelimen käyttöopas"
+description: "Telegram Account Proxy API guide - Ace Data Cloud"
+---
+
+Telegram-tilivälityspalvelin tarjoaa henkilökohtaiselle Telegram-tilillesi erilliset, pysyvät MCP- ja REST-rajapinnat. Kukin instanssi palvelee vain yhtä tiliä; säilö ei sisällä tekoälyä, ja kirjautumisistunto tallennetaan kyseisen instanssin erilliseen pysyvään levyasemaan.
+
+> Tämä ei ole Telegram Bot API -botti. Älä käytä sitä roskapostiin, joukkokylmäviestintään tai Telegramin rajoitusten kiertämiseen. Ennen sisällön lähettämistä, muokkaamista tai poistamista kolmansille osapuolille Agenttisi tulee hankkia nimenomainen vahvistus.
+
+## Käyttöönotto ja kirjautuminen
+
+1. Luo Telegram-tilivälityspalvelin [hallintapaneelissa → sovelluksissa](https://platform.acedata.cloud/console/applications), ota tilaus käyttöön ja napsauta käyttöönottoa. Alusta määrittää instanssin resurssit automaattisesti.
+2. Kun instanssi on valmis, napsauta ”Luo kirjautumisen QR-koodi”. QR-koodi on voimassa lyhyen aikaa, ja sen voi luoda uudelleen vanhentumisen jälkeen.
+3. Avaa Telegramissa **Asetukset → Laitteet → Yhdistä työpöytälaite** ja skannaa QR-koodi.
+4. Jos tilaksi muuttuu `password_required`, syötä Telegramin kaksivaiheisen vahvistuksen salasana hallintapaneelissa. Salasana lähetetään vain vuokraajasi instanssiin, eikä sitä kirjoiteta alustan määrityksiin.
+5. Kun tilaksi muuttuu `authenticated`, hallintapaneeli näyttää nykyisen tilin, MCP-osoitteen ja Bearer-käyttöoikeustunnuksen.
+
+Valtuutusistunto tallennetaan pysyvään levyasemaan, ja sitä käytetään uudelleen normaaleissa uudelleenkäynnistyksissä ja päivityksissä. Hallintapaneelin ”Kirjaudu ulos tililtä” kutsuu `/api/auth/logout`-rajapintaa Telegram-istunnon peruuttamiseksi; ”Tuhoa instanssi” poistaa lisäksi työkuorman ja pysyvän levyaseman.
+
+## Todennus ja kunnon tarkistus
+
+Lukuun ottamatta `/health`- ja `/readyz`-rajapintoja kirjautuminen, REST- ja MCP-rajapinnat edellyttävät kaikki:
+
+```text
+Authorization: Bearer <käyttöoikeustunnus>
+```
+
+Palvelu hyväksyy vain pyyntöotsikkotodennuksen eikä tue tunnuksen liittämistä URL-osoitteeseen. Suojaa sitä kuten suojaisit tilisi salasanaa.
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` osoittaa vain, että HTTP-prosessi on toiminnassa:
+
+```json
+{"status":"ok"}
+```
+
+`/readyz` osoittaa, onko MTProto-yhteys käytettävissä. Yhteyden ollessa muodostettuna se palauttaa HTTP 200 -vastauksen, vaikka tili olisi yhä QR-koodin skannausvaiheessa tai odottaisi kaksivaiheista vahvistusta:
+
+```json
+{"status":"ready","gateway_connected":true,"login_state":"login_required"}
+```
+
+Yhteyden katketessa Kubernetesin suora Pod-tarkistus palauttaa HTTP 503 -vastauksen, ja instanssi yhdistää automaattisesti uudelleen taustalla. Tällöin Pod poistetaan tilapäisesti julkisesta Servicestä, eikä diagnostiikka-JSONin lukemista instanssin verkkotunnuksen kautta voida taata; odota hallintapaneelissa, että Deployment palautuu Ready-tilaan. `login_state`-kentän yleisiä arvoja ovat `login_required`, `waiting_scan`, `password_required` ja `authenticated`; ennen tilin viestitoimintojen suorittamista tilan on silti oltava `authenticated`.
+
+## MCP-asiakkaan yhdistäminen
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <käyttöoikeustunnus>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Cursor ja muut asiakkaat, jotka tukevat staattisia pyyntöotsikoita
+
+Määritä Streamable HTTP -osoite asiakkaan nykyisen dokumentaation mukaisesti ja lisää `Authorization`-pyyntöotsikko. Esimerkiksi asiakkaat, jotka tukevat seuraavaa rakennetta, voivat käyttää:
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <käyttöoikeustunnus>"}
+    }
+  }
+}
+```
+
+Tämä ei ole yleinen määritysmuoto kaikille MCP-asiakkaille. Claude Desktop / Claude.ai:n etäyhdistimet muodostetaan pilvestä käsin, eivätkä ne lue mitään HTTP-pyyntöotsikoita paikallisesta `claude_desktop_config.json`-tiedostosta; jos tarvitset tällä hetkellä staattista Bearer-pyyntöotsikkoa, käytä Claude Codea tai asiakasta, joka nimenomaisesti tukee tätä ominaisuutta.
+
+## MCP-työkalut
+
+| Työkalu                         | Toiminto                |
+| -------------------------- | ----------------- |
+| `telegram_whoami`          | Näytä nykyinen valtuutettu tili          |
+| `telegram_list_chats`      | Listaa viimeisimmät keskustelut, voidaan näyttää vain lukemattomat      |
+| `telegram_contacts`        | Listaa yhteystiedot             |
+| `telegram_read_messages`   | Lue määritetyn keskustelun viimeisimmät viestit       |
+| `telegram_search_messages` | Hae yhdestä keskustelusta tai kaikista keskusteluista       |
+| `telegram_send_message`    | Lähetä viesti, voidaan vastata määritettyyn viestiin      |
+| `telegram_edit_message`    | Muokkaa nykyisen tilin lähettämää viestiä       |
+| `telegram_delete_message`  | Poista viesti, jonka poistamiseen on oikeus        |
+| `telegram_react`           | Reagoi viestiin Unicode-emojilla |
+| `telegram_mark_read`       | Merkitse keskustelu luetuksi          |
+
+`target` voi olla keskustelun tunnus, käyttäjänimi tai **tarkka** keskustelun nimi; jos nimi on moniselitteinen, käytä ensisijaisesti tunnusta tai käyttäjänimeä.
+
+## REST API
+
+Kaikissa onnistuneissa vastauksissa käytetään muotoa `{"data": ...}`, ja epäonnistuneissa vastauksissa muotoa `{"error": "..."}`.
+
+### Esimerkit
+
+```bash
+# Nykyinen tili
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# Viimeisimmät keskustelut
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# Lähetä testiviesti Tallennettuihin viesteihin
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### Täydelliset rajapinnat
+
+| Menetelmä ja polku                                                      | Pääparametrit                      | Toiminto                    |
+| ---------------------------------------------------------- | ------------------------- | --------------------- |
+| `POST /api/auth/qr`                                        | —                         | Luo kirjautumisen QR-koodin URL-osoitteen           |
+| `GET /api/auth/status`                                     | —                         | Kysyy kirjautumistilan ja tilitiedot           |
+| `POST /api/auth/password`                                  | `{password}`              | Lähettää kaksivaiheisen vahvistuksen salasanan              |
+| `POST /api/auth/logout`                                    | —                         | Peruuttaa instanssiin tallennetun istunnon             |
+| `GET /api/whoami`                                          | —                         | Näyttää nykyisen tilin                |
+| `GET /api/chats`                                           | `?limit=&unread_only=`    | Listaa keskustelut ja lukemattomien määrän              |
+| `GET /api/contacts`                                        | —                         | Listaa yhteystiedot                 |
+| `GET /api/chats/{target}/messages`                         | `?limit=`                 | Lukee viestit                  |
+| `GET /api/messages/search`                                 | `?q=&target=&limit=`      | Hakee viestejä; kun target jätetään pois, haku tehdään keskustelujen välillä |
+| `POST /api/messages`                                       | `{target,text,reply_to?}` | Lähettää viestin tai vastaa viestiin               |
+| `PATCH /api/chats/{target}/messages/{message_id}`          | `{text}`                  | Muokkaa viestiä                  |
+| `DELETE /api/chats/{target}/messages/{message_id}`         | —                         | Poistaa viestin                  |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}`                 | Lisää Unicode-emojireaktion       |
+| `POST /api/chats/{target}/read`                            | —                         | Merkitsee keskustelun luetuksi                |
+
+## Usein kysytyt kysymykset
+- **401**：Bearer-tunniste puuttuu tai on virheellinen. Varmista, että tunniste on pyynnön otsikossa, ei URL-kyselyparametrissa.
+- **503**：Välityspalvelun käyttöoikeustunnistetta ei ole määritetty, tai Telegram-asiakas ei ole vielä valmis. Tarkista ensin `/readyz`; jos välityspalvelun käyttöoikeustunnistetta ei ole määritetty, myös suojatut rajapinnat palauttavat 503:n.
+- **400**：Parametri tai JSON on virheellinen; haussa on annettava `q`, ja `limit`-arvon on oltava kokonaisluku, joka on suurempi tai yhtä suuri kuin 1.
+- **403 / 404**：Nykyisellä tilillä ei ole käyttöoikeutta, tai target / message ID:tä ei ole olemassa.
+- **429**：Telegramin nopeusrajoitus on laukaistu. Lue `retry_after` ja odota, älä yritä uudelleen rinnakkain.
+- **QR-koodin suoritus ei valmistu**：Luo QR-koodi uudelleen ja varmista, että käytössä on Telegramin ”Yhdistä työpöytälaite” -skannausvalinta.
+- **Uudelleenkäynnistyksen jälkeen vaaditaan uudelleenkirjautumista**：Tarkista, että instanssin pysyvä taltio toimii normaalisti; aktiivisen uloskirjautumisen, Telegramin laiteluettelosta tehdyn istunnon peruuttamisen tai istunnon vanhenemisen jälkeen QR-koodi on skannattava uudelleen.
+
+## Vahvistuksen kattavuus
+
+Lähdekoodi ja automatisoidut testit kattavat kirjautumistilan, Bearer fail-close -toiminnon, REST-parametrien validoinnin, virhekartoituksen ja istunnon pysyvyyden toteutuksen. Tuotantokäytössä tulee silti ensin suorittaa vain luku -toiminnot sekä viestien luomisen/muokkaamisen/poistamisen smoke-testit kohteessa `target=me` (Saved Messages), ennen kuin Agentin sallitaan käsitellä kolmannen osapuolen keskusteluja.
