@@ -1,0 +1,151 @@
+---
+title: "Vodič za integraciju Suno Studio projekta"
+description: "Suno Music Generation API guide - Ace Data Cloud"
+---
+
+Suno Studio Project API upravlja višekanalnim muzičkim projektima kroz jednu ulaznu tačku:
+
+```http
+POST /suno/projects
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+```
+
+`action` u zahtevu određuje tip operacije. Primarni ključ projekta ujednačeno koristi `id`; `version_id` označava trenutnu verziju projekta, a sve operacije izmene i izvoza moraju podneti najnoviju verziju kako bi se izbeglo istovremeno prepisivanje.
+
+## Pregled operacija
+
+| action             | Režim  | Namena                      |
+| ------------------ | --- | ----------------------- |
+| `create`           | Sinhrono  | Kreiranje praznog projekta                   |
+| `retrieve`         | Sinhrono  | Čitanje projekta i kompletnog izmenjivog `state`      |
+| `save`             | Sinhrono  | Čuvanje kompletnog stanja projekta                |
+| `upload`           | Asinhrono  | Inicijalizacija materijala koji se može dodati u projekat iz HTTPS audio adrese |
+| `add_track`        | Asinhrono  | Dodavanje postojećeg zvuka u projekat               |
+| `generate_track`   | Asinhrono  | Generisanje kandidata nove audio trake za navedeni interval            |
+| `replace_section`  | Asinhrono  | Generisanje kandidata za lokalnu zamenu                |
+| `commit_candidate` | Asinhrono  | Potvrđivanje izabranog kandidata u projekat             |
+| `remove_track`     | Sinhrono  | Brisanje navedene trake                  |
+| `render`           | Asinhrono  | Izvoz sačuvane verzije kao kompletne pesme           |
+
+Asinhrone operacije odmah vraćaju `task_id`. Koristite besplatni `/suno/tasks` interfejs za anketiranje ili prosledite `callback_url` da biste primili rezultat završnog stanja.
+
+## Kreiranje i čitanje
+
+```json
+{"action":"create","title":"My Studio Project"}
+```
+
+Sve operacije izmene treba da šalju jedinstveni `Idempotency-Key` Header. Nakon uspešnog kreiranja, `data.id` u odgovoru je Project ID. Novi prazan projekat možda nema `version_id` pre prvog čuvanja.
+
+```json
+{"action":"retrieve","id":"PROJECT_ID"}
+```
+
+Odgovor čitanja sadrži kompletan `state`. Novi prazan projekat vraća `{"tracks":[],"timing":{"bps":2}}`, što se može direktno koristiti za prvo čuvanje. `timing.bps` označava broj bitova u sekundi, podrazumevano je 2 (120 BPM), i mora biti pozitivan broj; `startBeats`, `endBeats` i `readStartBeats` segmenata koriste jedinice bitova projekta, a pozicije taktova u audio analizi ne mogu se direktno tretirati kao koordinate vremenske ose.
+
+## Čuvanje kompletnog stanja
+
+```json
+{
+  "action":"save",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Edited Project",
+  "state":{"tracks":[],"timing":{"bps":2}}
+}
+```
+
+Prvo čuvanje novog praznog projekta može izostaviti `version_id`; nakon što prvo čuvanje generiše verziju, naredna čuvanja moraju podneti najnoviju vrednost. Ako se verzija promenila, interfejs vraća HTTP 409. Tada ponovo izvršite `retrieve`, spojite izmene i zatim podnesite sa novim idempotentnim ključem; nemojte naslepo ponavljati stari zahtev.
+
+## Otpremanje i dodavanje traka
+
+```json
+{
+  "action":"upload",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "audio_url":"https://cdn.example.com/reference.mp3",
+  "async":true
+}
+```
+
+Nakon uspešnog otpremanja, pročitajte audio ID iz `response.data.candidate.audio_id`. Zatim ga dodajte u projekat:
+
+```json
+{
+  "action": "add_track",
+  "id": "PROJECT_ID",
+  "version_id": "CURRENT_VERSION_ID",
+  "audio_id": "AUDIO_ID",
+  "name": "Backing Vocals"
+}
+```
+
+Dodavanje trake podrazumevano zadržava brzinu reprodukcije zvuka i konvertuje trajanje zvuka u broj bitova prema `timing.bps` projekta. Nakon svakog `save`, `add_track`, `commit_candidate` ili `remove_track`, treba koristiti novi `version_id` iz odgovora.
+
+## Generisanje i zamena
+
+`generate_track` generiše kandidate audio trake za interval projekta; `replace_section` vraća dva kandidata za lokalnu zamenu. Nijedna od dve operacije ne bira automatski umetnički rezultat. Model mora koristiti javni naziv: `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild` ili `chirp-v6-mini`; dostupnost konkretne operacije i dalje zavisi od završnog stanja zadatka, nepodržani nazivi vraćaju 400 pre podnošenja. Drugi model se neće automatski koristiti.
+
+```json
+{
+  "action":"replace_section",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "source_audio_id":"AUDIO_ID",
+  "start_seconds":35.12,
+  "end_seconds":48.76,
+  "model":"chirp-v6",
+  "replacement_lyrics":"Novi segment teksta",
+  "async":true
+}
+```
+
+`generate_track` takođe mora pružiti `render_audio_id` (audio završenog izvoza projekta), `stem_control_tags` i izvorni audio `source_audio_id`. `batch_size` je 1–4, podrazumevano je 2; `start_seconds`, `end_seconds` su sekunde izvornog zvuka. Interval zamene sa `fixed=true` mora biti kraći od 26 sekundi.
+
+Nakon izbora kandidata, potvrdite ga:
+
+```json
+{
+  "action":"commit_candidate",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "operation_id":"OPERATION_ID",
+  "candidate_id":"CANDIDATE_ID",
+  "track_id":"TRACK_ID"
+}
+```
+
+Kandidat je vezan za verziju projekta u trenutku generisanja. Kada se projekat već promenio, stari kandidat se ne može direktno potvrditi.
+
+Kandidat lokalne zamene potvrđuje se na originalnoj traci koja sadrži jedinstveni izvorni segment, kandidat kompletnog take-a zadržava originalnu poziciju i zamenjuje originalni segment; kandidat intervala zamenjuje samo zahtevani interval, zadržavajući prethodne i naredne segmente. Kada se trajanje ne može pouzdano uskladiti, vraća se 400 i originalni projekat se zadržava; tada nemojte slati `start_beats`, `end_beats`. Kandidat nove trake treba potvrditi na praznoj traci sačuvanoj unapred, podrazumevano nasleđuje početnu tačku izvornog segmenta, ili eksplicitno unesite opseg bez preklapanja; preklapanje sa postojećim segmentima na istoj traci vraća 400. Nemojte prvo generisati pa zatim kreirati novu traku, jer će promena verzije učiniti kandidata zastarelim.
+
+## Izvoz kompletne pesme
+
+```json
+{
+  "action":"render",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "title":"Final Mix",
+  "lyrics":"[Instrumental]",
+  "async":true,
+  "callback_url":"https://example.com/webhooks/suno"
+}
+```
+
+Server čita autoritativno stanje projekta navedene verzije i sastavlja parametre izvoza. Kada se izostave `start_beats`, `end_beats`, podrazumevano se izvozi od najranije početne tačke do najkasnije završne tačke svih čujnih segmenata; utišane trake/segmenti ne učestvuju, a kada postoje solo trake, biraju se samo solo trake. Prazan projekat ili projekat bez važećih čujnih traka vraća 400. Rezultat završnog stanja sadrži `render_id`, `audio_id`, `audio_url` i trajanje. Projekat je vezan za izvršno okruženje pri kreiranju i ne može se migrirati između okruženja niti automatski prebaciti u slučaju kvara.
+
+> Možete otpremati ili obrađivati samo audio za koji imate zakonsko pravo korišćenja. Project API je trenutno u Beta fazi; trajno sačuvajte konačni audio URL u važnim rezultatima.
+
+## Anketiranje i oporavak od neuspeha
+
+```json
+{"action":"retrieve","id":"TASK_ID"}
+```
+Pošaljite gornji zahtev na `/suno/tasks`. Projects zadatak se smatra uspešnim kada `finished_at` postoji i `response.success=true`; `response.success=false` označava neuspeh. HTTP 200 vraćen pri slanju ili `task_id` samo znači da je zahtev prihvaćen, ne da je audio završen.
+
+Isti `Idempotency-Key` sa istim zahtevom će vratiti originalni rezultat (uključujući neuspeh), bez automatskog ponovnog generisanja ili ponovljene naplate. Kada želite eksplicitno ponovo pokušati neuspešnu operaciju, prvo upitajte originalni zadatak da potvrdite neuspeh, zatim koristite novi ključ; nemojte ponovo slati dok je originalni zadatak još u obradi ili je rezultat neizvestan.
+
+Kategorije grešaka uključuju `studio_unavailable` / `studio_model_unavailable` (503, privremeno nije moguće obraditi ili model nije dostupan), `studio_model_unsupported` (400, model ne podržava tu operaciju), `studio_state_invalid` (400, stanje projekta ili opseg izvoza je nevažeći), `too_many_requests` (429), `studio_audio_unavailable` (403, referencirani audio se ne može koristiti za izvoz projekta) i `content_rejected` (403). Sačuvajte `trace_id` radi otklanjanja problema.

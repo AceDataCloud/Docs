@@ -1,9 +1,9 @@
 ---
-title: "Leitfaden zur Integration des Suno-Studio-Projekts"
+title: "Leitfaden zur Integration des Suno Studio-Projekts"
 description: "Suno Music Generation API guide - Ace Data Cloud"
 ---
 
-Die Suno Studio Project API verwaltet mehrspurige Musikprojekte über einen Einstiegspunkt:
+Die Suno Studio Project API verwaltet mehrspurige Musikprojekte über einen einzigen Endpunkt:
 
 ```http
 POST /suno/projects
@@ -11,24 +11,24 @@ Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
 ```
 
-`action` in der Anfrage bestimmt den Operationstyp. Für Project-Primärschlüssel wird einheitlich `id` verwendet; `version_id` bezeichnet die aktuelle Projektversion, und alle Änderungs- und Exportvorgänge müssen die neueste Version übermitteln, um Überschreibungen bei Parallelität zu vermeiden.
+Das `action` in der Anfrage bestimmt den Operationstyp. Der Project-Primärschlüssel verwendet einheitlich `id`; `version_id` bezeichnet die aktuelle Projektversion, und alle Änderungs- und Exportoperationen müssen die neueste Version übermitteln, um Überschreibungen durch Parallelität zu vermeiden.
 
-## Operationsübersicht
+## Übersicht der Operationen
 
 | action             | Modus  | Zweck                      |
 | ------------------ | --- | ----------------------- |
-| `create`           | synchron  | Leeres Projekt erstellen                   |
-| `retrieve`         | synchron  | Projekt und vollständigen bearbeitbaren `state` lesen      |
-| `save`             | synchron  | Vollständigen Projektstatus speichern                |
-| `upload`           | asynchron  | Material, das dem Projekt hinzugefügt werden kann, über eine HTTPS-Audioadresse initialisieren |
-| `add_track`        | asynchron  | Vorhandenes Audio zum Projekt hinzufügen               |
-| `generate_track`   | asynchron  | Neue Audiospurkandidaten für einen angegebenen Bereich generieren            |
-| `replace_section`  | asynchron  | Kandidaten für lokale Ersetzungen generieren                |
-| `commit_candidate` | asynchron  | Ausgewählten Kandidaten in das Projekt übernehmen             |
-| `remove_track`     | synchron  | Angegebene Spur löschen                  |
-| `render`           | asynchron  | Gespeicherte Version als vollständigen Song exportieren           |
+| `create`           | Synchron  | Leeres Projekt erstellen                   |
+| `retrieve`         | Synchron  | Projekt und vollständigen bearbeitbaren `state` lesen      |
+| `save`             | Synchron  | Vollständigen Projektstatus speichern                |
+| `upload`           | Asynchron  | Material, das dem Projekt hinzugefügt werden kann, von einer HTTPS-Audioadresse initialisieren |
+| `add_track`        | Asynchron  | Vorhandenes Audio zum Projekt hinzufügen               |
+| `generate_track`   | Asynchron  | Neue Audiotrack-Kandidaten für einen angegebenen Bereich generieren            |
+| `replace_section`  | Asynchron  | Lokale Ersatzkandidaten generieren                |
+| `commit_candidate` | Asynchron  | Den ausgewählten Kandidaten im Projekt übernehmen             |
+| `remove_track`     | Synchron  | Angegebenen Track löschen                  |
+| `render`           | Asynchron  | Gespeicherte Version als vollständigen Song exportieren           |
 
-Asynchrone Operationen geben sofort `task_id` zurück. Verwenden Sie die kostenlose Schnittstelle `/suno/tasks` zum Abfragen, oder übergeben Sie `callback_url`, um Ergebnisse im Endzustand zu erhalten.
+Asynchrone Operationen geben sofort `task_id` zurück. Verwenden Sie die kostenlose Schnittstelle `/suno/tasks` zum Polling oder übergeben Sie `callback_url`, um Endzustandsergebnisse zu erhalten.
 
 ## Erstellen und Lesen
 
@@ -42,7 +42,7 @@ Alle Änderungsoperationen sollten einen eindeutigen `Idempotency-Key`-Header se
 {"action":"retrieve","id":"PROJECT_ID"}
 ```
 
-Die Leseantwort enthält den vollständigen `state`. Es wird empfohlen, zuerst zu lesen und dann basierend auf den Rückgabewerten zu ändern und zu speichern; konstruieren Sie interne Takt- und Spurstrukturen nicht manuell von Grund auf.
+Die Leseantwort enthält den vollständigen `state`. Ein neu erstelltes leeres Projekt gibt `{"tracks":[],"timing":{"bps":2}}` zurück und kann direkt für das erste Speichern verwendet werden. `timing.bps` bezeichnet die Beats pro Sekunde und ist standardmäßig 2 (120 BPM); es muss positiv sein. Die `startBeats`, `endBeats` und `readStartBeats` von Segmenten verwenden die Projekt-Beat-Einheit; Taktpositionen aus der Audioanalyse dürfen nicht direkt als Zeitachsenkoordinaten behandelt werden.
 
 ## Vollständigen Status speichern
 
@@ -52,13 +52,13 @@ Die Leseantwort enthält den vollständigen `state`. Es wird empfohlen, zuerst z
   "id":"PROJECT_ID",
   "version_id":"CURRENT_VERSION_ID",
   "title":"Edited Project",
-  "state":{"tracks":[],"timing":{}}
+  "state":{"tracks":[],"timing":{"bps":2}}
 }
 ```
 
-Beim ersten Speichern eines neu erstellten leeren Projekts kann `version_id` weggelassen werden; nachdem durch das erste Speichern eine Version generiert wurde, müssen nachfolgende Speichervorgänge den neuesten Wert übermitteln. Wenn sich die Version bereits geändert hat, gibt die Schnittstelle HTTP 409 zurück. Führen Sie in diesem Fall erneut `retrieve` aus, führen Sie die Änderungen zusammen und übermitteln Sie sie dann mit einem neuen Idempotenzschlüssel; wiederholen Sie die alte Anfrage nicht blind.
+Beim ersten Speichern eines neu erstellten leeren Projekts kann `version_id` weggelassen werden; nachdem das erste Speichern eine Version erzeugt hat, müssen nachfolgende Speicherungen den neuesten Wert übermitteln. Wenn sich die Version bereits geändert hat, gibt die Schnittstelle HTTP 409 zurück. Führen Sie dann erneut `retrieve` aus, führen Sie die Änderungen zusammen und übermitteln Sie sie mit einem neuen Idempotenzschlüssel; wiederholen Sie nicht blind die alte Anfrage.
 
-## Hochladen und Hinzufügen von Spuren
+## Tracks hochladen und hinzufügen
 
 ```json
 {
@@ -70,21 +70,23 @@ Beim ersten Speichern eines neu erstellten leeren Projekts kann `version_id` weg
 }
 ```
 
-Nach Abschluss des Uploads gibt das Aufgabenergebnis die Kandidaten-`audio_id` zurück. Fügen Sie sie dann dem Projekt hinzu:
+Lesen Sie nach erfolgreichem Upload die Audio-ID aus `response.data.candidate.audio_id`. Fügen Sie sie dann dem Projekt hinzu:
 
 ```json
 {
-  "action":"add_track",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "audio_id":"AUDIO_ID",
-  "name":"Backing Vocals"
+  "action": "add_track",
+  "id": "PROJECT_ID",
+  "version_id": "CURRENT_VERSION_ID",
+  "audio_id": "AUDIO_ID",
+  "name": "Backing Vocals"
 }
 ```
 
+Das Hinzufügen eines Tracks behält standardmäßig die Audiowiedergabegeschwindigkeit bei und wandelt die Audiodauer anhand von `timing.bps` des Projekts in Beats um. Nach jedem `save`, `add_track`, `commit_candidate` oder `remove_track` sollte die neue `version_id` aus der Antwort verwendet werden.
+
 ## Generieren und Ersetzen
 
-`generate_track` generiert Audiospurkandidaten für einen Projektbereich; `replace_section` gibt zwei Kandidaten für lokale Ersetzungen zurück. Beide Operationen wählen künstlerische Ergebnisse nicht automatisch aus.
+`generate_track` generiert Audiotrack-Kandidaten für einen Projektbereich; `replace_section` gibt zwei lokale Ersatzkandidaten zurück. Keine der beiden Operationen wählt automatisch ein künstlerisches Ergebnis aus. Das Modell muss einen öffentlichen Namen verwenden: `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild` oder `chirp-v6-mini`; die Verfügbarkeit für die jeweilige Operation richtet sich weiterhin nach dem Endzustand der Aufgabe, und nicht unterstützte Namen geben vor der Übermittlung 400 zurück. Es wird nicht automatisch zu einem anderen Modell gewechselt.
 
 ```json
 {
@@ -95,12 +97,14 @@ Nach Abschluss des Uploads gibt das Aufgabenergebnis die Kandidaten-`audio_id` z
   "start_seconds":35.12,
   "end_seconds":48.76,
   "model":"chirp-v6",
-  "replacement_lyrics":"新的歌词片段",
+  "replacement_lyrics":"neues Liedtextsegment",
   "async":true
 }
 ```
 
-Nach Auswahl eines Kandidaten übernehmen Sie ihn:
+`generate_track` muss außerdem `render_audio_id` (abgeschlossenes exportiertes Projektaudio), `stem_control_tags` und die Quellaudio-`source_audio_id` bereitstellen. `batch_size` liegt zwischen 1–4 und ist standardmäßig 2; `start_seconds` und `end_seconds` sind Sekunden des Quellaudios. Der Ersatzbereich bei `fixed=true` muss kürzer als 26 Sekunden sein.
+
+Übermitteln Sie nach der Auswahl eines Kandidaten:
 
 ```json
 {
@@ -113,7 +117,9 @@ Nach Auswahl eines Kandidaten übernehmen Sie ihn:
 }
 ```
 
-Kandidaten sind an die Projektversion zum Zeitpunkt der Generierung gebunden. Wenn sich das Projekt bereits geändert hat, können alte Kandidaten nicht direkt übernommen werden.
+Kandidaten sind an die Projektversion zum Zeitpunkt der Generierung gebunden. Wenn sich das Projekt bereits geändert hat, können alte Kandidaten nicht direkt übermittelt werden.
+
+Lokale Ersatzkandidaten werden auf dem ursprünglichen Track übermittelt, der das eindeutige Quellsegment enthält; vollständige Take-Kandidaten behalten die ursprüngliche Position bei und ersetzen das ursprüngliche Segment. Bereichskandidaten ersetzen nur den angeforderten Bereich und behalten die Segmente davor und danach bei. Wenn die Länge nicht zuverlässig abgeglichen werden kann, wird 400 zurückgegeben und das ursprüngliche Projekt beibehalten; übermitteln Sie in diesem Fall nicht `start_beats`, `end_beats`. Kandidaten für neue Tracks sollten auf einem zuvor gespeicherten leeren Track übermittelt werden, verwenden standardmäßig den Startpunkt des Quellsegments oder übergeben explizit einen überlappungsfreien Bereich; überlappende vorhandene Segmente auf demselben Track geben 400 zurück. Erstellen Sie nicht erst einen Kandidaten und dann einen neuen Track, da die Versionsänderung den Kandidaten ungültig macht.
 
 ## Vollständigen Song exportieren
 
@@ -129,6 +135,17 @@ Kandidaten sind an die Projektversion zum Zeitpunkt der Generierung gebunden. We
 }
 ```
 
-Der Server liest den maßgeblichen Projektstatus der angegebenen Version und stellt die Exportparameter zusammen. Das Ergebnis im Endzustand enthält `render_id`, `audio_id`, `audio_url` und die Dauer. Das Projekt ist an die Ausführungsumgebung bei der Erstellung gebunden und kann nicht umgebungsübergreifend migriert oder automatisch auf Fehler umgeschaltet werden.
+Der Server liest den maßgeblichen Projektstatus der angegebenen Version und stellt die Exportparameter zusammen. Wenn `start_beats` und `end_beats` weggelassen werden, wird standardmäßig vom frühesten Startpunkt bis zum spätesten Endpunkt aller hörbaren Segmente exportiert; stumme Tracks/Segmente werden nicht einbezogen, und wenn Solo-Tracks vorhanden sind, werden nur Solo-Tracks ausgewählt. Ein leeres Projekt oder keine gültigen hörbaren Tracks geben 400 zurück. Das Endzustandsergebnis enthält `render_id`, `audio_id`, `audio_url` und die Dauer. Das Projekt ist an die Ausführungsumgebung bei der Erstellung gebunden und kann nicht umgebungsübergreifend migriert oder automatisch umgeschaltet werden.
 
-> Sie dürfen nur Audio hochladen oder verarbeiten, für das Sie rechtmäßige Nutzungsrechte besitzen. Die Project API befindet sich derzeit in der Beta-Phase; speichern Sie die finalen Audio-URLs in wichtigen Ergebnissen dauerhaft.
+> Sie dürfen nur Audio hochladen oder verarbeiten, für dessen Nutzung Sie berechtigt sind. Die Project API befindet sich derzeit in der Beta-Phase; bitte speichern Sie die finalen Audio-URLs wichtiger Ergebnisse dauerhaft.
+
+## Polling und Fehlerwiederherstellung
+
+```json
+{"action":"retrieve","id":"TASK_ID"}
+```
+Sende die obige Anfrage an `/suno/tasks`. Eine Projects-Aufgabe gilt als erfolgreich, wenn `finished_at` vorhanden ist und `response.success=true`; `response.success=false` bedeutet fehlgeschlagen. Eine Rückgabe von HTTP 200 oder `task_id` bedeutet nur, dass die Anfrage angenommen wurde, nicht dass das Audio fertiggestellt ist.
+
+Derselbe `Idempotency-Key` mit derselben Anfrage liest das ursprüngliche Ergebnis zurück (einschließlich Fehlern) und generiert nicht automatisch erneut oder belastet doppelt. Wenn du einen fehlgeschlagenen Vorgang explizit erneut versuchen möchtest, frage zuerst die ursprüngliche Aufgabe ab, um den Fehler zu bestätigen, und verwende dann einen neuen Schlüssel; reiche nicht erneut ein, solange die ursprüngliche Aufgabe noch verarbeitet wird oder das Ergebnis unklar ist.
+
+Die Fehlerkategorien umfassen `studio_unavailable` / `studio_model_unavailable` (503, vorübergehend nicht verarbeitbar oder Modell nicht verfügbar), `studio_model_unsupported` (400, Modell unterstützt diesen Vorgang nicht), `studio_state_invalid` (400, Projektstatus oder Exportbereich ungültig), `too_many_requests` (429), `studio_audio_unavailable` (403, referenziertes Audio kann nicht für den Projektexport verwendet werden) und `content_rejected` (403). Bewahre `trace_id` zur Fehleranalyse auf.
