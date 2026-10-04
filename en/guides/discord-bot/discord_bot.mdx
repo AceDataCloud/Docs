@@ -1,0 +1,219 @@
+---
+title: "Discord Agent Proxy Documentation"
+description: "Discord Agent Proxy integration guide - Ace Data Cloud"
+---
+
+Discord Agent Proxy is an **independently deployed** service: it stores your own Discord account credentials, maintains a persistent connection with Discord, and exposes the capabilities of this account through two interfaces: **MCP** and **REST API**, allowing AI or programs to operate Discord on your behalf.
+
+The container **does not contain any AI models**; it is only responsible for execution—the calls are initiated by your AI client (Claude, Cursor, etc.) or your own program.
+
+```
+AI client  ──MCP /mcp──┐
+                       ├─→ Discord Agent Proxy ──→ Discord
+Your program ──REST /api───┘      （stores your account credentials）
+```
+
+## ⚠️ Must Read Before Use
+
+Using programs to automate a **personal account** (self-bot) violates Discord's Terms of Service, and the account is at risk of being banned. This is an inherent premise of this service: you provide your own account credentials and assume the risks yourself.
+
+**It is strongly recommended to use a dedicated secondary account, not your main account.**
+
+## Deploy the Service
+
+Go to [Console → Applications](https://platform.acedata.cloud/console/applications), find Discord Agent Proxy, and create an application. After creating it, first activate a subscription, then go to the configuration page to enter your Discord account credentials and deploy. Instance resources are automatically configured by the platform; there is no need to select specifications.
+
+After submitting the deployment, you will enter the application management page, which uses the same “Overview / Logs / Documentation” layout as Telegram and WeChat deployments. “Overview” displays instance and subscription status, and confirms whether Discord is connected through an account query; normal container operation does not necessarily mean that the account is connected.
+
+The Discord account card in “Overview” provides two connection details:
+
+| Item       | Example                                                       | Purpose         |
+| -------- | -------------------------------------------------------- | ---------- |
+| MCP connection URL | `https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp` | Configure in AI client |
+| Access token     | `V0p7kAWY...`                                            | For authentication, see below     |
+
+### View and Test APIs in the Console
+
+Open the “Documentation” tab of the application to view request parameters, response structures, and examples in Shell, Python, JavaScript, and other languages for all 14 REST operations. The instance URL and access token are filled in automatically; the token is hidden by default.
+
+Select `GET /api/whoami` and click “Test” to confirm the account connected by the proxy. Operations such as sending, editing, or deleting messages will affect the real Discord account; please confirm the request content before testing.
+
+“Download OpenAPI (JSON)” can export the complete API definition. The file includes the instance URL but does not include the access token. If you need to replace Discord account credentials, select “Redeploy” in “Overview”, enter the new credentials, and submit.
+
+### How to Obtain Discord Account Credentials
+
+1. Log in to Discord in a desktop browser ([discord.com/app](https://discord.com/app))
+2. Press `F12` to open Developer Tools, then switch to the **Network** panel
+3. Click any channel in Discord and observe the request list
+4. Open any request sent to `discord.com/api`, then find the `authorization` field under **Request Headers**
+5. Copy its value
+
+This credential is equivalent to your account login session; **do not share it with anyone**. If it is leaked, changing your password in Discord will immediately invalidate it.
+
+## Authentication Method
+
+Except for `/health` and `/readyz`, all APIs require the access token in the **request header**:
+
+```
+Authorization: Bearer <your access token>
+```
+
+> **Note: This service only accepts request-header authentication and does not support appending tokens to URLs in the form of `?token=xxx`.** Opening an API URL directly in the browser will return `401 unauthorized`; this is normal and does not mean deployment has failed. To confirm whether the process is alive, access `/health`; to confirm whether the Discord connection can handle requests, access `/readyz`. Neither of these probes requires authentication. When the proxy access token is not configured, protected APIs return `503` and will not be anonymously accessible.
+
+## Check Service Status
+
+```bash
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` only indicates that the HTTP process is alive:
+
+```json
+{ "status": "ok" }
+```
+
+`/readyz` indicates whether the Discord Gateway is available. When the connection is normal, it returns HTTP 200:
+
+```json
+{ "status": "ready", "gateway_ready": true }
+```
+
+When connecting, when credentials are invalid, or when the connection is interrupted, Kubernetes' direct probe to the Pod returns HTTP 503, and the instance backend automatically retries. At this time, the Pod is temporarily removed from the public Service, so it is not guaranteed that this diagnostic JSON can be read through the instance domain; please view the Deployment status in the console, and call MCP / REST after it returns to Ready.
+
+## Use in AI Clients (MCP)
+
+Using Claude Code as an example:
+
+```bash
+claude mcp add --transport http discord \
+  https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp \
+  --header "Authorization: Bearer <your access token>"
+```
+
+For clients such as Cursor that support static request headers, configure the Streamable HTTP URL according to their current documentation. Clients that accept the following structure can use:
+
+```json
+{
+  "mcpServers": {
+    "discord": {
+      "type": "http",
+      "url": "https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {
+        "Authorization": "Bearer <your access token>"
+      }
+    }
+  }
+}
+```
+
+This is not a universal configuration format for all MCP clients. Remote connectors for Claude Desktop / Claude.ai are established from the cloud and do not read any HTTP request headers in the local `claude_desktop_config.json`; if static Bearer request headers are currently needed, please use Claude Code or a client that explicitly supports this capability.
+
+After configuration is complete, you can directly instruct the AI to operate Discord using natural language, for example:
+
+> Check whether I have any new messages in the “Project Discussion” channel, and if anyone asks about the release date, help me reply that it is this Friday.
+
+### Available Tools
+| MCP Tool                        | Function              |
+| ----------------------------- | --------------- |
+| `discord_whoami`              | View which account the current agent is acting as    |
+| `discord_list_guilds`         | List all servers the account has joined    |
+| `discord_list_channels`       | List the channels under a certain server     |
+| `discord_create_text_channel` | Create a text channel          |
+| `discord_list_members`        | List server members         |
+| `discord_send_message`        | Send a message (can specify a reply to a certain message) |
+| `discord_read_messages`       | Read recent messages in a channel       |
+| `discord_edit_message`        | Edit a message sent by yourself       |
+| `discord_delete_message`      | Delete a message            |
+| `discord_search_messages`     | Search messages within a channel        |
+| `discord_add_reaction`        | Add an emoji reaction to a message       |
+| `discord_pin_message`         | Pin a message            |
+| `discord_create_dm`           | Start a one-to-one private chat, returns the channel ID |
+| `discord_send_dm`             | Send a private message to a certain user        |
+
+## Use in Programs (REST API)
+
+All REST endpoints are mounted under `/api`, with response bodies uniformly formatted as `{"data": ...}` and errors as `{"error": "..."}`.
+
+### View Current Account
+
+```bash
+curl https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer <your access token>"
+```
+
+### Send a Message
+
+```bash
+curl -X POST https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer <your access token>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <unique operation ID for this send>" \
+  -d '{"channel_id": "1234567890", "content": "Hello"}'
+```
+
+Reuse the same `Idempotency-Key` when retrying the same send, and the process will return the first result without sending repeatedly. Restarting the instance clears up to 5,000 in-memory deduplication records, so callers still need to track long-term delivery status themselves.
+
+The optional parameter `reply_to` is used to reply to a specified message:
+
+```json
+{ "channel_id": "1234567890", "content": "Received", "reply_to": "9876543210" }
+```
+
+### Read Messages
+
+```bash
+curl "https://discord-bot-xxxxxxxxxxxx.app.acedata.cloud/api/channels/1234567890/messages?limit=20" \
+  -H "Authorization: Bearer <your access token>"
+```
+
+### Complete Endpoint List
+
+| Method and Path                                                             | Parameters                                 | Function           |
+| ----------------------------------------------------------------- | ---------------------------------- | ------------ |
+| `GET /api/whoami`                                                 | —                                  | Current agent account information    |
+| `GET /api/guilds`                                                 | —                                  | List of servers the account has joined   |
+| `GET /api/guilds/{guild_id}/channels`                             | —                                  | List of channels under the server    |
+| `POST /api/guilds/{guild_id}/channels`                            | `{name}`                           | Create a text channel       |
+| `GET /api/guilds/{guild_id}/members`                              | `?limit=` (default 100)                  | Server member list      |
+| `POST /api/messages`                                              | `{channel_id, content, reply_to?}` | Send a message         |
+| `GET /api/channels/{channel_id}/messages`                         | `?limit=` (default 50, maximum 100)            | Read recent messages       |
+| `GET /api/channels/{channel_id}/messages/search`                  | `?q=` (required)`&limit=` (default 25)          | Search messages         |
+| `PATCH /api/channels/{channel_id}/messages/{message_id}`          | `{content}`                        | Edit a message         |
+| `DELETE /api/channels/{channel_id}/messages/{message_id}`         | —                                  | Delete a message         |
+| `POST /api/channels/{channel_id}/messages/{message_id}/reactions` | `{emoji}`                          | Add an emoji reaction       |
+| `POST /api/channels/{channel_id}/messages/{message_id}/pin`       | —                                  | Pin a message         |
+| `POST /api/dms`                                                   | `{recipient_id}`                   | Start a private chat, returns the channel ID |
+| `POST /api/dms/send`                                              | `{recipient_id, content}`          | Send a private message         |
+
+### How to Obtain Channel IDs and User IDs
+
+In the Discord client, open **User Settings → Advanced** in sequence, and enable **Developer Mode**. Then right-click any channel or user, and “Copy ID” will appear in the menu.
+
+You can also directly call `GET /api/guilds` and `GET /api/guilds/{guild_id}/channels` to enumerate them.
+
+## Frequently Asked Questions
+
+**Returns `401 unauthorized`**
+
+The access token is incorrect, or it was passed using `?token=`. Please confirm that the token is passed through the request header `Authorization: Bearer <token>` and matches what is displayed in the console.
+
+**Returns `503`**
+
+The connection to Discord has not yet been established. First access `/readyz` to check `gateway_ready`; if it remains `false` for a long time, the account credentials have likely expired. Please obtain them again and redeploy.
+
+**Returns `403` or `404`**
+
+The account itself does not have the corresponding permission (for example, it is not in the server or does not have permission to speak in the channel), or the ID was entered incorrectly. These errors come from Discord, not from the proxy service.
+
+**Returns `429`**
+
+Discord's rate limit was triggered. The `retry_after` field in the response provides the recommended number of seconds to wait. Please reduce the call frequency.
+
+**Account Is Banned After Sending Messages**
+
+As mentioned above, automating operations on personal accounts violates Discord's Terms of Service. Please use a dedicated secondary account, control the operation frequency, and avoid sensitive behaviors such as mass messaging.
+
+## Verification Scope
+
+The production smoke test on August 1, 2026 used a dedicated account to verify accounts, servers, channels, members, message reading, search, sending, editing, reactions, and deletion. Automated tests cover authentication, parameter validation, error mapping, and current dependency library signatures; smoke tests should still be rerun after worker or chart changes, and historical verification must not be treated as proof of ongoing availability.

@@ -1,0 +1,148 @@
+---
+title: "Guía de uso del proxy de cuenta de Telegram"
+description: "Telegram Account Proxy API guide - Ace Data Cloud"
+---
+
+El proxy de cuenta de Telegram proporciona interfaces MCP y REST independientes y permanentes para tu propia cuenta personal de Telegram. Cada instancia solo sirve a una cuenta; el contenedor no incluye IA, y la sesión de inicio de sesión se guarda en el volumen persistente independiente de esa instancia.
+
+> Esto no es un bot de la API de Telegram. No lo uses para mensajes basura, envío masivo en frío ni para eludir las restricciones de Telegram. Antes de enviar, editar o eliminar contenido a terceros, tu Agent debe obtener una confirmación explícita.
+
+## Implementación e inicio de sesión
+
+1. Crea un proxy de cuenta de Telegram en [Consola → Aplicaciones](https://platform.acedata.cloud/console/applications), activa la suscripción y haz clic en implementar. Los recursos de la instancia son configurados automáticamente por la plataforma.
+2. Cuando la instancia esté lista, haz clic en «Generar código QR de inicio de sesión». El código QR es válido por poco tiempo y puede generarse de nuevo tras caducar.
+3. Abre en Telegram **Configuración → Dispositivos → Vincular dispositivo de escritorio** y escanea el código QR.
+4. Si el estado cambia a `password_required`, introduce la contraseña de verificación en dos pasos de Telegram en la consola. La contraseña solo se envía a la instancia de tu tenant y no se escribirá en la configuración de la plataforma.
+5. Cuando el estado cambie a `authenticated`, la consola mostrará la cuenta actual, la dirección MCP y el token de acceso Bearer.
+
+La sesión autorizada se almacena en el volumen persistente y se reutiliza tras reinicios y actualizaciones normales. «Cerrar sesión de la cuenta» en la consola llama a `/api/auth/logout` para revocar la sesión de Telegram; «Destruir instancia» también elimina la carga de trabajo y el volumen persistente.
+
+## Autenticación y comprobación de estado
+
+Excepto `/health` y `/readyz`, las interfaces de inicio de sesión, REST y MCP requieren:
+
+```text
+Authorization: Bearer <访问令牌>
+```
+
+El servicio solo acepta autenticación mediante encabezados de solicitud y no admite añadir el token a la URL. Protégelo como protegerías la contraseña de tu cuenta.
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` solo indica que el proceso HTTP está activo:
+
+```json
+{"status":"ok"}
+```
+
+`/readyz` indica si la conexión MTProto está disponible. Cuando está conectada, devuelve HTTP 200, incluso si la cuenta sigue escaneando el código o esperando la verificación en dos pasos:
+
+```json
+{"status":"ready","gateway_connected":true,"login_state":"login_required"}
+```
+
+Cuando se desconecta, la sonda directa de Kubernetes al Pod devuelve HTTP 503, y la instancia se reconecta automáticamente en segundo plano. En ese momento, el Pod se elimina temporalmente del Service público, y no se garantiza que se pueda leer el JSON de diagnóstico a través del dominio de la instancia; espera en la consola a que el Deployment vuelva a estar Ready. Los valores comunes de `login_state` incluyen `login_required`, `waiting_scan`, `password_required`, `authenticated`; antes de realizar operaciones de mensajes de la cuenta, aún se debe alcanzar `authenticated`.
+
+## Conectar un cliente MCP
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <访问令牌>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Clientes como Cursor que admiten encabezados de solicitud estáticos
+
+Configura la dirección Streamable HTTP según la documentación actual del cliente y añade el encabezado de solicitud `Authorization`. Por ejemplo, los clientes que admiten la siguiente estructura pueden usar:
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <访问令牌>"}
+    }
+  }
+}
+```
+
+Este no es un formato de configuración universal para todos los clientes MCP. El conector remoto de Claude Desktop / Claude.ai se establece desde la nube y no lee ningún encabezado de solicitud HTTP de `claude_desktop_config.json` local; actualmente, si necesitas encabezados Bearer estáticos, usa Claude Code o un cliente que admita explícitamente esta capacidad.
+
+## Herramientas MCP
+
+| Herramienta                         | Función                |
+| -------------------------- | ----------------- |
+| `telegram_whoami`          | Ver la cuenta autorizada actual          |
+| `telegram_list_chats`      | Enumerar conversaciones recientes, pudiendo ver solo las no leídas      |
+| `telegram_contacts`        | Enumerar contactos             |
+| `telegram_read_messages`   | Leer mensajes recientes de la conversación especificada       |
+| `telegram_search_messages` | Buscar en una conversación o en todas las conversaciones       |
+| `telegram_send_message`    | Enviar un mensaje, pudiendo responder a un mensaje especificado      |
+| `telegram_edit_message`    | Editar mensajes enviados por la cuenta actual       |
+| `telegram_delete_message`  | Eliminar mensajes para los que se tiene permiso de eliminación        |
+| `telegram_react`           | Responder a mensajes con emojis Unicode |
+| `telegram_mark_read`       | Marcar una conversación como leída          |
+
+`target` puede ser un ID de conversación, un nombre de usuario o un nombre de conversación **exacto**; cuando haya ambigüedad en el nombre, usa preferentemente el ID o el nombre de usuario.
+
+## API REST
+
+Todas las respuestas exitosas usan `{"data": ...}`, y las respuestas fallidas usan `{"error": "..."}`.
+
+### Ejemplos
+
+```bash
+# 当前账号
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 最近会话
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 给 Saved Messages 发一条测试消息
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### Interfaces completas
+
+| Método y ruta                                                      | Parámetros principales                      | Función                    |
+| ---------------------------------------------------------- | ------------------------- | --------------------- |
+| `POST /api/auth/qr`                                        | —                         | Generar URL del código QR de inicio de sesión           |
+| `GET /api/auth/status`                                     | —                         | Consultar estado de inicio de sesión e información de la cuenta           |
+| `POST /api/auth/password`                                  | `{password}`              | Enviar contraseña de verificación en dos pasos              |
+| `POST /api/auth/logout`                                    | —                         | Revocar la sesión guardada por la instancia             |
+| `GET /api/whoami`                                          | —                         | Ver la cuenta actual                |
+| `GET /api/chats`                                           | `?limit=&unread_only=`    | Enumerar conversaciones y cantidad de no leídos              |
+| `GET /api/contacts`                                        | —                         | Enumerar contactos                 |
+| `GET /api/chats/{target}/messages`                         | `?limit=`                 | Leer mensajes                  |
+| `GET /api/messages/search`                                 | `?q=&target=&limit=`      | Buscar mensajes; busca entre conversaciones si se omite target |
+| `POST /api/messages`                                       | `{target,text,reply_to?}` | Enviar o responder un mensaje               |
+| `PATCH /api/chats/{target}/messages/{message_id}`          | `{text}`                  | Editar mensaje                  |
+| `DELETE /api/chats/{target}/messages/{message_id}`         | —                         | Eliminar mensaje                  |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}`                 | Añadir una respuesta con emoji Unicode       |
+| `POST /api/chats/{target}/read`                            | —                         | Marcar conversación como leída                |
+
+## Preguntas frecuentes
+- **401**: El token Bearer falta o es incorrecto. Confirma que el token esté en la cabecera de la solicitud, no en los parámetros de consulta de la URL.
+- **503**: El token de acceso del proxy no está configurado, o el cliente de Telegram aún no está listo. Primero verifica `/readyz`; si el token de acceso del proxy no está configurado, las interfaces protegidas también devolverán 503.
+- **400**: Los parámetros o el JSON no son válidos; la búsqueda debe proporcionar `q`, y `limit` debe ser un entero mayor o igual a 1.
+- **403 / 404**: La cuenta actual no tiene permisos, o el ID de target / message no existe.
+- **429**: Se ha activado el límite de frecuencia de Telegram. Lee `retry_after` y espera, no reintentes de forma concurrente.
+- **El código QR sigue sin completarse**: Vuelve a generar el código QR y confirma que estás utilizando la entrada de escaneo «Vincular dispositivo de escritorio» de Telegram.
+- **Se solicita volver a iniciar sesión después de reiniciar**: Verifica si el volumen persistente de la instancia funciona correctamente; será necesario volver a escanear después de cerrar sesión activamente, revocar la sesión en la lista de dispositivos de Telegram o cuando la sesión expire.
+
+## Alcance de la verificación
+
+El código fuente y las pruebas automatizadas cubren el estado de inicio de sesión, Bearer fail-close, la validación de parámetros REST, el mapeo de errores y la implementación de persistencia de sesión. El uso en producción aún debe completar primero pruebas smoke de solo lectura y de creación/edición/eliminación de mensajes en `target=me` (Mensajes guardados), antes de permitir que el Agent opere sesiones de terceros.

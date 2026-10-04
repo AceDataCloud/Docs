@@ -1,0 +1,148 @@
+---
+title: "دليل استخدام وكيل حساب Telegram"
+description: "Telegram Account Proxy API guide - Ace Data Cloud"
+---
+
+يوفر وكيل حساب Telegram واجهات MCP وREST مستقلة ودائمة لحساب Telegram الشخصي الذي تملكه أنت. كل مثيل يخدم حسابًا واحدًا فقط؛ ولا تحتوي الحاوية على AI، وتُحفظ جلسة تسجيل الدخول في وحدة تخزين دائمة مستقلة لهذا المثيل.
+
+> هذا ليس روبوت Telegram Bot API. يُرجى عدم استخدامه للرسائل المزعجة أو الإرسال الجماعي البارد أو تجاوز قيود Telegram. قبل إرسال المحتوى أو تعديله أو حذفه لطرف ثالث، ينبغي أن يحصل Agent الخاص بك على تأكيد صريح.
+
+## النشر وتسجيل الدخول
+
+1. أنشئ وكيل حساب Telegram في [وحدة التحكم → التطبيقات](https://platform.acedata.cloud/console/applications)، وبعد تفعيل الاشتراك انقر على النشر. تُهيَّأ موارد المثيل تلقائيًا بواسطة المنصة.
+2. بعد أن يصبح المثيل جاهزًا، انقر على «إنشاء رمز QR لتسجيل الدخول». رمز QR صالح لفترة قصيرة، ويمكن إنشاؤه مجددًا بعد انتهاء صلاحيته.
+3. في Telegram، افتح **الإعدادات → الأجهزة → ربط جهاز سطح المكتب** وامسح رمز QR.
+4. إذا أصبحت الحالة `password_required`، فأدخل كلمة مرور التحقق بخطوتين في وحدة التحكم. تُرسل كلمة المرور إلى مثيل المستأجر الخاص بك فقط، ولن تُكتب في إعدادات المنصة.
+5. بعد أن تصبح الحالة `authenticated`، تعرض وحدة التحكم الحساب الحالي وعنوان MCP ورمز وصول Bearer.
+
+تُخزَّن جلسة التفويض في وحدة التخزين الدائمة، وستُعاد استخدامها عند إعادة التشغيل والترقية العاديين. يستدعي «تسجيل الخروج من الحساب» في وحدة التحكم `/api/auth/logout` لإلغاء جلسة Telegram؛ كما أن «تدمير المثيل» يحذف أيضًا حمل العمل ووحدة التخزين الدائمة.
+
+## المصادقة وفحص الصحة
+
+باستثناء `/health` و`/readyz`، تتطلب واجهات تسجيل الدخول وREST وMCP جميعها:
+
+```text
+Authorization: Bearer <رمز الوصول>
+```
+
+تقبل الخدمة مصادقة ترويسة الطلب فقط، ولا تدعم إلحاق الرمز بعنوان URL. احمه كما تحمي كلمة مرور حسابك.
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+يشير `/health` فقط إلى أن عملية HTTP قيد التشغيل:
+
+```json
+{"status":"ok"}
+```
+
+يشير `/readyz` إلى ما إذا كان اتصال MTProto متاحًا. عند الاتصال، يعيد HTTP 200، حتى إذا كان الحساب لا يزال يمسح الرمز أو ينتظر التحقق بخطوتين:
+
+```json
+{"status":"ready","gateway_connected":true,"login_state":"login_required"}
+```
+
+عند انقطاع الاتصال، يعيد الفحص المباشر لـ Kubernetes على Pod حالة HTTP 503، وسيُعاد اتصال المثيل تلقائيًا في الخلفية. في هذه الحالة، يُزال Pod مؤقتًا من Service العام، ولا يُضمن أن تتمكن من قراءة JSON التشخيصي عبر نطاق المثيل؛ يُرجى انتظار استعادة Deployment لحالة Ready في وحدة التحكم. تشمل قيم `login_state` الشائعة `login_required` و`waiting_scan` و`password_required` و`authenticated`؛ ولا يزال يلزم الوصول إلى `authenticated` قبل إجراء عمليات رسائل الحساب.
+
+## توصيل عميل MCP
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <رمز الوصول>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Cursor والعملاء الآخرين الذين يدعمون ترويسات الطلب الثابتة
+
+اضبط عنوان Streamable HTTP وفقًا للوثائق الحالية للعميل، وأضف ترويسة الطلب `Authorization`. على سبيل المثال، يمكن للعملاء الذين يدعمون البنية التالية استخدام:
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <رمز الوصول>"}
+    }
+  }
+}
+```
+
+هذا ليس تنسيق إعداد عام لجميع عملاء MCP. موصلات Claude Desktop / Claude.ai البعيدة تُنشأ من السحابة، ولا تقرأ أي ترويسات طلب HTTP من `claude_desktop_config.json` المحلي؛ إذا كنت تحتاج حاليًا إلى ترويسة Bearer ثابتة، فاستخدم Claude Code أو عميلًا يدعم هذه الإمكانية صراحةً.
+
+## أدوات MCP
+
+| الأداة                         | الوظيفة                |
+| -------------------------- | ----------------- |
+| `telegram_whoami`          | عرض الحساب المصرح به حاليًا          |
+| `telegram_list_chats`      | سرد المحادثات الأخيرة، مع إمكانية عرض غير المقروءة فقط      |
+| `telegram_contacts`        | سرد جهات الاتصال             |
+| `telegram_read_messages`   | قراءة أحدث الرسائل في محادثة محددة       |
+| `telegram_search_messages` | البحث في محادثة واحدة أو جميع المحادثات       |
+| `telegram_send_message`    | إرسال رسالة، مع إمكانية الرد على رسالة محددة      |
+| `telegram_edit_message`    | تعديل رسالة أرسلها الحساب الحالي       |
+| `telegram_delete_message`  | حذف الرسائل التي تملك صلاحية حذفها        |
+| `telegram_react`           | التفاعل مع الرسائل باستخدام رموز Unicode التعبيرية |
+| `telegram_mark_read`       | وضع علامة مقروء على المحادثة          |
+
+يمكن أن يكون `target` معرّف المحادثة أو اسم المستخدم أو اسم المحادثة **الدقيق**؛ وعند التباس الاسم، يُفضّل استخدام المعرّف أو اسم المستخدم.
+
+## REST API
+
+تستخدم جميع الاستجابات الناجحة `{"data": ...}`، وتستخدم الاستجابات الفاشلة `{"error": "..."}`.
+
+### أمثلة
+
+```bash
+# الحساب الحالي
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# المحادثات الأخيرة
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# إرسال رسالة اختبارية إلى Saved Messages
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### الواجهات الكاملة
+
+| الطريقة والمسار                                                      | المعلمات الرئيسية                      | الوظيفة                    |
+| ---------------------------------------------------------- | ------------------------- | --------------------- |
+| `POST /api/auth/qr`                                        | —                         | إنشاء رابط رمز QR لتسجيل الدخول           |
+| `GET /api/auth/status`                                     | —                         | الاستعلام عن حالة تسجيل الدخول ومعلومات الحساب           |
+| `POST /api/auth/password`                                  | `{password}`              | إرسال كلمة مرور التحقق بخطوتين              |
+| `POST /api/auth/logout`                                    | —                         | إلغاء الجلسة المحفوظة في المثيل             |
+| `GET /api/whoami`                                          | —                         | عرض الحساب الحالي                |
+| `GET /api/chats`                                           | `?limit=&unread_only=`    | سرد المحادثات وعدد غير المقروء              |
+| `GET /api/contacts`                                        | —                         | سرد جهات الاتصال                 |
+| `GET /api/chats/{target}/messages`                         | `?limit=`                 | قراءة الرسائل                  |
+| `GET /api/messages/search`                                 | `?q=&target=&limit=`      | البحث في الرسائل؛ البحث عبر المحادثات عند حذف target |
+| `POST /api/messages`                                       | `{target,text,reply_to?}` | إرسال رسالة أو الرد عليها               |
+| `PATCH /api/chats/{target}/messages/{message_id}`          | `{text}`                  | تعديل رسالة                  |
+| `DELETE /api/chats/{target}/messages/{message_id}`         | —                         | حذف رسالة                  |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}`                 | إضافة تفاعل برمز Unicode تعبيري       |
+| `POST /api/chats/{target}/read`                            | —                         | وضع علامة مقروء على المحادثة                |
+
+## الأسئلة الشائعة
+- **401**: رمز Bearer مفقود أو خاطئ. تأكد من وضع الرمز في رأس الطلب، وليس في معلمات استعلام URL.
+- **503**: رمز وصول الوكيل غير مُعدّ، أو عميل Telegram لم يصبح جاهزًا بعد. تحقق أولًا من `/readyz`؛ إذا لم يكن رمز وصول الوكيل مُعدًّا، فستعيد الواجهات المحمية أيضًا 503.
+- **400**: المعلمات أو JSON غير صالحين؛ يجب أن يوفر البحث `q`، ويجب أن يكون `limit` عددًا صحيحًا أكبر من أو يساوي 1.
+- **403 / 404**: لا يملك الحساب الحالي صلاحية، أو أن target / message ID غير موجود.
+- **429**: تم تفعيل حد معدل Telegram. اقرأ `retry_after` وانتظر، ولا تُعِد المحاولة بشكل متزامن.
+- **رمز QR لا يكتمل باستمرار**: أعد إنشاء رمز QR، وتأكد من استخدام مدخل المسح «ربط جهاز سطح المكتب» في Telegram.
+- **تتطلب إعادة تسجيل الدخول بعد إعادة التشغيل**: تحقق مما إذا كان التخزين الدائم للمثيل يعمل بشكل طبيعي؛ يلزم إعادة المسح بعد تسجيل الخروج النشط، أو إلغاء الجلسة من قائمة أجهزة Telegram، أو انتهاء صلاحية الجلسة.
+
+## نطاق التحقق
+
+يغطي الكود المصدري والاختبارات المؤتمتة حالة تسجيل الدخول، وBearer fail-close، والتحقق من معلمات REST، وتعيين الأخطاء، وتنفيذ استمرارية الجلسة. لا يزال ينبغي في بيئة الإنتاج إكمال اختبار smoke للقراءة فقط وإنشاء/تحرير/حذف الرسائل أولًا في `target=me` ‏(Saved Messages)، ثم السماح للـ Agent بتشغيل جلسات الجهات الخارجية.

@@ -3,7 +3,7 @@ title: "Guía de integración del proyecto Suno Studio"
 description: "Suno Music Generation API guide - Ace Data Cloud"
 ---
 
-La API del proyecto Suno Studio gestiona proyectos de música multipista a través de un único punto de entrada:
+La API de proyectos de Suno Studio gestiona proyectos musicales multipista mediante un único punto de entrada:
 
 ```http
 POST /suno/projects
@@ -11,24 +11,24 @@ Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
 ```
 
-El `action` de la solicitud determina el tipo de operación. La clave principal del Project utiliza uniformemente `id`; `version_id` representa la versión actual del proyecto, y todas las operaciones de modificación y exportación deben enviar la versión más reciente para evitar sobrescrituras simultáneas.
+El `action` de la solicitud determina el tipo de operación. La clave primaria de Project utiliza uniformemente `id`; `version_id` representa la versión actual del proyecto, y todas las operaciones de modificación y exportación deben enviar la versión más reciente para evitar sobrescrituras concurrentes.
 
 ## Resumen de operaciones
 
 | action             | Modo  | Uso                      |
 | ------------------ | --- | ----------------------- |
 | `create`           | Síncrono  | Crear un proyecto vacío                   |
-| `retrieve`         | Síncrono  | Leer el proyecto y el `state` editable completo      |
+| `retrieve`         | Síncrono  | Leer el proyecto y el `state` completo editable      |
 | `save`             | Síncrono  | Guardar el estado completo del proyecto                |
-| `upload`           | Asíncrono  | Inicializar material que puede añadirse al proyecto desde una URL de audio HTTPS |
+| `upload`           | Asíncrono  | Inicializar recursos que se pueden añadir al proyecto desde una dirección de audio HTTPS |
 | `add_track`        | Asíncrono  | Añadir audio existente al proyecto               |
-| `generate_track`   | Asíncrono  | Generar nuevos candidatos de pista de audio para un intervalo especificado            |
+| `generate_track`   | Asíncrono  | Generar candidatos de nueva pista de audio para un intervalo especificado            |
 | `replace_section`  | Asíncrono  | Generar candidatos de reemplazo local                |
 | `commit_candidate` | Asíncrono  | Confirmar el candidato seleccionado en el proyecto             |
 | `remove_track`     | Síncrono  | Eliminar la pista especificada                  |
-| `render`           | Asíncrono  | Exportar una canción completa a partir de la versión guardada           |
+| `render`           | Asíncrono  | Exportar una canción completa desde una versión guardada           |
 
-Las operaciones asíncronas devuelven inmediatamente un `task_id`. Utilice la interfaz gratuita `/suno/tasks` para realizar sondeo, o proporcione `callback_url` para recibir resultados finales.
+Las operaciones asíncronas devuelven inmediatamente `task_id`. Use la interfaz gratuita `/suno/tasks` para sondear, o pase `callback_url` para recibir el resultado final.
 
 ## Crear y leer
 
@@ -39,13 +39,13 @@ Las operaciones asíncronas devuelven inmediatamente un `task_id`. Utilice la in
 }
 ```
 
-Todas las operaciones de modificación deben enviar un Header `Idempotency-Key` único. Tras una creación exitosa, el `data.id` de la respuesta es el ID del Project. Un nuevo proyecto vacío podría no tener `version_id` antes del primer guardado.
+Todas las operaciones de modificación deben enviar un Header `Idempotency-Key` único. Tras crear correctamente, `data.id` en la respuesta es el ID del Project. Los proyectos vacíos recién creados pueden no tener `version_id` antes del primer guardado.
 
 ```json
 {"action":"retrieve","id":"PROJECT_ID"}
 ```
 
-La respuesta de lectura contiene el `state` completo. Se recomienda leer primero, luego modificar y guardar basándose en el valor devuelto; no construya manualmente desde cero las estructuras internas de ritmo y pistas.
+La respuesta de lectura incluye el `state` completo. Un proyecto vacío recién creado devuelve `{"tracks":[],"timing":{"bps":2}}`, que puede utilizarse directamente para el primer guardado. `timing.bps` representa los pulsos por segundo, con un valor predeterminado de 2 (120 BPM), y debe ser un número positivo; los `startBeats`, `endBeats` y `readStartBeats` de los segmentos utilizan la unidad de pulsos del proyecto, y las posiciones de compás del análisis de audio no pueden tratarse directamente como coordenadas de línea de tiempo.
 
 ## Guardar el estado completo
 
@@ -55,13 +55,13 @@ La respuesta de lectura contiene el `state` completo. Se recomienda leer primero
   "id":"PROJECT_ID",
   "version_id":"CURRENT_VERSION_ID",
   "title":"Edited Project",
-  "state":{"tracks":[],"timing":{}}
+  "state":{"tracks":[],"timing":{"bps":2}}
 }
 ```
 
-El primer guardado de un nuevo proyecto vacío puede omitir `version_id`; después de que el primer guardado genere una versión, los guardados posteriores deben enviar el valor más reciente. Si la versión ya ha cambiado, la interfaz devuelve HTTP 409. En este caso, vuelva a realizar `retrieve`, fusione las modificaciones y envíe de nuevo con una nueva clave de idempotencia; no reintente ciegamente la solicitud anterior.
+El primer guardado de un proyecto vacío recién creado puede omitir `version_id`; después de que el primer guardado genere una versión, los guardados posteriores deben enviar el valor más reciente. Si la versión ya ha cambiado, la interfaz devuelve HTTP 409. En ese caso, vuelva a ejecutar `retrieve`, fusione las modificaciones y envíelas con una nueva clave de idempotencia; no reintente ciegamente la solicitud anterior.
 
-## Cargar y añadir pistas
+## Subir y añadir pistas
 
 ```json
 {
@@ -73,7 +73,7 @@ El primer guardado de un nuevo proyecto vacío puede omitir `version_id`; despu�
 }
 ```
 
-Una vez completada la carga, el resultado de la tarea devuelve el `audio_id` candidato. Luego añádalo al proyecto:
+Tras subir correctamente, lea el ID de audio desde `response.data.candidate.audio_id`. Después añádalo al proyecto:
 
 ```json
 {
@@ -85,23 +85,27 @@ Una vez completada la carga, el resultado de la tarea devuelve el `audio_id` can
 }
 ```
 
-## Generar y reemplazar
+Añadir una pista conserva de forma predeterminada la velocidad de reproducción del audio y convierte la duración del audio a pulsos según el `timing.bps` del proyecto. Después de cada `save`, `add_track`, `commit_candidate` o `remove_track`, se debe utilizar el nuevo `version_id` de la respuesta.
 
-`generate_track` genera candidatos de pistas de audio para un intervalo del proyecto; `replace_section` devuelve dos candidatos de reemplazo local. Ninguna de las dos operaciones selecciona automáticamente el resultado artístico.
+## Generación y reemplazo
+
+`generate_track` genera candidatos de pista de audio para un intervalo del proyecto; `replace_section` devuelve dos candidatos de reemplazo local. Ninguna de las dos operaciones selecciona automáticamente el resultado artístico. El modelo debe utilizar nombres públicos: `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild` o `chirp-v6-mini`; la disponibilidad para operaciones específicas sigue estando sujeta al estado final de la tarea, los nombres no compatibles devuelven 400 antes del envío. No se cambiará automáticamente a otro modelo.
 
 ```json
 {
-  "action": "replace_section",
-  "id": "PROJECT_ID",
-  "version_id": "CURRENT_VERSION_ID",
-  "source_audio_id": "AUDIO_ID",
-  "start_seconds": 35.12,
-  "end_seconds": 48.76,
-  "model": "chirp-v6",
-  "replacement_lyrics": "Nuevo fragmento de letra",
-  "async": true
+  "action":"replace_section",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "source_audio_id":"AUDIO_ID",
+  "start_seconds":35.12,
+  "end_seconds":48.76,
+  "model":"chirp-v6",
+  "replacement_lyrics":"新的歌词片段",
+  "async":true
 }
 ```
+
+`generate_track` también debe proporcionar `render_audio_id` (el audio de exportación del proyecto completado), `stem_control_tags` y el audio de origen `source_audio_id`. `batch_size` es de 1–4, con un valor predeterminado de 2; `start_seconds` y `end_seconds` son segundos del audio de origen. El intervalo de reemplazo con `fixed=true` debe ser menor de 26 segundos.
 
 Después de seleccionar un candidato, confírmelo:
 
@@ -118,6 +122,8 @@ Después de seleccionar un candidato, confírmelo:
 
 Los candidatos están vinculados a la versión del proyecto en el momento de la generación. Si el proyecto ya ha cambiado, los candidatos anteriores no pueden confirmarse directamente.
 
+Los candidatos de reemplazo local se confirman en la pista original que contiene el único segmento fuente; los candidatos de toma completa conservan la posición original y reemplazan el segmento original; los candidatos de intervalo reemplazan únicamente el intervalo solicitado y conservan los segmentos anterior y posterior. Si no se puede hacer coincidir la duración de forma fiable, se devuelve 400 y se conserva el proyecto original; en este caso, no pase `start_beats` ni `end_beats`. Los candidatos de nueva pista deben confirmarse en una pista vacía guardada previamente, utilizando de forma predeterminada el punto de inicio del segmento fuente, o pasando explícitamente un intervalo sin solapamientos; si los segmentos existentes en la misma pista se solapan, se devuelve 400. No genere primero y cree una nueva pista después, de lo contrario el cambio de versión hará que el candidato caduque.
+
 ## Exportar la canción completa
 
 ```json
@@ -132,6 +138,20 @@ Los candidatos están vinculados a la versión del proyecto en el momento de la 
 }
 ```
 
-El servidor lee el estado autorizado del proyecto de la versión especificada y ensambla los parámetros de exportación. El resultado final contiene `render_id`, `audio_id`, `audio_url` y la duración. El proyecto está vinculado al entorno de ejecución en el que fue creado, y no puede migrarse entre entornos ni realizar una conmutación por error automática.
+El servidor lee el estado autorizado del proyecto de la versión especificada y ensambla los parámetros de exportación. Al omitir `start_beats` y `end_beats`, se exporta de forma predeterminada desde el inicio más temprano hasta el final más tardío de todos los segmentos audibles; las pistas/segmentos silenciados no participan, y cuando existen pistas solo, se seleccionan únicamente las pistas solo. Un proyecto vacío o sin pistas audibles válidas devuelve 400. El resultado final incluye `render_id`, `audio_id`, `audio_url` y la duración. El proyecto está vinculado al entorno de ejecución en el que se creó, y no puede migrarse entre entornos ni realizar conmutación por error automática.
 
-> Solo puede cargar o procesar audio sobre el que tenga derechos legales de uso. La API de proyectos se encuentra actualmente en Beta; conserve las URL de audio finales de los resultados importantes.
+> Solo puede subir o procesar audio sobre el que posea derechos legales de uso. La API de proyectos se encuentra actualmente en Beta; conserve las URL finales de audio de los resultados importantes.
+
+## Sondeo y recuperación de errores
+
+```json
+{
+  "action": "retrieve",
+  "id": "TASK_ID"
+}
+```
+Envía la solicitud anterior a `/suno/tasks`. Las tareas de Projects indican éxito cuando existe `finished_at` y `response.success=true`; `response.success=false` indica fallo. Que el envío devuelva HTTP 200 o `task_id` solo representa que ha sido aceptado, no que el audio esté completado.
+
+El mismo `Idempotency-Key` con la misma solicitud devolverá el resultado original (incluidos los fallos), y no volverá a generar automáticamente ni cobrará de nuevo. Cuando quieras reintentar explícitamente una operación que ya ha fallado, primero consulta la tarea original para confirmar el fallo, y luego usa una nueva clave; no vuelvas a enviar mientras la tarea original siga en proceso o el resultado sea incierto.
+
+Las categorías de error incluyen `studio_unavailable` / `studio_model_unavailable` (503, temporalmente no se puede procesar o el modelo no está disponible), `studio_model_unsupported` (400, el modelo no admite esta operación), `studio_state_invalid` (400, el estado del proyecto o el rango de exportación no es válido), `too_many_requests` (429), `studio_audio_unavailable` (403, el audio referenciado no puede usarse para la exportación del proyecto) y `content_rejected` (403). Conserva `trace_id` para la investigación.
