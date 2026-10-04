@@ -1,0 +1,360 @@
+---
+title: "Tutorial de Integração do SDK TypeScript"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`@acedatacloud/sdk`](https://www.npmjs.com/package/@acedatacloud/sdk) é o SDK oficial TypeScript / JavaScript da Ace Data Cloud, que encapsula todos os serviços em `api.acedata.cloud` em métodos tipados como `client.openai.chat.completions.create(...)`, `client.images.generate(...)`, `client.search.google(...)`, etc., com suporte a fluxo SSE, retry backoff e exceções tipadas.
+
+Pode ser usado em Node.js, Deno, Bun e navegadores modernos (com bundler).
+
+Endereço do código-fonte e do pacote:
+
+- Repositório do SDK: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- npm SDK: [https://www.npmjs.com/package/@acedatacloud/sdk](https://www.npmjs.com/package/@acedatacloud/sdk)
+
+## Instalação
+
+```bash
+npm install @acedatacloud/sdk
+# ou pnpm add / yarn add / bun add
+```
+
+Se precisar de pagamento na blockchain X402 (sem caminho de API Token), instale mais um:
+
+```bash
+npm install @acedatacloud/x402-client ethers
+```
+
+Saída da verificação de versão de um projeto npm limpo:
+
+```text
+$ npm ls @acedatacloud/sdk
+└── @acedatacloud/sdk@2026.504.2
+
+$ node -e "console.log(require('@acedatacloud/sdk').AceDataCloud?.name)"
+AceDataCloud
+```
+
+Explicação dos resultados:
+
+- A versão do pacote é `2026.504.2` (CalVer, 2ª revisão da 504ª semana ISO de 2026).
+- `AceDataCloud` é a classe principal usada para construir o cliente, acessível a partir da exportação padrão.
+
+## Preparar o Token da API
+
+Consulte [Visão Geral do SDK - Solicitar Token da API](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) para obter o token e, em seguida, `export` no shell:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+Ao construir o cliente, não passe `apiToken`, o SDK irá ler automaticamente a variável de ambiente `ACEDATACLOUD_API_TOKEN`. Se sua variável de ambiente já tiver `ACEDATACLOUD_API_KEY` (convenção do repositório do projeto), você pode passá-la explicitamente: `new AceDataCloud({ apiToken: process.env.ACEDATACLOUD_API_KEY })`.
+
+## Exemplo 1: chat.completions (não em fluxo)
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [
+    { role: 'user', content: 'Reply with exactly: ADC_TS_SDK_OK' }
+  ],
+  max_tokens: 20,
+  temperature: 0
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('id', res.id);
+console.log('model', res.model);
+console.log('content', res.choices[0].message.content);
+console.log('usage', JSON.stringify(res.usage));
+```
+
+Resultado da execução do programa:
+
+```text
+elapsed_ms 2543
+id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA
+model gpt-4o-mini
+content ADC_TS_SDK_OK
+usage {"prompt_tokens":16,"completion_tokens":6,"total_tokens":22}
+```
+
+Explicação dos resultados:
+
+- `id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA` é o ID de resposta compatível com OpenAI, que pode ser encontrado no console [Histórico de Uso](https://platform.acedata.cloud/console/usages).
+- `content ADC_TS_SDK_OK` é o identificador fixo retornado pelo modelo, provando que a resposta não foi alterada pelo SDK.
+- Uma conclusão de chat consome cerca de 22 tokens, cobrados de acordo com o preço do gpt-4o-mini.
+- O SDK declara a resposta como `Record<string, unknown>`, que em tempo de execução é um objeto JSON; acessos por ponto como `.id` / `.choices[0].message.content` funcionam em `.mjs`, Node REPL, Bun; em projetos TypeScript estritos, pode ser necessário usar `(res as any).id` ou desativar `noImplicitAny` no tsconfig.
+
+## Exemplo 2: chat.completions (fluxo SSE)
+
+Ao ativar `stream: true`, `create` retorna um iterador assíncrono, onde cada quadro é um `ChatCompletionChunk`.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+let firstChunkMs: number | null = null;
+let chunks = 0;
+const collected: string[] = [];
+
+const stream = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [
+    { role: 'user', content: 'Count from 1 to 5, separated by single spaces, no extra text.' }
+  ],
+  max_tokens: 20,
+  stream: true
+});
+
+for await (const chunk of stream) {
+  if (firstChunkMs === null) firstChunkMs = Date.now() - t0;
+  chunks++;
+  const delta = chunk.choices[0]?.delta?.content;
+  if (delta) collected.push(delta);
+}
+
+console.log('total_elapsed_ms', Date.now() - t0);
+console.log('first_chunk_ms', firstChunkMs);
+console.log('chunks', chunks);
+console.log('collected', collected.join('').trim());
+```
+
+Resultado da execução do programa:
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+Explicação dos resultados:
+
+- O atraso do primeiro quadro de 2481 ms é o tempo que o modelo levou para gerar o primeiro token; os 12 quadros subsequentes chegaram todos em 135 ms.
+- Os 13 quadros juntos formam `"1 2 3 4 5"`, cada token em um quadro separado + o último quadro com `finish_reason`.
+- O fluxo não consome menos tokens do que o não fluxo, mas o atraso do primeiro token é significativamente reduzido, adequado para interfaces de usuário em tempo real.
+
+## Exemplo 3: images.generate (NanoBanana)
+
+`client.images.generate({ provider: 'nano-banana', ... })` retorna diretamente de forma síncrona, **não é necessário passar o parâmetro `wait`** — a API NanoBanana gera de forma síncrona.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const img = await client.images.generate({
+  provider: 'nano-banana',
+  prompt: 'A minimalist logo of a yellow banana on a white background, flat design'
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('task_id', img.task_id);
+console.log('trace_id', img.trace_id);
+console.log('image_url', img.data[0].image_url);
+```
+
+Resultado da execução do programa:
+
+```text
+elapsed_ms 16634
+task_id 8e4b44a6-5ece-46a4-9013-9e0c8aca2217
+trace_id 9529e241-54fe-40da-98a2-871e14989fb5
+image_url https://platform.cdn.acedata.cloud/nanobanana/331be1d3-3330-4196-bd1c-aa75717c549c.png
+```
+
+Explicação dos resultados:
+
+- `image_url` é um endereço estável no CDN, que pode ser usado diretamente em `<img src />` ou para download.
+- A maior parte do tempo de 16,6 segundos é gasto na inferência do modelo, o custo do SDK local é desprezível.
+- `trace_id` é o ID de solicitação atribuído pela plataforma; se houver problemas, forneça esse ID ao suporte para localização rápida.
+- Para serviços assíncronos (Midjourney, Sora, Veo, etc.), é necessário fazer polling com TaskHandle, consulte [Polling de Tarefas do SDK e Respostas em Fluxo](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+## Exemplo 4: Tratamento de Erros Tipados
+
+O SDK lançará erros como subclasses específicas (como `AuthenticationError`, `BadRequestError`, `RateLimitError`, `InternalServerError`, `APIConnectionError`, etc.) com base no status HTTP, permitindo ramificações precisas com `instanceof`.
+```ts
+import { AceDataCloud, AuthenticationError } from '@acedatacloud/sdk';
+
+const bad = new AceDataCloud({ apiToken: 'definitivamente-não-um-token-real' });
+
+try {
+  await bad.openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'oi' }],
+    max_tokens: 5
+  });
+} catch (err: any) {
+  console.log('err_class', err.constructor.name);
+  console.log('status', err.statusCode);
+  console.log('code', err.code);
+  console.log('instanceof AuthenticationError =', err instanceof AuthenticationError);
+}
+```
+
+Resultado do programa:
+
+```text
+A. err_class AuthenticationError
+A. status 401
+A. code invalid_token
+A. instanceof AuthenticationError = true
+```
+
+Descrição do resultado:
+
+- 401 mapeado automaticamente para `AuthenticationError`, o código de negócios pode usar `instanceof` para ramificações precisas.
+- `code: invalid_token` vem do PlatformGateway, facilitando a comparação com os logs do backend.
+- Da mesma forma, 429 → `RateLimitError`, 400 → `BadRequestError`, 5xx → `InternalServerError`.
+
+## Exemplo 5: Roteamento de múltiplos modelos
+
+O mesmo cliente pode alternar livremente entre vários serviços, desde que o nome do modelo seja o mesmo.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const MODELS = ['gpt-4o-mini', 'gemini-2.5-flash', 'deepseek-v3', 'grok-3-fast'];
+
+for (const model of MODELS) {
+  const t0 = Date.now();
+  try {
+    const r = await client.openai.chat.completions.create({
+      model,
+      messages: [{ role: 'user', content: 'Responda exatamente: ADC_OK' }],
+      max_tokens: 5
+    });
+    console.log(model.padEnd(28), `${Date.now() - t0}ms`, `content="${r.choices[0].message.content}"`);
+  } catch (err: any) {
+    console.log(model.padEnd(28), `${Date.now() - t0}ms`, 'ERR', err.statusCode, err.code);
+  }
+}
+```
+
+Resultado do programa:
+
+```text
+gpt-4o-mini                  2189ms   content="ADC_OK"
+gemini-2.5-flash             2569ms   content=""
+deepseek-v3                  2047ms   content="ADC_OK"
+grok-3-fast                  3598ms   content="ADC_OK"
+```
+
+Descrição do resultado:
+
+- Um código, um token, cobre quatro tipos de serviços de modelos: OpenAI / Google / DeepSeek / xAI.
+- `gemini-2.5-flash` desta vez não retornou `ADC_OK`, é uma diferença no estilo de saída do modelo — o SDK não silenciou nada, transmitindo fielmente as palavras do modelo para o negócio.
+- O preço é cobrado de acordo com o preço real do token de cada um, o caminho passa apenas uma vez pelo PlatformGateway.
+
+## Exemplo 6: Pesquisa no Google
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const r = await client.search.google({
+  query: 'Ace Data Cloud',
+  resource: 'web'
+});
+const items = (r as any).organic ?? [];
+console.log('elapsed_ms', Date.now() - t0);
+console.log('organic_count', items.length);
+items.slice(0, 2).forEach((it: any, i: number) => {
+  console.log(`#${i + 1}`, it.title, '->', it.link);
+});
+```
+
+Resultado do programa:
+
+```text
+elapsed_ms 2382
+organic_count 10
+#1 Ace Data Cloud -> https://platform.acedata.cloud/
+#2 Ace Data Cloud - GitHub -> https://github.com/acedatacloud
+```
+
+Descrição do resultado:
+
+- Uma única solicitação obteve 10 resultados orgânicos, o nome do campo é `organic` (não `organic_results`).
+- A pesquisa foi realizada através do [Serviço Serp](https://platform.acedata.cloud/services/serp), cobrada por solicitação.
+- A mesma instância do cliente pode tanto fazer chat quanto pesquisar, um único token é suficiente.
+
+## Opções de configuração
+
+```ts
+const client = new AceDataCloud({
+  // Um dos obrigatórios: token explícito ou variável de ambiente ACEDATACLOUD_API_TOKEN
+  apiToken: process.env.MY_TOKEN,
+
+  // URL base da API da plataforma, padrão https://api.acedata.cloud
+  baseURL: 'https://api.acedata.cloud',
+
+  // Alguns serviços (como metadados do dashboard) usam o domínio da plataforma
+  platformBaseURL: 'https://platform.acedata.cloud',
+
+  // Tempo limite de uma única solicitação, em milissegundos; padrão 300_000 (5 minutos)
+  timeout: 300_000,
+
+  // Número máximo de tentativas automáticas, padrão 2; condições de repetição: 408 / 409 / 429 / 5xx / erro de rede
+  maxRetries: 2,
+
+  // Cabeçalhos de solicitação personalizados
+  defaultHeaders: { 'x-app': 'meu-serviço/1.0' }
+});
+```
+
+## Uso no navegador
+
+`@acedatacloud/sdk` é um pacote ESM + ISO (homogêneo), que pode ser importado diretamente em navegadores modernos com bundler. Atenção: **não codifique o token da API diretamente no código do frontend**. Recomenda-se no frontend:
+
+1. Usar [X402 `paymentHandler`](https://platform.acedata.cloud/documents/sdk-x402-payment) — a carteira do usuário paga por USDC por solicitação, sem necessidade de token.
+2. Ou usar o SDK no seu próprio servidor, o navegador apenas chama seu backend.
+
+## Avançado: Polling de tarefas e resposta em streaming
+
+- Serviços de tarefas (Midjourney, Sora, Veo, Suno): use `TaskHandle` para polling, detalhes de unidade, tempo limite e repetição veja [SDK Polling de Tarefas e Streaming](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+- Chat em streaming: o exemplo 2 desta página já demonstrou; áudio / vídeo em streaming também é suportado.
+
+## Avançado: Ganchos de pagamento X402
+
+Se você não quiser solicitar um token de API e quiser pagar por solicitação na blockchain, pode usar `paymentHandler`:
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: (window as any).ethereum,  // Provedor EIP-1193, ou viem walletClient
+    evmAddress: userAddress
+  })
+});
+```
+
+> `createX402PaymentHandler` no lado TypeScript aceita `{ network, evmProvider, evmAddress, preferScheme? }` (rede EVM) ou `{ network: 'solana', solanaWallet }` (Solana). No servidor Node, quando não há `window.ethereum`, use o `createWalletClient` do `viem` (baseado em chave privada) para encapsular um provedor compatível com EIP-1193 e passe-o; detalhes e resultados reais na blockchain veja [SDK + Ganchos de Pagamento X402](https://platform.acedata.cloud/documents/sdk-x402-payment).
+
+## Como verificar o saldo restante
+
+Através do [Console Ace Data Cloud - Lista de Aplicativos](https://platform.acedata.cloud/console/applications), você pode verificar o saldo restante da conta atual.
+
+Através do [Console Ace Data Cloud - Histórico de Uso](https://platform.acedata.cloud/console/usages) você pode verificar todo o histórico de uso e detalhes de cobrança.
+
+## Saiba mais
+
+- 📦 [`@acedatacloud/sdk` no npm](https://www.npmjs.com/package/@acedatacloud/sdk)
+- 🗂 [Código-fonte do SDK](https://github.com/AceDataCloud/SDK/tree/main/typescript)
+- 🐍 [Tutorial de integração do SDK Python](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Tutorial de integração do SDK Go](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + Ganchos de Pagamento X402](https://platform.acedata.cloud/documents/sdk-x402-payment)

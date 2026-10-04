@@ -1,0 +1,206 @@
+---
+title: "X402 TypeScript SDK интеграција упутство"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+TypeScript је један од најпрепорученијих начина за интеграцију Ace Data Cloud X402. Официјални SDK управља обичним API позивима, анкетирањем задатака, обрадом грешака и аутоматским поновним покушајима; `@acedatacloud/x402-client` управља потписивањем `PAYMENT-SIGNATURE` заглавља захтева када се сусретне `402 Payment Required`.
+
+Изворни код и адреса пакета:
+
+- SDK репозиторијум: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- X402 Client репозиторијум: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm SDK: [https://www.npmjs.com/package/@acedatacloud/sdk](https://www.npmjs.com/package/@acedatacloud/sdk)
+- npm X402 Client: [https://www.npmjs.com/package/@acedatacloud/x402-client](https://www.npmjs.com/package/@acedatacloud/x402-client)
+
+## Инсталирање зависности
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client
+```
+
+Ако користите Base или SKALE, потребна је EVM потписна способност:
+
+```bash
+npm install ethers
+```
+
+Ако користите Solana, потребан је Solana wallet adapter или `@solana/web3.js`:
+
+```bash
+npm install @solana/web3.js
+```
+
+Чисто npm пројектно инсталирање и увоз провера излаз:
+
+```text
+imports_ok true true true true true
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+```
+
+Резултат објашњење:
+
+- `@acedatacloud/sdk` и `@acedatacloud/x402-client` могу се инсталирати из npm и увући у Node.js.
+- `ethers` се користи за EVM typed data потписивање, `@solana/web3.js` се користи за конструкцију Solana трансакција.
+
+## Base или SKALE пример
+
+У прегледачу можете директно користити `window.ethereum`. У Node.js можете користити `ethers.Wallet` да обавите слој EIP-1193 стилског провајдера.
+
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`unsupported method: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+
+console.log(result.choices[0].message.content);
+```
+
+Овај пример програма даје следећи резултат:
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+Резултат објашњење:
+
+- Програм прво активира неауторизовани 402, затим handler потписује `PAYMENT-SIGNATURE`, а на крају поново покушава са истим телом захтева.
+- `content ADC_TS_SDK_X402_OK` је фиксни низ који модел заиста враћа, што указује да је поновљени захтев ушао у циљни API.
+- `id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT` је ID одговора за ову chat completion, који се може користити за упоређивање са записима платформе.
+- Резултати на ланцу се могу видети на [E2E верификација и решавање проблема](https://platform.acedata.cloud/documents/x402-e2e-troubleshooting).
+
+Промените `network` у `skale` да бисте користили SKALE. Предност SKALE-а је ниска цена гаса за трансакције на ланцу; предност Base-а је већа ликвидност USDC и боља подршка за новчанике, а само Base нуди `upto` накнадно мерење.
+
+Напомена: SKALE тренутно подржава само `exact`. Ако под `network: 'skale'` пошаљете `preferScheme: 'upto'`, handler неће пронаћи `upto` и тихо ће се вратити на `exact`, неће пријавити грешку — сценарији као што је chat completion који се мере по токенима ће се стога обрачунавати по фиксној цени, а не по стварној потрошњи. За накнадно мерење користите Base.
+
+## Пример прегледач новчаника
+
+Када користите MetaMask, Coinbase Wallet или WalletConnect у фронтенд апликацији, обично се директно прослеђује EIP-1193 провајдер:
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: window.ethereum,
+    evmAddress: address
+  })
+});
+
+const image = await client.images.generate({
+  provider: 'nano-banana',
+  prompt: 'a yellow banana on a white background'
+});
+```
+
+Прегледач новчаника ће приказати потврду потписа. Корисник не потписује било коју поруку, већ захтев за плаћање који враћа API: адреса за примање, USDC уговор, износ, рок важења и nonce су сви укључени у потпис.
+
+## Solana пример
+
+Solana користи SPL USDC `TransferChecked`. Прослеђени wallet adapter мора да излаже `publicKey` и `signAndSendTransaction`.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'solana',
+    solanaWallet: phantomWallet
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+```
+
+Solana пут је тренутно подржан само за `exact`, не подржава `upto`. Ако API врати више `accepts`, handler ће изабрати ону ставку која одговара `network = 'solana'`.
+
+Solana пут је на истом јавном API-ју потврђен да плаћени поновљени покушаји могу вратити HTTP 200 и `ADC_SOLANA_E2E_OK`. Јавни RPC упити могу бити ограничени, стога у овом тексту не наводим Solana tx hash; ако вам је потребно обрачун на ланцу, користите свој Solana RPC или конзолу за записивање потврде.
+
+## Избор `exact` или `upto`
+
+Тренутни TypeScript handler ће изабрати први одговарајући захтев за плаћање који сервер враћа за мрежу. Ace Data Cloud API обично ставља `exact` за исту мрежу испред `upto`, стога ако јасно желите да користите накнадно мерење, потребно је проследити `preferScheme: 'upto'`.
+
+Пример:
+
+```ts
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address,
+    preferScheme: 'upto'
+  })
+});
+```
+
+Ако сервер не врати `upto` захтев за ту мрежу, handler ће аутоматски прећи на први доступни захтев за ту мрежу, обично `exact`.
+
+`upto` захтева једнократну овлашћење Permit2. `upto` је тренутно доступан само на Base, стога је потребно само једном овластити Base USDC:
+```bash
+npx tsx scripts/approve-permit2.ts --network base
+```
+
+Base `upto` је завршио јавну API верификацију: HTTP 402 -> HTTP 200, пост-трансакција за обрачунавање је `0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036`. Пун излаз видите у опису тарифног плана.
+
+## Шта је SDK урадио
+
+`@acedatacloud/sdk` транспорт ће извршити payment handler када прими 402:
+
+```ts
+type PaymentHandler = (ctx: {
+  url: string;
+  method: string;
+  body?: unknown;
+  accepts: PaymentRequirement[];
+}) => Promise<{ headers: Record<string, string> }>;
+```
+
+`@acedatacloud/x402-client` враћени handler ће:
+
+1. Изабрати payment requirement за циљну мрежу из `ctx.accepts`.
+2. Конструисати EVM EIP-712 потпис или Solana трансакцију преноса по мрежи.
+3. Серијализовати envelope у Base64.
+4. Вратити `{ headers: { 'PAYMENT-SIGNATURE': '<base64>' } }`.
+5. SDK аутоматски поново покушава са оригиналним телом захтева.
+
+То значи да пословни код треба да пише као обичан SDK позив, без потребе за ручним обрадом 402 поновног покушаја.

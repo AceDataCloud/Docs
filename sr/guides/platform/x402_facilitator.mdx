@@ -1,0 +1,215 @@
+---
+title: "X402 Facilitator интеграција"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Facilitator је серверски компонент за обраду плаћања у X402 линку. Клијент је одговоран за потписивање, а Gateway или ваш сервер су одговорни за позивање Facilitator-а на `/verify` и `/settle`.
+
+Производна адреса Facilitator-а Ace Data Cloud је:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+Изворни код: [https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire споразум
+
+X402 линк Ace Data Cloud је у потпуности прешао на званичну x402 v2 и више не прихвата v1 `X-Payment` заглавље. Приликом интеграције потребно је обратити пажњу на три тачке:
+
+- Заглавље је `PAYMENT-SIGNATURE`, а вредност је base64 кодирани JSON envelope.
+- Врх envelope-а мора бити `x402Version: 2`, и уз помоћ `accepted` објекта изјавити изабрани `scheme` и `network`.
+- `network` користи CAIP-2 идентификатор (нпр. `eip155:8453`), не сме се писати скраћенице као што су `base`.
+
+Структура envelope-а:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+402 одговор, поред JSON тела, такође ће имати `PAYMENT-REQUIRED` заглавље, чија је вредност base64 кодирана верзија истог садржаја изазова, што олакшава клијенту да прочита захтев за плаћање без декодирања тела.
+
+## Кључни интерфејси
+
+### `GET /supported`
+
+Погледајте подржане мреже и scheme:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Враћени пример:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": ["3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"]
+  }
+}
+```
+
+Објашњење резултата:
+
+- `network` користи CAIP-2 идентификатор, а не скраћенице као што су `base`, `skale`.
+- `/supported` указује да Facilitator има одговарајуће способности за верификацију и обраду плаћања.
+- Base, SKALE и Solana подржавају `exact`; `upto` је тренутно доступан само на Base.
+- `signers` су адресе које Facilitator користи за подношење трансакција.
+- Да ли конкретан API дозвољава ове опције, зависи од `accepts` у 402 одговору тог API-ја.
+
+### `POST /verify`
+
+Верификује да ли `PAYMENT-SIGNATURE` који је пренет од стране клијента задовољава одређени захтев за плаћање.
+
+Тело захтева:
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+v2 поље `paymentRequirements` садржи `scheme`, `network`, `asset`, `amount`, `payTo`, `maxTimeoutSeconds` и `extra`, а поље за износ је `amount`. API 402 одговор у `accepts[]` ће такође додатно вратити `maxAmountRequired` за читање максимума од стране клијента, али то не припада пољима тела захтева Facilitator-а.
+
+Успешан одговор:
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+`PAYMENT-RESPONSE` заглавље за плаћање производне наруџбине, након декодирања, садржи резултат обраде. Резултат програма за плаћање Base наруџбине:
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Објашњење резултата:
+
+- `success=True` указује да је Facilitator обрада плаћања успела.
+- `transaction` је хеш трансакције на ланцу, а `pay_id` наруџбине је такође уписан у исту вредност.
+- На explorer-у можете видети пренос `1200000` atomic USDC.
+- `errorReason=None` указује да током ове обраде није било пословне грешке.
+
+Неуспех верификације обично такође враћа HTTP 200, али `isValid` је `false`. Пословна страна треба да чита `invalidReason`, а не само да гледа HTTP статус код.
+
+### `POST /settle`
+
+Поставља већ верификовану ауторизацију на ланац.
+
+Тело захтева је углавном исто као и код `/verify`. Разлика за `upto` је: `paymentRequirements.amount` се током обраде мења на стварни износ; лимит потписа бележи Facilitator у фази верификације, а током обраде се проверава да стварни износ не прелази тај лимит.
+
+Успешан одговор:
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+Ако је `upto` стварни износ 0, `transaction` може бити празан стринг, што указује да није потребно извршити трансакцију на ланцу.
+
+## Како Ace Data Cloud Gateway користи Facilitator
+
+Линк Ace Data Cloud API Gateway-а је следећи:
+
+1. Клијент први пут захтева API, без `Authorization` и `PAYMENT-SIGNATURE`.
+2. Gateway израчунава процењену цену захтева, враћа 402 и `accepts`.
+3. Клијент потписује и поново шаље са `PAYMENT-SIGNATURE`.
+4. Gateway декодира `PAYMENT-SIGNATURE`, бира одговарајући захтев за плаћање.
+5. Gateway позива Facilitator на `/verify`.
+6. Након успешног `/verify`, Gateway пушта захтев до циљног API-а.
+7. Након повратка циљног API-а, Gateway у фази `/record` позива Facilitator на `/settle`.
+8. Gateway уписује хеш трансакције на ланцу у метаподатке о коришћењу.
+`exact` u koraku 7 obračunava potpisanu sumu; `upto` u koraku 7 upisuje `amount` prema stvarnoj potrošnji, a zatim obračunava stvarni iznos.
+
+## Kako integrisati svoj API
+
+Ako želite da vaš API podrži X402, možete implementirati prema ovoj strukturi:
+
+1. Pripremite `paymentRequirements` za svaki plaćeni interfejs, koji uključuje mrežu, iznos, adresu za primanje, adresu imovine i potpisni domen.
+2. Ako zahtev ne sadrži `PAYMENT-SIGNATURE`, vratite HTTP 402 i `accepts`.
+3. Ako zahtev sadrži `PAYMENT-SIGNATURE`, dekodirajte u Base64 da dobijete `paymentPayload`.
+4. Pozovite Facilitator `/verify`.
+5. Nakon uspešne verifikacije, izvršite poslovnu logiku.
+6. Nakon uspešnog poslovanja, pozovite Facilitator `/settle`.
+7. Sačuvajte `payer`, `transaction`, `amount`, `network` za usklađivanje.
+
+Serverska strana mora koristiti sopstveno generisane `paymentRequirements` za pozive `/verify` i `/settle`, ne verujte iznosu, adresi za primanje ili adresi imovine koje vraća klijent.
+
+## Zaštita od ponovnog korišćenja
+
+Facilitator će zabeležiti nonce. Autorizacija sa istim nonce-om ne može se ponovo verifikovati i obračunati.
+
+To znači:
+
+- Klijent bi trebao svaki put potpisati novi envelope;
+- Ako je `/settle` podnela transakciju, ali još nije potvrđena, možete ponovo pokušati `/settle` sa istim nonce-om za idempotentno usklađivanje;
+- Ne čuvajte isti `PAYMENT-SIGNATURE` za višestruke API pozive.
+
+## Česte greške
+
+| Greška                                           | Česti uzroci                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `Authorization nonce already processed`      | Ponovno korišćenje istog `PAYMENT-SIGNATURE`.                                    |
+| `Authorization destination mismatch`         | `to` u potpisu klijenta se ne poklapa sa `payTo` u zahtevima za plaćanje.                |
+| `invalid_upto_evm_payload_invalid_signature` | `upto` tipizirani podaci imaju različite chainId, facilitator, Permit2 domen ili adresu potpisa. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | Novčanik još nije odobrio dovoljno USDC allowance za Permit2.                        |
+| `Payer has insufficient USDC balance`        | Nedovoljno USDC u novčaniku za plaćanje.                                                    |
+| `Solana signer private key not configured`   | Facilitator treba da potpiše kao platioc naknade, ali serverska strana nema konfigurisan Solana potpisivač.           |

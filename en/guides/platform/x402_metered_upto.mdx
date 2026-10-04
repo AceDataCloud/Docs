@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` and `upto` Billing Schemes"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 currently uses two types of schemes: `exact` and `upto`. They address different billing issues.
+
+## `exact`
+
+`exact` means that the price can be determined before the request reaches the target API. The amount signed by the client is the final deduction amount.
+
+Suitable for:
+
+- Fixed price image generation;
+- Fixed price video task creation;
+- Fixed price search or tool APIs;
+- Order payments.
+
+EVM `exact` uses USDC EIP-3009 `TransferWithAuthorization`:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+The facilitator verifies the signature and amount in the `/verify` stage and submits this authorization on-chain in the `/settle` stage.
+
+## `upto`
+
+`upto` means the client authorizes a maximum limit, and Ace Data Cloud settles based on actual usage after the request is completed, with the actual deduction not exceeding the limit.
+
+Suitable for:
+
+- Chat completion: The final price depends on prompt tokens and completion tokens;
+- Streaming responses: The true output length is only known after it ends;
+- Future post-measurement APIs.
+
+`upto` uses Permit2 `PermitWitnessTransferFrom`. The amount signed by the client is not a fixed transfer but a limit authorization with a witness:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount` is the limit and not necessarily the final deduction. The gateway will convert the actual usage into `amount` and pass it to the facilitator in the `/record` stage. The facilitator is only allowed to settle `amount &lt;= permitted.amount`.
+
+Base `upto` program execution result:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+Explanation:
+
+- The authorization limit returned in 402 is `95215` atomic USDC, and the client signs based on this limit.
+- After the model's actual response, only `3` atomic USDC is settled, and the on-chain transaction can be checked on BaseScan.
+- This result illustrates the key difference of `upto`: the signed amount is a limit, and the on-chain settlement can be less than the limit.
+- If the actual usage exceeds the limit, the facilitator should reject the settlement, and the client needs to reauthorize with a higher limit.
+
+`upto` is currently only available on Base. SKALE only offers `exact`, so if you need post-measurement, please use Base.
+
+## Why Permit2 Approve is Needed
+
+`upto` is ultimately pulled from the payment wallet through Permit2 by the x402 proxy. Before the first use, the payment wallet needs to give Permit2 an ERC-20 allowance.
+
+Python CLI:
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+Programmatic way:
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+After authorization is complete, each request still requires signing a new `upto` envelope, as nonce, deadline, witness, and limit amount are all different.
+
+## Zero Amount Settlement
+
+`upto` supports cases where the actual amount is 0. For example, if the target API does not successfully generate billable usage, the gateway can pass in `amount = "0"`. The facilitator will return success but will not issue an on-chain transaction.
+
+This can avoid the issue of "request not successful but still incurring on-chain fees."
+
+## Selection Recommendations
+
+| Scenario                   | Recommendation                |
+| ------------------------- | ----------------------------- |
+| Fixed price API             | Use `exact`, logic is simple. |
+| Order payment                | Use `exact`.                  |
+| Chat completion, token-based billing | Use Base `upto`.            |
+| Haven't done Permit2 approve | First use `exact` to run through, then switch to `upto`. |
+| Need post-measurement on SKALE | Not supported, SKALE only offers `exact`. |
+
+If you are unsure which to choose, use the SDK's default behavior; the SDK will select the payment requirement matching the network returned by the server.
+
+## Base `upto` Checklist
+
+When integrating or troubleshooting, please ensure the following parameters come from the same 402 response and remain consistent during client signing:
+
+| Parameter                     | Checkpoint                                          |
+| ---------------------------- | -------------------------------------------------- |
+| `network`                    | Must be `eip155:8453`.                             |
+| `scheme`                     | Must be `upto`.                                    |
+| `extra.chainId`              | Base chain id is `8453`.                          |
+| `asset`                      | Use the Base USDC contract address from the 402 response. |
+| `extra.facilitatorAddress`   | Must participate in witness and be consistent with Facilitator `/supported`. |
+| Permit2 allowance            | The payment wallet needs to authorize Permit2 for Base USDC first. |
+
+Common errors and handling methods:
+
+| Error                                           | Handling Method                                                                      |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `invalid_upto_evm_payload_invalid_signature`  | Check if chain id, facilitator address, Permit2 domain, spender, signing account, and witness are consistent with the 402 response. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                  | Re-initiate the request after executing Permit2 approve for the target chain USDC. |
+| `amount exceeds permitted amount`             | Actual usage exceeds the signed limit, need to re-sign with a higher limit.       |

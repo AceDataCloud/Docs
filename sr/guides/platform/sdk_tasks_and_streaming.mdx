@@ -1,0 +1,318 @@
+---
+title: "SDK Задачи Полицање и Стриминг Одговори"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Услуге на Ace Data Cloud су подељене у две категорије у погледу режима одговора:
+
+| Тип       | Типичне услуге                                                                         | Модел позива                                     |
+| -------- | ---------------------------------------------------------------------------- | ---------------------------------------- |
+| **Синхроно генерисање** | NanoBanana / Flux / Seedream / Chat Completions (не-стриминг) / Google претрага              | Један HTTP, резултат у телу одговора                          |
+| **Стриминг одговори** | Chat Completions (`stream: true`)                                             | SSE, више фрејмова по токену                         |
+| **Асинхроне задатке** | Midjourney / Sora / Veo / Luma / Kling / Hailuo / Suno / Pixverse / Seedance | Прво креирајте задатак да добијете `task_id`, затим полицајте `/<provider>/tasks` |
+
+Овај чланак се фокусира на последње две категорије: **TaskHandle полицање асинхроног задатка** и **детаље, замке и разлике у језицима за chat стриминг одговоре**.
+
+## I. TaskHandle — Уједињена апстракција асинхроног задатка
+
+Сва три SDK-а обавијају асинхроне задатке у `TaskHandle`, пружајући истих 4 метода:
+
+| Метод                                 | Понашање                                                         |
+| ---------------------------------- | ---------------------------------------------------------- |
+| `get()`                            | Повлачи најновији статус (`POST /<provider>/tasks {id, action: "retrieve"}`) |
+| `is_completed()` / `isCompleted()` | `get()` једном, проверава `status` да ли је `succeeded` / `failed`           |
+| `wait()`                           | Блокира полицање, док не буде `succeeded` / `failed` или `max_wait` истекне             |
+| `result` атрибут                        | Последњи `wait()` добијени комплетан одговор; пре позива `null`                           |
+
+### Два начина позива за креирање задатка
+
+Сваки асинхрони ресурс (`images.generate` / `video.generate` / `audio.generate`) има параметар `wait`:
+
+- `wait=False` (подразумевано): одмах враћа `TaskHandle`, пословна логика сама одређује када ће полицајити.
+- `wait=True`: SDK унутрашње позива `handle.wait()`, функција враћа одговор након завршетка. **Користите само ако сте сигурни да ће циљни API сигурно вратити поље `status: succeeded`** — мали број провајдера није поштовало овај споразум, што ће учинити да `wait` настави до `max_wait` пре него што баци `TimeoutError`.
+
+### Разлике у јединицама (⚠️ Обавезно прочитајте)
+
+**Јединице `poll_interval` и `max_wait` су различите у три језика**, што је честа замка при преласку између језика:
+
+| Језик             | Јединица `poll_interval`         | Јединица `max_wait` | Подразумевана вредност                                   |
+| -------------- | -------------------------- | ------------- | ------------------------------------- |
+| **TypeScript** | **миллисекунде**                     | **миллисекунде**        | `pollInterval=3000`, `maxWait=600000` |
+| **Python**     | **секунде**                      | **секунде**         | `poll_interval=3.0`, `max_wait=600.0` |
+| Go             | (TaskHandle још није доступан у Go SDK) | —             | —                                     |
+
+> Ако узмете TS `{ pollInterval: 3000 }` као секунде и преведете у Python `poll_interval=3000`, учиниће да SDK чека 50 минута пре него што поново полицаји.
+
+### Пример: Python експлицитно полицање Midjourney
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+# wait=False одмах добија handle
+handle = client.images.generate(
+    provider="midjourney",
+    prompt="a cinematic photo of a banana wearing a tuxedo",
+    wait=False,
+)
+print("task_id", handle.id)
+
+t0 = time.time()
+result = handle.wait(poll_interval=3.0, max_wait=180.0)
+print("elapsed_s", round(time.time() - t0, 1))
+print("status", result.get("response", result).get("status"))
+print("images", [it.get("image_url") for it in (result.get("response", result).get("data") or [])])
+```
+
+Цела секција кода ради следеће:
+
+1. `images.generate(..., wait=False)` шаље `prompt` Midjourney API-ју, одмах добија `handle`, не блокирајући.
+2. `handle.wait(poll_interval=3.0, max_wait=180.0)` унутрашње сваке 3 секунде ПОСТ-ује `/midjourney/tasks`, док `status` не постане `succeeded` или `failed`, или укупно време не пређе 180 секунди и не баци `TimeoutError`.
+3. Након завршетка, `result["response"]["data"]` обично садржи 4 слике (Midjourney подразумевано 2x2 мрежа).
+
+### Пример: TypeScript експлицитно полицање
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+// wait: false одмах добија handle
+const handle: any = await client.images.generate({
+  provider: 'midjourney',
+  prompt: 'a cinematic photo of a banana wearing a tuxedo',
+  wait: false,
+});
+console.log('task_id', handle.id);
+
+const t0 = Date.now();
+const result: any = await handle.wait({ pollInterval: 3000, maxWait: 180_000 });
+console.log('elapsed_s', ((Date.now() - t0) / 1000).toFixed(1));
+const response = result.response ?? result;
+console.log('status', response.status);
+console.log('images', (response.data ?? []).map((it: any) => it.image_url));
+```
+
+### Синхроно генерисање vs асинхрони задаци
+
+Ако ваш провајдер сам по себи синхроно генерише слике (NanoBanana / Flux / Seedream), **не преносите `wait`**:
+
+```python
+# ✅ Препоручено
+res = client.images.generate(provider="nano-banana", prompt="...")
+url = res["data"][0]["image_url"]
+
+# ❌ Пример: активираће унутрашње полицање SDK-а /nano-banana/tasks, трошећи RTT
+res = client.images.generate(provider="nano-banana", prompt="...", wait=True)
+```
+
+Метод за процену је веома једноставан: ако у документацији циљног API-а **нема** `task_id` + `/tasks`, онда је у питању синхроно генерисање; у одговору синхроног генерисања поље `data` већ садржи коначни резултат.
+
+### Унутрашњи протокол TaskHandle
+
+`TaskHandle.get()` позива:
+
+```http
+POST {API_BASE}/<provider>/tasks
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{"id": "<task_id>", "action": "retrieve"}
+```
+
+Одговор има униформну структуру:
+
+```json
+{
+  "task_id": "...",
+  "trace_id": "...",
+  "response": {
+    "status": "pending | running | succeeded | failed",
+    "data": [...]
+  }
+}
+```
+
+SDK истовремено подржава **старије одговоре без спољног `response`** — директно читање врховног `status`, тако да прелазак између нових и старих верзија одговора не утиче на пословни код.
+
+## II. SSE Стриминг одговори (chat.completions)
+
+`chat.completions.create(stream=True)` је тренутно једини стриминг интерфејс у SDK-ју (аудио / видео стриминг још није подржан). Стилови итерације у три језика су различити:
+
+| Језик         | Итерација                                                                        | Механизам отказивања                       |
+| ---------- | ------------------------------------------------------------------------- | -------------------------- |
+| TypeScript | `for await (const chunk of stream)`                                       | `AbortController` прослеђује се fetch-у |
+| Python     | `for chunk in client.openai.chat.completions.create(..., stream=True)`    | Излаз из петље (конекција се аутоматски затвара од стране SDK-а)       |
+| Go         | `chunks, errs := ...CreateStream(ctx, req)` → `for chunk := range chunks` | Отказује `context.Context`       |
+
+### TypeScript
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const stream: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Broj od 1 do 5 odvojeno razmacima. Samo brojevi.' }],
+  max_tokens: 30,
+  temperature: 0,
+  stream: true
+});
+
+let chunks = 0;
+let collected = '';
+for await (const chunk of stream) {
+  chunks++;
+  const delta = chunk?.choices?.[0]?.delta?.content;
+  if (delta) collected += delta;
+}
+console.log('chunks', chunks);
+console.log('collected', collected);
+```
+
+真实运行结果：
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Python
+
+```python
+import os
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+chunks = 0
+collected = []
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Broj od 1 do 5 odvojeno razmacima. Samo brojevi."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+print("chunks", chunks)
+print("collected", "".join(collected))
+```
+
+真实运行结果：
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+### Go
+
+```go
+chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+    Model:     "gpt-4o-mini",
+    Messages:  []map[string]any{{"role": "user", "content": "Broj od 1 do 5 odvojeno razmacima. Samo brojevi."}},
+    MaxTokens: 30,
+})
+cnt := 0
+collected := ""
+for chunk := range chunks {
+    cnt++
+    if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+        if d, ok := ch[0].(map[string]any)["delta"].(map[string]any); ok {
+            if s, ok := d["content"].(string); ok {
+                collected += s
+            }
+        }
+    }
+}
+if e, ok := <-errs; ok && e != nil {
+    log.Println("stream_err", e)
+}
+fmt.Println("chunks", cnt, "collected", collected)
+```
+
+真实运行结果：
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Структура потоковог chunk-а
+
+Сваки chunk је OpenAI компатибилан `chat.completion.chunk`:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion.chunk",
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "content": " 3"
+      },
+      "finish_reason": null
+    }
+  ]
+}
+```
+
+- Први chunk обично има `delta.role: "assistant"` али `content` је празан.
+- Средњи chunk-ови сви имају `delta.content`, могу се директно спојити.
+- Последњи chunk `delta` је празан, `finish_reason` је `stop` / `length` / `content_filter`.
+
+### Прекид у току
+
+| Језик         | Начин прекида                                                                           |
+| ---------- | ------------------------------------------------------------------------------ |
+| TypeScript | У `create()` позиву пренети `signal: abortController.signal`, позвати `abortController.abort()` |
+| Python     | `break` изаћи из `for` петље, SDK у `__exit__` затвара HTTPx ток                                |
+| Go         | На `ctx` пренет у `NewClient` позиву `cancel()`, `chunks` канал ће одмах бити затворен                    |
+
+Раније отказани токени су наплаћени — токени генерисани пре тренутка отказа ће бити наплаћени по стварној потрошњи.
+
+## Три, тајм-аут и поновно покушавање
+
+Три SDK деле исту стратегију поновног покушавања:
+
+| Услов за активирање                       | Понашање                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| HTTP 408 / 409 / 429 / 5xx | Подразумевано поново покушава 2 пута, експоненцијално одлагање 1с → 2с → 4с                                                      |
+| Грешке на мрежном нивоу (DNS, одбијена веза, TLS неуспех)     | Исто                                                                              |
+| 401 / 403 / 404 / 422      | Не поново покушава, одмах баца одговарајућу типизовану грешку                                                                  |
+| Потоњи ( `stream=True` ) захтеви        | **Не поново покушава** — први фрејм је већ изашао и не може се поново репродуковати                                                            |
+| Јасно `timeout` активира            | Баца `APITimeoutError` (Python) / `TimeoutError` (TS) / `context.DeadlineExceeded` (Go) |
+
+Да бисте онемогућили поновно покушавање: конструишите клијента преносећи `max_retries=0` / `maxRetries: 0` / `WithMaxRetries(0)`.
+
+Асинхрони задаци (TaskHandle) сами по себи не подлежу `max_retries` — њихова петља је на нивоу пословања, а не HTTP, контролише се `max_wait` за укупно трајање.
+
+## Четири, уобичајене замке
+
+1. **Синхрони провајдери не треба да преносе `wait`**: NanoBanana / Flux / Seedream су синхроно генерисани, принудно `wait=True` ће натерати SDK да анкетира интерфејс `tasks` који се никада неће ажурирати.
+2. **Разлике у јединицама TaskHandle**: Python је у секундама, TS у милисекундама, при преносу између језика обавезно прерачунајте.
+3. **`wait=True` и даље може изазвати `TimeoutError`**: Одговори морају задовољити `status in ('succeeded','failed')` да би напустили петљу; ако провајдер користи друга имена поља, потребно је да пословни код сам `handle.get()` анализира.
+4. **Прекид током стрима**: Токени генерисани пре прекида су већ наплаћени.
+5. **Поновна употреба клијента у истом процесу**: SDK има уграђену пулу веза, често `new AceDataCloud()` / `AceDataCloud()` ће учинити TLS руковање узроком уска грла.
+
+## Сазнајте више
+
+- 📘 [TypeScript SDK интеграција](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Python SDK интеграција](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Go SDK интеграција](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 платни хук](https://platform.acedata.cloud/documents/sdk-x402-payment)
+- 📦 [SDK monorepo изворни код](https://github.com/AceDataCloud/SDK)

@@ -1,0 +1,352 @@
+---
+title: "SDK + X402 платни хук"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[X402](https://www.x402.org/) је онлајн платни протокол "по HTTP 402 наплати" који је предложио Coinbase: сервер враћа `402 Payment Required` на захтев без токена, уз `accepts: [...]` поље које наводи прихватљиве ланце / имовину / цене; клијент локално потписује овлашћење (на EVM-у је Permit2 / EIP-712, на Solani је SPL токен трансфер овлашћење), ставља base64 кодирани envelope у `PAYMENT-SIGNATURE` заглавље и поново шаље. Сервер верификује и заиста обавља обрачунавање на ланцу, а затим враћа пословни резултат.
+
+> X402 клијент Ace Data Cloud директно позива циљни API и користи `402 Payment Required` и `accepts` који се враћају у реалном времену као основу за цену и потпис. Платна способност Facilitator-а може се проверити на [`/.well-known/x402`](https://facilitator.acedata.cloud/.well-known/x402).
+
+`@acedatacloud/sdk` и `acedatacloud` оба излажу `paymentHandler` хук: када захтев који шаље SDK добије `402`, позива ваш инјектован хендлер да добије `PAYMENT-SIGNATURE` заглавље, а затим поново шаље оригинални захтев. Комбинујући `@acedatacloud/x402-client` / `acedatacloud-x402` са SDK-ом, **целокупан процес је потпуно транспарентан за пословни код** — само користите `client.openai.chat.completions.create(...)`, изгледа као да је у режиму токена, али у основи се плаћа по позиву, без потребе за претходним допуњавањем.
+
+Овај чланак:
+
+- Успешно је прошао кроз TS крај "без токена + X402 хендлер инјекцију" ланца (проверите [T12 верификацију](#四真实运行验证))
+- Навео разлике између две потписне везе за EVM / Solanu
+- Понудио три адаптације: `viem` приватни кључ, режим прегледача, Python `EVMAccountSigner`
+- Објаснио поље `preferScheme` / `prefer_scheme` које је лако погрешити
+
+## Један, преглед протокола (обавезно)
+
+Успешан X402 позив укључује **3 HTTP RTT**:
+
+```text
+1. SDK -> /openai/v1/chat/completions               (без Authorization)
+   <- 402 Payment Required
+      { accepts: [{ scheme:'upto', network:'eip155:8453', maxAmountRequired:'10000', ... }] }
+
+2. Унутар SDK -> paymentHandler({ url, method, body, accepts })   (локални потпис, 0 RTT)
+   <- { headers: { 'PAYMENT-SIGNATURE': '<base64-envelope>' } }
+
+3. SDK -> /openai/v1/chat/completions               (инјекција PAYMENT-SIGNATURE заглавља)
+   <- 200 + пословни одговор   (обрачунавање завршено на серверу)
+```
+
+X402 envelope је JSON сегмент, који је base64 кодирао и ставио у `PAYMENT-SIGNATURE` заглавље. Структура (извештај):
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2": {
+      "permitted": [{ "token": "0x...USDC", "amount": "10000" }],
+      "nonce": "...",
+      "deadline": "..."
+    },
+    "witness": { "...metered-billing-fields..." },
+    "signature": "0x..."
+  }
+}
+```
+
+На врху envelope-а је `x402Version: 2`, и користи `accepted` објекат да објави изабрани `scheme` и `network` (CAIP-2 идентификатор).
+
+| scheme  | Значење                                                                                               |
+| ------- | ------------------------------------------------------------------------------------------------ |
+| `exact` | Фиксна цена (сцене као што су генерисање слика / видео записа, претрага итд.). Потписана сума = износ захтеван од сервера.                                                         |
+| `upto`  | Наплата по мере (chat completions / токен класе). Потписује се **горња** сума, а заправо се обрачунава само коришћени део (на основу Permit2 + witness). **Снажно се препоручује** за API-је типа сесија. |
+
+`preferScheme` / `prefer_scheme` се користи за избор преференције када сервер **пружа више шема** истовремено. Ако сервер само излаже `exact`, ово поље ће бити игнорисано; ако је постављен `upto`, али сервер није излагао, вратиће се на први одговарајући елемент.
+
+## Два, TypeScript: прегледачки новчаник + сервер viem два начина коришћења
+
+### Инсталација
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client
+```
+
+Тестиране верзије:
+
+```text
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+```
+
+### `createX402PaymentHandler` комплетан потпис
+
+```ts
+export interface X402PaymentHandlerOptions {
+  network: 'solana' | 'base' | 'skale';
+  solanaWallet?: SolanaWalletAdapter;       // network='solana' обавезно
+  evmProvider?: EVMProvider;                // network='base'/'skale' обавезно, EIP-1193
+  evmAddress?: string;                      // network='base'/'skale' обавезно
+  preferScheme?: 'exact' | 'upto';
+}
+```
+
+Враћена вредност је `(ctx) => Promise&lt;{ headers: Record<string, string> }>` која се тачно поклапа са потписом SDK-овог `paymentHandler` хука.
+
+### Употреба 1: Прегледач (MetaMask / WalletConnect)
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+// 1. Нека корисник повеже новчаник
+const accounts: string[] = await (window as any).ethereum.request({
+  method: 'eth_requestAccounts'
+});
+const userAddress = accounts[0];
+
+// 2. Пребацивање на Base главну мрежу
+await (window as any).ethereum.request({
+  method: 'wallet_switchEthereumChain',
+  params: [{ chainId: '0x2105' }]   // 8453 = Base
+});
+
+// 3. Конструисање SDK клијента, инјекција X402 хендлера
+//    Напомена: не преносите apiToken, да би SDK прошао 402 пут
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: (window as any).ethereum,
+    evmAddress: userAddress,
+    preferScheme: 'upto'   // chat тип обавезно uptp
+  })
+});
+
+// 4. Нормално позивање
+const res: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'hi' }],
+  max_tokens: 20
+});
+console.log(res.choices[0].message.content);
+```
+
+При првом позиву прегледач ће **показати два пута захтев за потпис**: први пут је Permit2 за USDC једнократна одобрења (износ је `MaxUint256`, уписује се на ланац); други пут је EIP-712 потпис за X402 envelope (не иде на ланац, само за верификацију facilitator-а). Накнадни позиви захтевају само други потпис, искуство је "један потпис → добијање резултата".
+
+### Употреба 2: Node сервер + viem приватни кључ (погодно за backend / CLI)
+
+`@acedatacloud/x402-client` на TS крају **прихвата само EIP-1193 провајдер** — не управља директно приватним кључем. У Node / CLI сценарију, стандардна пракса је да се користи [`viem`](https://viem.sh/) да се приватни кључ упакује у `WalletClient`, а затим се користи [`@ethereumjs/util`](https://www.npmjs.com/package/@ethereumjs/util) или унутрашња EIP-1193 адаптација viem-а.
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+import { createWalletClient, http } from 'viem';
+import { base } from 'viem/chains';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const account = privateKeyToAccount(process.env.EVM_PRIVATE_KEY as `0x${string}`);
+const walletClient = createWalletClient({
+  account,
+  chain: base,
+  transport: http(process.env.BASE_RPC_URL)
+});
+
+// viem WalletClient dolazi sa EIP-1193 kompatibilnim .request(), može se direktno koristiti kao evmProvider
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: walletClient as any,   // walletClient.request zadovoljava EIP-1193
+    evmAddress: account.address,
+    preferScheme: 'upto'
+  })
+});
+
+const res: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'hi' }],
+  max_tokens: 20
+});
+console.log(res.choices[0].message.content);
+```
+
+> Ako smatrate da viem EIP-1193 prilagođavanje nije dovoljno stabilno, možete koristiti niži nivo [`signEVMUptoPayment`](https://github.com/AceDataCloud/SDK/blob/main/typescript/packages/x402-client/src/evm.ts), sami povezati `accepts → signed envelope → PAYMENT-SIGNATURE header`, preskočiti SDK hook-ove; međutim, preporučuje se da se i dalje koristi `createX402PaymentHandler`, kako ne biste morali održavati nadogradnje protokola.
+
+### Upotreba 3: Solana
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+import { Keypair } from '@solana/web3.js';
+
+const kp = Keypair.fromSecretKey(/* Uint8Array */);
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'solana',
+    solanaWallet: {
+      publicKey: kp.publicKey,
+      signTransaction: async (tx) => {
+        tx.sign([kp]);
+        return tx;
+      }
+    }
+  })
+});
+```
+
+Solana lanac trenutno **samo izlaže `exact` shemu**, tako da `preferScheme` ne deluje na Solani.
+
+## Tri, Python: Modus privatnog ključa
+
+Python `acedatacloud-x402` koristi **direktno potpisivanje privatnim ključem** (nema EIP-1193 apstrakcije), što je pogodnije za servere / izvršitelje zadataka.
+
+### Instalacija
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+Testirana verzija:
+
+```text
+acedatacloud==2026.4.26.1
+acedatacloud-x402==2026.5.31.3
+```
+
+### EVM (Base / Skale)
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import (
+    create_x402_payment_handler,
+    EVMAccountSigner,
+)
+
+# 1. Kreirajte potpisivača iz privatnog ključa
+signer = EVMAccountSigner.from_private_key(os.environ["EVM_PRIVATE_KEY"])
+
+# 2. Kreirajte SDK: ne šaljite api_token, neka SDK ide putem 402
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+        prefer_scheme="upto",   # chat tip mora izabrati upto
+    )
+)
+
+# 3. Normalno pozivanje
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "hi"}],
+    max_tokens=20,
+)
+print(res["choices"][0]["message"]["content"])
+```
+
+### Solana
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import (
+    create_x402_payment_handler,
+    SolanaKeypairSigner,
+)
+
+signer = SolanaKeypairSigner.from_secret_key_base58(os.environ["SOLANA_PRIVATE_KEY"])
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="solana",
+        solana_signer=signer,
+        rpc_url="https://api.mainnet-beta.solana.com",  # opcionalno
+    )
+)
+```
+
+### Jednokratno odobrenje (samo EVM prvi put)
+
+EVM Base na X402 koristi Permit2, potrebno je da novčanik odobri USDC Permit2 ugovoru jednom sa `MaxUint256` odobrenjem. `acedatacloud-x402` ima ugrađenu `approve_permit2`:
+
+```python
+from acedatacloud_x402 import approve_permit2
+
+tx_hash = approve_permit2(
+    evm_signer=signer,
+    rpc_url=os.environ["BASE_RPC_URL"],
+)
+print("permit2_approve_tx", tx_hash)
+```
+
+Ova transakcija treba da se pošalje samo jednom, nakon čega će sve X402 EVM uplate koristiti ovo odobrenje. Solana ne zahteva.
+
+## Četiri, stvarna verifikacija
+
+Cilj testiranja: **TS SDK ne šalje token, injektuje X402 handler, može normalno konstruisati i pokrenuti zahtev** (ne troši pravu USDC na lancu za laganu verifikaciju).
+
+```ts
+// /tmp/sdk-tests/ts/x402-wire-test.ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const handler = createX402PaymentHandler({
+  network: 'base',
+  evmProvider: { request: async () => '0x0' } as any,   // placeholder provider
+  evmAddress: '0x0000000000000000000000000000000000000000',
+  preferScheme: 'upto'
+});
+
+console.log('handler_type', typeof handler);   // function
+
+const client = new AceDataCloud({
+  paymentHandler: handler
+});
+
+console.log('client_ctor_ok', client.constructor.name);   // AceDataCloud
+```
+
+Izlaz:
+
+```text
+handler_type function
+client_ctor_ok AceDataCloud
+```
+
+Rezultati objašnjavaju:
+
+- Nije prosleđen `apiToken`, SDK konstrukcija **ne prijavljuje grešku**, što dokazuje da je X402 način zaista legalna alternativa tokenu.
+- `createX402PaymentHandler` vraća funkciju (hook), SDK je koristi samo kada primi 402.
+- Testiranje plaćanja na stvarnom lancu je prošlo kroz end-to-end testiranje, jer uključuje stvarno USDC umanjenje, nije uključeno u ovaj vodič; možete se osloniti na [X402 integracijski vodič](https://platform.acedata.cloud/documents/x402-integration) za e2e primere.
+
+> Python strana `create_x402_payment_handler` takođe je izvršila istu verifikaciju — povratna vrednost funkcije je pozivna, kada se injektuje `payment_handler=...`, `AceDataCloud(...)` konstrukcija ne prijavljuje grešku. Oba su usklađena u značenju.
+
+## Pet, uporedba sa „Bearer token načinom“
+
+| Dimenzija              | API Token                                                         | X402                                            |
+| --------------- | ----------------------------------------------------------------- | ----------------------------------------------- |
+| Prikladne situacije            | Vlastiti backend, dugoročni projekti                                                         | Treći programeri, plaćanje po pozivu, Agentic pozivi                        |
+| Registracija              | Potrebno je da se prijavite na [kontrolnoj tabli](https://platform.acedata.cloud/console/applications)  | Nije potrebno; samo je potreban lančani novčanik                                     |
+| Preciznost naplate            | Prethodno punjenje, prema tabeli tokena                                                   | U realnom vremenu prema pozivima na lancu                                         |
+| Stanje              | Može se videti na kontrolnoj tabli                                                           | Pogledajte USDC u lančanom novčaniku                                      |
+| Početni trošak            | Besplatna količina prilikom registracije putem e-pošte                                                        | Potrebno je prebaciti USDC na Base, prvo Permit2 odobrenje              |
+| Prikladno za chat tip       | ✅                                                                 | ✅（mora `preferScheme=upto`）                       |
+| Prikladno za jednokratno plaćanje / plaćanje između računa | ❌                                                                 | ✅                                               |
+| Promene u kodu            | `apiToken: '...'`                                                 | `paymentHandler: createX402PaymentHandler(...)` |
+Dva režima mogu koegzistirati - u istom procesu, dodelite različite metode autentifikacije različitim `client` instancama.
+
+## Šest, uobičajene zamke
+
+1. **chat klasa mora imati `preferScheme=upto`**: korišćenje `exact` će omogućiti facilitatoru da odbije USDC prema `maxAmountRequired` (a ne prema stvarnoj potrošnji).
+2. **Node strana ne šalje golu privatnu ključ `createX402PaymentHandler`**: TS paket ne prihvata `{ privateKey }`, mora biti upakovan kao EIP-1193 provajder (preporučuje se viem `WalletClient`).
+3. **Prvi poziv je dvostruko potpisivanje**: prvi put potpisujete Permit2 odobrenje (na lancu, sa gasom), drugi put potpisujete X402 envelope (ne na lancu). U narednim pozivima ostaje samo drugi put.
+4. **Solana nema koncept Permit2**: direktno potpisivanje SPL token transfer ovlašćenja, nije potrebno odobrenje; ali trenutno Solana lanac podržava samo `exact`.
+5. **Razlikovanje poslovnih grešaka i grešaka u plaćanju**: 402 → handler neuspeh baca `X402SignError` (konkretna vrsta zavisi od lanca); nakon ponovnog slanja, greške poslovnog interfejsa (401 / 422 / 5xx) i dalje se klasifikuju kao obične SDK greške.
+6. **`viem` najstabilniji način prilagođavanja**: `evmProvider: walletClient as any` će izgubiti proveru tipa, ali ima najbolju kompatibilnost; ako želite da zadržite tip, koristite viem `.transport.request` da pojedinačno upakujete `{ request }` objekat.
+
+## Saznajte više
+
+- 📦 [`@acedatacloud/x402-client` na npm](https://www.npmjs.com/package/@acedatacloud/x402-client)
+- 🐍 [`acedatacloud-x402` na PyPI](https://pypi.org/project/acedatacloud-x402/)
+- 🗂 [Izvorni kod X402 klijenta](https://github.com/AceDataCloud/SDK/tree/main/x402-client)
+- 🔗 [X402 integracijski vodič](https://platform.acedata.cloud/documents/x402-integration)
+- 📘 [Uputstvo za integraciju TypeScript SDK](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Uputstvo za integraciju Python SDK](https://platform.acedata.cloud/documents/sdk-python)
+- 🌐 [x402.org](https://www.x402.org/)

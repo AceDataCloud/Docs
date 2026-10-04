@@ -1,0 +1,207 @@
+---
+title: "X402 TypeScript SDK 接入教程"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+TypeScript 是接入 Ace Data Cloud X402 最推荐的方式之一。官方 SDK 负责普通 API 调用、任务轮询、错误处理和自动重试；`@acedatacloud/x402-client` 负责在遇到 `402 Payment Required` 时签出 `PAYMENT-SIGNATURE` 请求头。
+
+源码与包地址：
+
+- SDK 仓库：[https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- X402 Client 仓库：[https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm SDK：[https://www.npmjs.com/package/@acedatacloud/sdk](https://www.npmjs.com/package/@acedatacloud/sdk)
+- npm X402 Client：[https://www.npmjs.com/package/@acedatacloud/x402-client](https://www.npmjs.com/package/@acedatacloud/x402-client)
+
+## 安装依赖
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client
+```
+
+如果使用 Base 或 SKALE，需要 EVM 签名能力：
+
+```bash
+npm install ethers
+```
+
+如果使用 Solana，需要 Solana wallet adapter 或 `@solana/web3.js`：
+
+```bash
+npm install @solana/web3.js
+```
+
+干净 npm 项目的安装和导入检查输出：
+
+```text
+imports_ok true true true true true
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+```
+
+结果说明：
+
+- `@acedatacloud/sdk` 和 `@acedatacloud/x402-client` 均可从 npm 安装并被 Node.js 导入。
+- `ethers` 用于 EVM typed data 签名，`@solana/web3.js` 用于 Solana transaction 构造。
+
+## Base 或 SKALE 示例
+
+浏览器中可以直接使用 `window.ethereum`。Node.js 中可以用 `ethers.Wallet` 包一层 EIP-1193 风格的 provider。
+
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`unsupported method: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+
+console.log(result.choices[0].message.content);
+```
+
+这段示例的程序运行结果：
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+结果说明：
+
+- 程序先触发无认证 402，再由 handler 签出 `PAYMENT-SIGNATURE`，最后用同一请求体重试。
+- `content ADC_TS_SDK_X402_OK` 是模型真实返回的固定字符串，说明重试后的请求进入了目标 API。
+- `id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT` 是这次 chat completion 响应 ID，可用于和平台使用记录对照。
+- 链上结算结果见 [E2E 验证与故障排查](https://platform.acedata.cloud/documents/x402-e2e-troubleshooting)。
+
+把 `network` 改成 `skale` 即可使用 SKALE。SKALE 的优势是链上交易 gas 成本低；Base 的优势是 USDC 流动性和钱包支持更成熟，并且只有 Base 提供 `upto` 后置计量。
+
+注意：SKALE 目前只有 `exact`。如果在 `network: 'skale'` 下传 `preferScheme: 'upto'`，handler 找不到 `upto` 会静默回退到 `exact`，不会报错——聊天补全这类按 token 计量的场景会因此按固定报价结算，而不是按真实用量。需要后置计量请使用 Base。
+
+## 浏览器钱包示例
+
+在前端应用中使用 MetaMask、Coinbase Wallet 或 WalletConnect 时，通常直接传入 EIP-1193 provider：
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: window.ethereum,
+    evmAddress: address
+  })
+});
+
+const image = await client.images.generate({
+  provider: 'nano-banana',
+  prompt: 'a yellow banana on a white background'
+});
+```
+
+浏览器钱包会弹出签名确认。用户签名的不是任意消息，而是 API 返回的支付要求：收款地址、USDC 合约、金额、有效期和 nonce 都被包含在签名里。
+
+## Solana 示例
+
+Solana 使用 SPL USDC `TransferChecked`。传入的 wallet adapter 需要暴露 `publicKey` 和 `signAndSendTransaction`。
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'solana',
+    solanaWallet: phantomWallet
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+```
+
+Solana 路径目前只支持 `exact`，不支持 `upto`。如果 API 返回多个 `accepts`，handler 会选择 `network = 'solana'` 的那一项。
+
+Solana 路径在同一公开 API 上已验证 paid retry 能返回 HTTP 200 和 `ADC_SOLANA_E2E_OK`。公开 RPC 查询可能限流，因此本文不写 Solana tx hash；需要链上对账时，请使用你自己的 Solana RPC 或控制台记录确认。
+
+## 选择 `exact` 或 `upto`
+
+当前 TypeScript handler 会选择服务器返回的第一个匹配网络的 payment requirement。Ace Data Cloud 的 API 通常会把同一网络的 `exact` 放在 `upto` 前面，因此如果你明确要走后置计量，需要传入 `preferScheme: 'upto'`。
+
+示例：
+
+```ts
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address,
+    preferScheme: 'upto'
+  })
+});
+```
+
+如果服务端没有返回该网络的 `upto` requirement，handler 会自动回退到该网络可用的第一个 requirement，通常是 `exact`。
+
+`upto` 需要一次性授权 Permit2。`upto` 目前只在 Base 上提供，因此只需要对 Base USDC 做一次授权：
+
+```bash
+npx tsx scripts/approve-permit2.ts --network base
+```
+
+Base `upto` 已完成公开 API 验证：HTTP 402 -> HTTP 200，后置 settlement tx 为 `0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036`。完整输出见计费方案说明。
+
+## SDK 做了什么
+
+`@acedatacloud/sdk` 的 transport 会在收到 402 时执行一次 payment handler：
+
+```ts
+type PaymentHandler = (ctx: {
+  url: string;
+  method: string;
+  body?: unknown;
+  accepts: PaymentRequirement[];
+}) => Promise<{ headers: Record<string, string> }>;
+```
+
+`@acedatacloud/x402-client` 返回的 handler 会：
+
+1. 从 `ctx.accepts` 中选择目标网络的 payment requirement。
+2. 按网络构造 EVM EIP-712 签名或 Solana transfer transaction。
+3. 将 envelope 序列化为 Base64。
+4. 返回 `{ headers: { 'PAYMENT-SIGNATURE': '<base64>' } }`。
+5. SDK 自动用原请求体重试。
+
+这意味着业务代码只需要像普通 SDK 调用一样写，不需要手动处理 402 重试。

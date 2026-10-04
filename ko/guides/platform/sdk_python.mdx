@@ -1,0 +1,308 @@
+---
+title: "Python SDK 접속 튜토리얼"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`acedatacloud`](https://pypi.org/project/acedatacloud/)는 Ace Data Cloud 공식 Python SDK로, `api.acedata.cloud`의 모든 서비스를 타입화된 `client.openai.chat.completions.create(...)`, `client.images.generate(...)`, `client.search.google(...)` 등의 메서드로 캡슐화하며, 동기 및 비동기 두 가지 클라이언트를 제공합니다.
+
+기본적으로 `httpx`를 기반으로 하며, SSE 스트리밍, 자동 재시도, 타입화된 예외 및 pydantic 타입 검증을 지원합니다.
+
+소스 코드 및 패키지 주소:
+
+- SDK 저장소: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- PyPI: [https://pypi.org/project/acedatacloud/](https://pypi.org/project/acedatacloud/)
+
+## 설치
+
+```bash
+pip install acedatacloud
+# 또는 uv add / poetry add
+```
+
+X402 체인에서 유료 결제가 필요할 경우(API Token 경로 없음), 추가로 설치합니다:
+
+```bash
+pip install acedatacloud-x402
+```
+
+깨끗한 venv의 버전 확인 출력:
+
+```text
+$ python -c "import importlib.metadata as m; print(m.version('acedatacloud'))"
+2026.4.26.1
+
+$ python -c "from acedatacloud import AceDataCloud, AsyncAceDataCloud; print('ok')"
+ok
+```
+
+결과 설명:
+
+- 패키지 버전은 `2026.4.26.1`(CalVer, 2026년 4월 26일 수정)입니다.
+- `AceDataCloud`는 동기 클라이언트이며, `AsyncAceDataCloud`는 asyncio 비동기 클라이언트입니다.
+- 본 SDK는 `pydantic`에 의존하지 않으며, 응답 본체는 통일적으로 `dict`를 반환합니다. 이 점은 `openai-python`과 다르므로, 마이그레이션 시 주의가 필요합니다.
+
+## API Token 준비
+
+[SDK 개요 - API Token 신청](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token)을 참조하여 token을 받은 후, shell에서 `export`합니다:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+클라이언트를 구성할 때 `api_token`을 전달하지 않으면, SDK는 자동으로 `ACEDATACLOUD_API_TOKEN` 환경 변수를 읽습니다. 만약 환경에 `ACEDATACLOUD_API_KEY`(프로젝트 저장소 약정)가 이미 저장되어 있다면, 명시적으로 전달합니다: `AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])`.
+
+## 예제 1: chat.completions(동기)
+
+```python
+import os, time, json
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_SDK_OK"}],
+    max_tokens=20,
+    temperature=0,
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("id", res["id"])
+print("model", res["model"])
+print("content", res["choices"][0]["message"]["content"])
+print("usage", json.dumps({k: v for k, v in res["usage"].items()
+                            if k in ("prompt_tokens","completion_tokens","total_tokens")}))
+```
+
+프로그램 실행 결과:
+
+```text
+elapsed_ms 2963
+id chatcmpl-DldFdnIlhSUXINpupgsUmZL78MnBu
+model gpt-4o-mini
+content ADC_PY_SDK_OK
+usage {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+```
+
+결과 설명:
+
+- `id`는 응답 ID로, [사용 이력](https://platform.acedata.cloud/console/usages)에서 검색할 수 있습니다.
+- `content ADC_PY_SDK_OK`는 모델이 실제로 반환한 고정 식별자입니다.
+- `res["usage"]`는 `dict`를 반환하며, pydantic 모델이 아닙니다; 한 번의 호출에 약 24 token이 소모됩니다.
+
+## 예제 2: chat.completions(SSE 스트리밍)
+
+`stream=True`일 때 `create`는 일반 생성기를 반환하며, 매번 하나의 파싱된 chunk dict를 yield합니다.
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+first_chunk_ms = None
+chunks = 0
+collected = []
+
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Count from 1 to 5, separated by single spaces, no extra text."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    if first_chunk_ms is None:
+        first_chunk_ms = int((time.time() - t0) * 1000)
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+
+print("total_elapsed_ms", int((time.time() - t0) * 1000))
+print("first_chunk_ms", first_chunk_ms)
+print("chunks", chunks)
+print("collected", "".join(collected).strip())
+```
+
+프로그램 실행 결과:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+결과 설명:
+
+- 첫 프레임 지연은 2104 ms이며, 이후 11 프레임은 단 7 ms 만에 도착했습니다—서비스가 스트리밍을 시작하면, 로컬에서 쉽게 소비할 수 있습니다.
+- chunk는 일반 dict로, OpenAI SSE 형식에 따라 안전하게 `.get()`으로 값을 가져올 수 있습니다.
+- 실제 생산 환경에서는 yield하면서 SSE를 프론트엔드로 푸시하는 것을 권장하며, 전체 첫 프레임 지연은 거의 2초에 가깝습니다.
+
+## 예제 3: AsyncAceDataCloud(비동기)
+
+`AsyncAceDataCloud`의 API는 동기 버전과 완전히 대칭이며, 모든 IO 메서드는 coroutine을 반환합니다. FastAPI / aiohttp / asyncio 서비스에 적합합니다.
+
+```python
+import os, asyncio, time
+from acedatacloud import AsyncAceDataCloud
+
+async def main():
+    client = AsyncAceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+    t0 = time.time()
+    res = await client.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_ASYNC_OK"}],
+        max_tokens=20,
+        temperature=0,
+    )
+    print("elapsed_ms", int((time.time() - t0) * 1000))
+    print("id", res["id"])
+    print("content", res["choices"][0]["message"]["content"])
+    await client.close()
+
+asyncio.run(main())
+```
+
+프로그램 실행 결과:
+
+```text
+elapsed_ms 2392
+id chatcmpl-DldFwRlrgtYDBpIr0T55aDQI4GlbF
+content ADC_PY_ASYNC_OK
+```
+
+결과 설명:
+
+- 비동기 버전과 동기 버전은 동일한 HTTP 경로를 사용하지만, 연결 풀 구현이 다릅니다(`httpx.AsyncClient`).
+- 종료 시 명시적으로 `await client.close()`를 호출하여 연결 풀을 닫습니다; 긴 생명 주기 서비스에서는 프로세스 종료 전에 한 번만 닫으면 됩니다.
+- 단일 지연은 동기와 비슷하며, 동시성 시나리오에서 비동기가 장점을 발휘합니다—하나의 이벤트 루프에서 수십 개에서 수백 개의 inflight 요청을 동시에 실행할 수 있습니다.
+
+## 예제 4: images.generate(NanoBanana)
+
+NanoBanana API는 동기적으로 이미지를 생성하는 서비스로, **`wait`를 전달하지 마십시오**—SDK 호출은 서비스가 200을 반환할 때까지 계속 기다립니다.
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.images.generate(
+    provider="nano-banana",
+    model="nano-banana",
+    prompt="하얀 배경에 노란 바나나의 미니멀리스트 로고, 평면 디자인",
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("task_id", res.get("task_id"))
+print("trace_id", res.get("trace_id"))
+data = res.get("data") or []
+if data:
+    print("image_url", data[0].get("image_url"))
+```
+
+프로그램 실행 결과：
+
+```text
+elapsed_ms 18977
+task_id 9e71f40f-1579-480d-adf4-07a95450904f
+trace_id 5aa21d7f-af84-48e6-9ce0-9c6c36c8e5d9
+image_url https://platform.cdn.acedata.cloud/nanobanana/884e92df-a497-44e0-9681-35c7a00e0a6c.png
+```
+
+결과 설명：
+
+- `image_url`은 CDN의 안정적인 주소로, 직접 다운로드하거나 웹페이지에 삽입할 수 있습니다.
+- 18.9초 동안 거의 모든 시간이 모델 추론에 소요되었으며, 로컬 SDK 오버헤드는 몇 밀리초에 불과합니다.
+- Midjourney, Sora, Veo, Suno와 같은 진정한 비동기 작업의 경우, `wait=True` 또는 수동으로 `TaskHandle.wait()`를 사용하여 폴링해야 하며, 자세한 내용은 [SDK 작업 폴링 및 스트리밍 응답](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming)을 참조하십시오.
+
+## 예제 5: 유형화된 오류 처리
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud import AuthenticationError, RateLimitError, ValidationError
+
+bad = AceDataCloud(api_token="definitely-not-a-real-token")
+
+try:
+    bad.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5,
+    )
+except AuthenticationError as err:
+    print("err_class", type(err).__name__)
+    print("status", err.status_code)
+    print("code", err.code)
+except RateLimitError as err:
+    # 429，SDK가 자동으로 지수 백오프를 2회 시도한 후에도 실패할 경우에만 발생
+    print("rate limited:", err.code)
+except ValidationError as err:
+    # 400, 예를 들어 필드 누락, 모델 이름 없음
+    print("bad request:", err.code, err.message)
+```
+
+예외 계층은 TypeScript와 일치합니다: `AuthenticationError` (401), `TokenMismatchError` (토큰과 서비스 불일치), `InsufficientBalanceError` (잔액 부족), `ResourceDisabledError` (서비스 비활성화), `ValidationError` (400), `RateLimitError` (429), `ModerationError` (403 콘텐츠 검토), `APIError` (기타), `TimeoutError` (타임아웃), `TransportError` (네트워크 계층).
+
+## 구성 옵션
+
+```python
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(
+    # 필수 중 하나: 명시적 토큰 또는 환경 변수 ACEDATACLOUD_API_TOKEN
+    api_token="...",
+
+    # 플랫폼 API 루트 주소, 기본값 https://api.acedata.cloud
+    base_url="https://api.acedata.cloud",
+
+    # 일부 서비스(예: 대시보드 메타데이터)는 플랫폼 도메인을 사용
+    platform_base_url="https://platform.acedata.cloud",
+
+    # 단일 요청 타임아웃, 초; 기본값 300.0
+    timeout=300.0,
+
+    # 자동 재시도 횟수, 기본값 2; 재시도 조건: 408 / 409 / 429 / 5xx / 네트워크 오류
+    max_retries=2,
+
+    # 사용자 정의 요청 헤더
+    headers={"x-app": "my-service/1.0"},
+)
+```
+
+> Python SDK의 `timeout`과 TaskHandle의 `poll_interval` / `max_wait` 단위는 **초**이며, TypeScript SDK는 **밀리초**를 사용하므로, 언어 간 마이그레이션 시 주의해야 합니다. 자세한 내용은 [SDK 작업 폴링 및 스트리밍 응답](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming)을 참조하십시오.
+
+> SDK는 기본적으로 `ACEDATACLOUD_API_TOKEN` 환경 변수를 읽습니다; 본문에서는 [Claude Code VS Code 튜토리얼](https://platform.acedata.cloud/documents/claude-code-vscode-integrations) 등 다른 튜토리얼과 통일성을 위해 예제에서 `ACEDATACLOUD_API_KEY`를 사용하며, `api_token=os.environ["ACEDATACLOUD_API_KEY"]`로 명시적으로 주입해야 합니다.
+
+## 고급: X402 결제 훅
+
+```python
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import create_x402_payment_handler
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=my_evm_signer,
+        prefer_scheme="exact",   # 또는 "upto"
+    )
+)
+```
+
+전체 프로세스와 실제 체인 결과는 [SDK + X402 결제 훅](https://platform.acedata.cloud/documents/sdk-x402-payment)을 참조하십시오.
+
+## 잔여 한도 확인 방법
+
+[Ace Data Cloud 콘솔 - 애플리케이션 목록](https://platform.acedata.cloud/console/applications)을 통해 현재 계정의 잔여 한도를 확인할 수 있습니다.
+
+[Ace Data Cloud 콘솔 - 사용 이력](https://platform.acedata.cloud/console/usages)을 통해 모든 사용 이력과 요금 세부 정보를 확인할 수 있습니다.
+
+## 더 알아보기
+
+- 🐍 [`acedatacloud` on PyPI](https://pypi.org/project/acedatacloud/)
+- 🗂 [SDK 소스 코드](https://github.com/AceDataCloud/SDK/tree/main/python)
+- 📘 [TypeScript SDK 통합 튜토리얼](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🟦 [Go SDK 통합 튜토리얼](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 결제 훅](https://platform.acedata.cloud/documents/sdk-x402-payment)

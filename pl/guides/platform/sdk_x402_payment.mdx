@@ -1,0 +1,352 @@
+---
+title: "SDK + X402 płatności hook"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[X402](https://www.x402.org/) to protokół płatności on-chain "rozliczany według HTTP 402" zaproponowany przez Coinbase: serwer zwraca `402 Payment Required` w odpowiedzi na żądanie bez tokena, dołączając pole `accepts: [...]`, które wymienia akceptowane łańcuchy / aktywa / ceny; klient lokalnie podpisuje autoryzację (na EVM to Permit2 / EIP-712, na Solanie to autoryzacja transferu tokenów SPL), a następnie umieszcza zakodowany w base64 envelope w nagłówku `PAYMENT-SIGNATURE` i ponownie wysyła. Serwer weryfikuje, a następnie rzeczywiście rozlicza na łańcuchu, zwracając wynik biznesowy.
+
+> Klient X402 w Ace Data Cloud bezpośrednio wywołuje docelowe API, a jako podstawę ceny i podpisu wykorzystuje `402 Payment Required` oraz `accepts`, które są zwracane w czasie rzeczywistym. Możliwości płatnicze Facilitatora można zweryfikować w [`/.well-known/x402`](https://facilitator.acedata.cloud/.well-known/x402).
+
+`@acedatacloud/sdk` i `acedatacloud` udostępniają hook `paymentHandler`: gdy żądanie wysłane przez SDK otrzymuje `402`, wywołuje wstrzyknięty handler, aby uzyskać nagłówek `PAYMENT-SIGNATURE`, a następnie ponownie wysyła oryginalne żądanie. Używając `@acedatacloud/x402-client` / `acedatacloud-x402` w połączeniu z SDK, **cały proces jest całkowicie przezroczysty dla kodu biznesowego** — wystarczy użyć `client.openai.chat.completions.create(...)`, co wygląda identycznie jak w trybie tokenowym, ale w tle działa na zasadzie płatności za wywołania, bez potrzeby wcześniejszego doładowania.
+
+Artykuł:
+
+- Rzeczywiście przetestowano łańcuch "bez tokena + wstrzyknięcie handlera X402" na końcu TS (zobacz [T12 weryfikacja](#cztery-rzeczywista-weryfikacja))
+- Wymieniono różnice między dwiema ścieżkami podpisu EVM / Solana
+- Podano trzy sposoby adaptacji: tryb klucza prywatnego `viem`, tryb portfela przeglądarki, tryb `EVMAccountSigner` w Pythonie
+- Wyjaśniono pole `preferScheme` / `prefer_scheme`, które łatwo może prowadzić do błędów
+
+## I. Przegląd protokołu (obowiązkowe)
+
+Udane wywołanie X402 wymaga **3 RTT HTTP**:
+
+```text
+1. SDK -> /openai/v1/chat/completions               (bez Authorization)
+   <- 402 Payment Required
+      { accepts: [{ scheme:'upto', network:'eip155:8453', maxAmountRequired:'10000', ... }] }
+
+2. Wewnątrz SDK -> paymentHandler({ url, method, body, accepts })   (lokalne podpisanie, 0 RTT)
+   <- { headers: { 'PAYMENT-SIGNATURE': '<base64-envelope>' } }
+
+3. SDK -> /openai/v1/chat/completions               (nagłówek PAYMENT-SIGNATURE wstrzyknięty)
+   <- 200 + odpowiedź biznesowa   (rozliczenie zakończone na serwerze)
+```
+
+Envelope X402 to fragment JSON, który po zakodowaniu w base64 jest umieszczany w nagłówku `PAYMENT-SIGNATURE`. Struktura (wyciąg):
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2": {
+      "permitted": [{ "token": "0x...USDC", "amount": "10000" }],
+      "nonce": "...",
+      "deadline": "..."
+    },
+    "witness": { "...metered-billing-fields..." },
+    "signature": "0x..."
+  }
+}
+```
+
+Na najwyższym poziomie envelope znajduje się `x402Version: 2`, a obiekt `accepted` deklaruje wybrany `scheme` i `network` (identyfikator CAIP-2).
+
+| scheme  | Znaczenie                                                                                               |
+| ------- | ------------------------------------------------------------------------------------------------------ |
+| `exact` | Stała cena (scenariusze wyceny generowania obrazów / wideo, wyszukiwania itp.). Podpisana kwota = kwota wymagana przez serwer.                                                         |
+| `upto`  | Rozliczenia na podstawie pomiaru (chat completions / tokeny). Podpisana kwota to **górny limit**, rzeczywiście rozliczana jest tylko użyta część (na podstawie Permit2 + witness). **Zalecane** do użycia w API sesyjnym. |
+
+`preferScheme` / `prefer_scheme` służy do wyboru preferencji, gdy serwer **jednocześnie oferuje wiele schematów**. Jeśli serwer udostępnia tylko `exact`, to pole zostanie zignorowane; jeśli ustawiono `upto`, ale serwer go nie udostępnia, nastąpi powrót do pierwszego pasującego elementu.
+
+## II. TypeScript: portfel przeglądarki + serwer viem, dwa sposoby użycia
+
+### Instalacja
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client
+```
+
+Testowane numery wersji:
+
+```text
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+```
+
+### Pełne podpisanie `createX402PaymentHandler`
+
+```ts
+export interface X402PaymentHandlerOptions {
+  network: 'solana' | 'base' | 'skale';
+  solanaWallet?: SolanaWalletAdapter;       // network='solana' wymagane
+  evmProvider?: EVMProvider;                // network='base'/'skale' wymagane, EIP-1193
+  evmAddress?: string;                      // network='base'/'skale' wymagane
+  preferScheme?: 'exact' | 'upto';
+}
+```
+
+Wartością zwracaną jest `(ctx) => Promise&lt;{ headers: Record<string, string> }>` , co idealnie pasuje do podpisu hooka `paymentHandler` SDK.
+
+### Użycie 1: Przeglądarka (MetaMask / WalletConnect)
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+// 1. Pozwól użytkownikowi połączyć portfel
+const accounts: string[] = await (window as any).ethereum.request({
+  method: 'eth_requestAccounts'
+});
+const userAddress = accounts[0];
+
+// 2. Przełącz na główną sieć Base
+await (window as any).ethereum.request({
+  method: 'wallet_switchEthereumChain',
+  params: [{ chainId: '0x2105' }]   // 8453 = Base
+});
+
+// 3. Zbuduj klienta SDK, wstrzykując handler X402
+//    Uwaga: nie przekazuj apiToken, aby SDK mogło przejść przez ścieżkę 402
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: (window as any).ethereum,
+    evmAddress: userAddress,
+    preferScheme: 'upto'   // dla chatów obowiązkowe jest upto
+  })
+});
+
+// 4. Normalne wywołanie
+const res: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'hi' }],
+  max_tokens: 20
+});
+console.log(res.choices[0].message.content);
+```
+
+Podczas pierwszego wywołania przeglądarka **wyświetli dwa razy prośbę o podpis**: pierwszy raz to jednorazowe zatwierdzenie Permit2 dla USDC (kwota to `MaxUint256`, zapisana na łańcuchu); drugi raz to podpis EIP-712 dla envelope X402 (nie jest zapisywany na łańcuchu, tylko do weryfikacji przez facilitatora). Kolejne wywołania wymagają tylko drugiego podpisu, co w praktyce wygląda jak "jedno kliknięcie podpisu → uzyskanie wyniku".
+
+### Użycie 2: Serwer Node + klucz prywatny viem (odpowiednie dla backendu / CLI)
+
+`@acedatacloud/x402-client` w TS **przyjmuje tylko dostawcę EIP-1193** — nie zarządza bezpośrednio kluczem prywatnym. W scenariuszu Node / CLI standardową praktyką jest użycie [`viem`](https://viem.sh/) do opakowania klucza prywatnego w `WalletClient`, a następnie użycie [`@ethereumjs/util`](https://www.npmjs.com/package/@ethereumjs/util) lub wewnętrznego adaptera EIP-1193 viem.
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+import { createWalletClient, http } from 'viem';
+import { base } from 'viem/chains';
+import { privateKeyToAccount } from 'viem/accounts';
+
+const account = privateKeyToAccount(process.env.EVM_PRIVATE_KEY as `0x${string}`);
+const walletClient = createWalletClient({
+  account,
+  chain: base,
+  transport: http(process.env.BASE_RPC_URL)
+});
+
+// viem WalletClient 自带 EIP-1193 兼容的 .request()，可以直接当 evmProvider
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: walletClient as any,   // walletClient.request 满足 EIP-1193
+    evmAddress: account.address,
+    preferScheme: 'upto'
+  })
+});
+
+const res: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'hi' }],
+  max_tokens: 20
+});
+console.log(res.choices[0].message.content);
+```
+
+> Jeśli uważasz, że dostosowanie EIP-1193 w viem nie jest wystarczająco stabilne, możesz również skorzystać z bardziej podstawowego [`signEVMUptoPayment`](https://github.com/AceDataCloud/SDK/blob/main/typescript/packages/x402-client/src/evm.ts), samodzielnie łącząc `accepts → signed envelope → PAYMENT-SIGNATURE header`, omijając haki SDK; jednak zaleca się, aby najpierw wybrać `createX402PaymentHandler`, aby nie musieć samodzielnie utrzymywać aktualizacji protokołu.
+
+### Użycie 3: Solana
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+import { Keypair } from '@solana/web3.js';
+
+const kp = Keypair.fromSecretKey(/* Uint8Array */);
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'solana',
+    solanaWallet: {
+      publicKey: kp.publicKey,
+      signTransaction: async (tx) => {
+        tx.sign([kp]);
+        return tx;
+      }
+    }
+  })
+});
+```
+
+Na łańcuchu Solana obecnie **udostępniony jest tylko schemat `exact`**, więc `preferScheme` nie działa na Solanie.
+
+## Trzy, Python: tryb klucza prywatnego
+
+Python `acedatacloud-x402` korzysta z **bezpośredniego podpisywania kluczem prywatnym** (bez abstrakcji EIP-1193), co jest bardziej odpowiednie dla serwerów / wykonawców zadań.
+
+### Instalacja
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+Wersja testowa:
+
+```text
+acedatacloud==2026.4.26.1
+acedatacloud-x402==2026.5.31.3
+```
+
+### EVM (Base / Skale)
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import (
+    create_x402_payment_handler,
+    EVMAccountSigner,
+)
+
+# 1. Zbuduj podpisującego z klucza prywatnego
+signer = EVMAccountSigner.from_private_key(os.environ["EVM_PRIVATE_KEY"])
+
+# 2. Zbuduj SDK: nie przekazuj api_token, aby SDK korzystało z ścieżki 402
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+        prefer_scheme="upto",   # chat klasy zawsze wybieraj upto
+    )
+)
+
+# 3. Normalne wywołanie
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "hi"}],
+    max_tokens=20,
+)
+print(res["choices"][0]["message"]["content"])
+```
+
+### Solana
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import (
+    create_x402_payment_handler,
+    SolanaKeypairSigner,
+)
+
+signer = SolanaKeypairSigner.from_secret_key_base58(os.environ["SOLANA_PRIVATE_KEY"])
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="solana",
+        solana_signer=signer,
+        rpc_url="https://api.mainnet-beta.solana.com",  # opcjonalne
+    )
+)
+```
+
+### Jednorazowe zatwierdzenie (tylko EVM przy pierwszym użyciu)
+
+Na EVM Base X402 korzysta z Permit2, co wymaga, aby portfel zatwierdził USDC dla kontraktu Permit2 raz z `MaxUint256`. `acedatacloud-x402` zawiera wbudowane `approve_permit2`:
+
+```python
+from acedatacloud_x402 import approve_permit2
+
+tx_hash = approve_permit2(
+    evm_signer=signer,
+    rpc_url=os.environ["BASE_RPC_URL"],
+)
+print("permit2_approve_tx", tx_hash)
+```
+
+Ta transakcja musi być wysłana tylko raz, a następnie wszystkie płatności X402 EVM będą korzystać z tego upoważnienia. Solana nie wymaga tego.
+
+## Cztery, rzeczywiste testy
+
+Cel testowy: **SDK TS nie przekazuje tokena, wstrzykuje handler X402, może normalnie skonstruować i zainicjować żądanie** (nie zużywając prawdziwego USDC na łańcuchu).
+
+```ts
+// /tmp/sdk-tests/ts/x402-wire-test.ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const handler = createX402PaymentHandler({
+  network: 'base',
+  evmProvider: { request: async () => '0x0' } as any,   // placeholder provider
+  evmAddress: '0x0000000000000000000000000000000000000000',
+  preferScheme: 'upto'
+});
+
+console.log('handler_type', typeof handler);   // function
+
+const client = new AceDataCloud({
+  paymentHandler: handler
+});
+
+console.log('client_ctor_ok', client.constructor.name);   // AceDataCloud
+```
+
+Wynik:
+
+```text
+handler_type function
+client_ctor_ok AceDataCloud
+```
+
+Wyniki wskazują:
+
+- Nie przekazano `apiToken`, SDK konstrukcja **nie zgłasza błędu**, co dowodzi, że tryb X402 jest rzeczywiście legalnym zamiennikiem tokena.
+- `createX402PaymentHandler` zwraca funkcję (hook), a SDK wywołuje ją tylko, gdy otrzyma 402.
+- Rzeczywiste testy płatności na łańcuchu, ponieważ dotyczą prawdziwego pobierania USDC, nie zostały uwzględnione w tym przewodniku; można odwołać się do [przewodnika integracji X402](https://platform.acedata.cloud/documents/x402-integration) w celu uzyskania przykładów e2e.
+
+> Po stronie Pythona `create_x402_payment_handler` również przeprowadził tę samą weryfikację — wartość zwracana funkcji jest callable, a wstrzyknięcie `payment_handler=...` podczas `AceDataCloud(...)` nie zgłasza błędu. Obie strony są zgodne semantycznie.
+
+## Pięć, porównanie z „trybem tokena Bearer”
+
+| Wymiar              | Token API                                                         | X402                                            |
+| --------------- | ----------------------------------------------------------------- | ----------------------------------------------- |
+| Scenariusz użycia            | Własne zaplecze, długoterminowe projekty                                                         | Zewnętrzni deweloperzy, płatności na żądanie, wywołania Agentic                        |
+| Rejestracja              | Wymagana w [konsoli](https://platform.acedata.cloud/console/applications)  | Nie wymagana; wystarczy mieć portfel na łańcuchu                                     |
+| Precyzja rozliczeń            | Wcześniejsze doładowanie, według tabeli tokenów                                                   | Na bieżąco według wywołań                                         |
+| Saldo              | Można sprawdzić w konsoli                                                           | Sprawdź portfel USDC na łańcuchu                                      |
+| Koszt początkowy            | Rejestracja e-mailowa z darmowym limitem                                                        | Wymaga mostu USDC do Base, pierwsze zatwierdzenie Permit2              |
+| Odpowiednie dla chat klas       | ✅                                                                 | ✅（musi być `preferScheme=upto`）                       |
+| Odpowiednie dla jednorazowych płatności / płatności między kontami | ❌                                                                 | ✅                                               |
+| Zmiany w kodzie            | `apiToken: '...'`                                                 | `paymentHandler: createX402PaymentHandler(...)` |
+Dwa tryby mogą współistnieć — w tym samym procesie, wystarczy przypisać różne metody uwierzytelniania do różnych instancji `client`.
+
+## VI. Częste pułapki
+
+1. **klasa chat musi mieć `preferScheme=upto`**: użycie `exact` spowoduje, że facilitator odliczy USDC według `maxAmountRequired` (nie rzeczywistego zużycia).
+2. **Nie przesyłaj surowego klucza prywatnego do `createX402PaymentHandler`**: pakiet TS nie akceptuje `{ privateKey }`, musi być opakowany jako dostawca EIP-1193 (zalecany viem `WalletClient`).
+3. **Pierwsze wywołanie to podwójne podpisanie**: pierwsze podpisanie Permit2 approve (na łańcuchu, z gazem), drugie podpisanie X402 envelope (nie na łańcuchu). Kolejne wywołania to tylko drugie.
+4. **Solana nie ma koncepcji Permit2**: bezpośrednie podpisanie autoryzacji transferu tokenów SPL, nie wymaga approve; ale obecnie na łańcuchu Solana wspiera tylko `exact`.
+5. **Rozróżnienie błędów biznesowych i błędów płatności**: 402 → błąd handlera rzuca `X402SignError` (konkretna typ w zależności od łańcucha); późniejsze ponowne wysyłanie błędów interfejsu biznesowego (401 / 422 / 5xx) nadal klasyfikowane są jako zwykłe wyjątki SDK.
+6. **Najstabilniejszy sposób dostosowania `viem`**: `evmProvider: walletClient as any` straci sprawdzanie typów, ale ma najlepszą kompatybilność; jeśli chcesz zachować typy, użyj `.transport.request` viem, aby osobno opakować obiekt `{ request }`.
+
+## Dowiedz się więcej
+
+- 📦 [`@acedatacloud/x402-client` na npm](https://www.npmjs.com/package/@acedatacloud/x402-client)
+- 🐍 [`acedatacloud-x402` na PyPI](https://pypi.org/project/acedatacloud-x402/)
+- 🗂 [Źródło klienta X402](https://github.com/AceDataCloud/SDK/tree/main/x402-client)
+- 🔗 [Przewodnik integracji X402](https://platform.acedata.cloud/documents/x402-integration)
+- 📘 [Poradnik integracji SDK TypeScript](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Poradnik integracji SDK Python](https://platform.acedata.cloud/documents/sdk-python)
+- 🌐 [x402.org](https://www.x402.org/)

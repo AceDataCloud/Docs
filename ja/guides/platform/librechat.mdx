@@ -1,0 +1,119 @@
+---
+title: "LibreChatでAce Data Cloudを使用する"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[LibreChat](https://www.librechat.ai/)は、高度に構成可能なオープンソースAIクライアントで、`librechat.yaml`を使用してサービスプロバイダー、モデル、およびルーティングルールを記述できます。OpenAI互換のエンドポイントをカスタマイズして、Ace Data Cloudに接続することができます。本記事では、設定プロセスについて説明します。
+
+## 申請プロセス
+
+LibreChatでAce Data Cloudに接続するには、まず[Ace Data Cloudコンソール](https://platform.acedata.cloud/console/applications)にアクセスし、APIトークンを取得しておきます。
+
+![Ace Data Cloud API Keyの取得](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+まだログインまたは登録していない場合は、自動的にログインページにリダイレクトされ、登録とログインを促されます。ログインまたは登録後、現在のページに自動的に戻ります。
+
+初回申請時には無料のクレジットが付与され、Ace Data Cloudのモデルサービスを無料で体験できます。
+
+## LibreChatのデプロイ
+
+LibreChatはDocker Composeを使用してデプロイされます。まず、ディレクトリを準備し、公式設定をダウンロードします：
+
+```bash
+mkdir -p ~/librechat && cd ~/librechat
+curl -O https://raw.githubusercontent.com/danny-avila/LibreChat/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/danny-avila/LibreChat/main/.env.example
+mv .env.example .env
+```
+
+`.env`内で`openssl rand -hex 32`を使用して`JWT_SECRET`、`JWT_REFRESH_SECRET`、`CREDS_KEY`、`CREDS_IV`などのセキュリティキーを生成し、必要に応じて`ALLOW_REGISTRATION`を設定します。
+
+## Ace Data Cloudの設定
+
+`librechat.yaml`を作成し、Ace Data CloudをカスタムOpenAI互換エンドポイントとして設定します（完全なフィールドの説明は公式の[Custom Endpointsドキュメント](https://www.librechat.ai/docs/quick_start/custom_endpoints)を参照し、`{token}`をあなたのトークンに置き換えます）：
+
+```yaml
+version: 1.0.5
+cache: true
+
+endpoints:
+  custom:
+    - name: "Ace Data Cloud"
+      apiKey: "{token}"
+      baseURL: "https://api.acedata.cloud/v1"
+      models:
+        default:
+          - "MODEL_ID"
+        fetch: true
+      titleConvo: true
+      titleModel: "MODEL_ID"
+      modelDisplayLabel: "Ace Data Cloud"
+```
+
+`docker-compose.yml`の`api`サービスの下にこのファイルをコンテナにマウントし、`docker compose up -d`で起動します：
+
+```yaml
+    volumes:
+      - type: bind
+        source: ./librechat.yaml
+        target: /app/librechat.yaml
+```
+
+`baseURL`のパスルールに注意してください：
+
+| baseURL                               | 実際のリクエスト                                           | 結果                       |
+| ------------------------------------- | ------------------------------------------------------ | ------------------------ |
+| `https://api.acedata.cloud/v1`        | `https://api.acedata.cloud/v1/chat/completions`        | 正常                       |
+| `https://api.acedata.cloud/openai`    | `https://api.acedata.cloud/openai/chat/completions`    | 使用可能                   |
+| `https://api.acedata.cloud/openai/v1` | `https://api.acedata.cloud/openai/v1/chat/completions` | 404（`/openai`下に`/v1`がない） |
+| `https://api.acedata.cloud`           | `https://api.acedata.cloud/chat/completions`           | 404（`/v1`が欠落）         |
+
+## モデルの選択
+
+モデルディレクトリは継続的に更新されます。クライアントが自動的に読み込むモデルリストを優先的に使用してください。手動で入力する必要がある場合は、まず`GET https://api.acedata.cloud/v1/models`をリクエストして現在のモデルIDを取得し、クライアントがサポートするコンテキスト、画像、およびツール呼び出し能力に基づいて選択します。
+
+## 接続の検証
+
+問題がLibreChatにあるのかネットワークにあるのか不明な場合は、curlを使用してエンドポイントを直接検証できます（`{token}`をあなたのトークンに置き換えます）：
+
+```bash
+curl -X POST 'https://api.acedata.cloud/v1/chat/completions' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+OpenAI互換の`chat.completion`オブジェクトが返されれば、トークンとエンドポイントが準備完了であることを示します。`HTTP 403 used_up`が返された場合は、トークンは有効ですが残高が不足していることを示し、[コンソール](https://platform.acedata.cloud/console/applications)でチャージできます。
+
+## 上級：yaml設定のコツ
+
+`librechat.yaml`は複数のエンドポイントグループをサポートしており、`apiKey: "user_provided"`を使用して各ユーザーが自分のキーを入力できるようにできます。`titleModel`は生成する対話タイトルのモデルを指定し、`dropParams`はターゲットAPIがサポートしていないパラメータを一括削除できます。詳細は[librechat.yaml設定詳細](https://www.librechat.ai/docs/configuration/librechat_yaml)を参照してください。
+
+## よくある質問
+
+### 起動後にAce Data Cloudエンドポイントが見えない
+
+通常、yamlがコンテナにマウントされていないか、インデントが間違っています。`docker-compose.yml`のボリュームを確認し、yamlのインデントを検証してください。
+
+### 404エラーが表示される
+
+`baseURL`が`.../openai/v1`になっているか、`/v1`が欠落しています。`https://api.acedata.cloud/v1`に変更してください。
+
+### モデルのドロップダウンが空
+
+`fetch: true`ですが`/v1/models`が失敗した場合、`fetch: false`に変更し、`default`を手動で列挙します。
+
+### yamlを変更しても効果がない
+
+コンテナを再起動する必要があります：`docker compose restart api`。
+
+## さらに詳しく
+
+- [LibreChat公式サイト](https://www.librechat.ai/) ｜ [LibreChat GitHub](https://github.com/danny-avila/LibreChat) ｜ [librechat.yaml設定詳細](https://www.librechat.ai/docs/configuration/librechat_yaml)
+- [LibreChatカスタムエンドポイント（Custom Endpoints）公式ドキュメント](https://www.librechat.ai/docs/quick_start/custom_endpoints)
+- [Ace Data Cloud OpenAI Chat Completions APIドキュメント](https://platform.acedata.cloud/documents/openai-chat-completions)
+- [Ace Data Cloudサービス一覧](https://platform.acedata.cloud/documents)
+- [Ace Data Cloudコンソール](https://platform.acedata.cloud/console)

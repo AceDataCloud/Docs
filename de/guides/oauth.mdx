@@ -1,0 +1,236 @@
+---
+title: "Integration von „Mit Ace Data Cloud anmelden“ (OAuth 2.0)"
+---
+
+Unterstütze in deinem eigenen Produkt „Mit Ace Data Cloud anmelden“ und lies und schreibe nach der Autorisierung durch den Benutzer **im Namen des Benutzers** dessen Ace Data Cloud-Ressourcen (Profil, API-Token, Abonnements, Nutzung, Bestellungen usw.). Die Grundlage ist der Standard-**OAuth-2.0-Autorisierungscode-Flow (Authorization Code) + PKCE**, und die Integration ist vollständig identisch mit der von GitHub / Google Login — jede bereits vorhandene OAuth-Client-Bibliothek kann direkt verwendet werden.
+
+> **Geeignete Szenarien**: Du entwickelst eine Drittanbieteranwendung / einen Agenten / einen MCP-Client / einen automatisierten Workflow und möchtest Benutzern ermöglichen, sich mit einem Klick über ihr Ace Data Cloud-Konto anzumelden und bei Bedarf auf ihre Ressourcen auf der Plattform zuzugreifen, ohne dass Benutzer API-Keys manuell kopieren und einfügen müssen.
+
+## Begriffe & Endpunkt-Schnellübersicht
+
+Alle Endpunkte befinden sich unter `https://auth.acedata.cloud`; die neuesten Adressen können jederzeit über den Discovery-Endpunkt abgerufen werden:
+
+```bash
+curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
+```
+
+| Zweck                 | Endpunkt                                                |
+| ------------------ | ------------------------------------------------- |
+| Discovery-Dokument (Discovery)    | `GET /.well-known/oauth-authorization-server`     |
+| Benutzerautorisierungsseite (Browser-Weiterleitung)       | `GET https://auth.acedata.cloud/oauth2/authorize` |
+| Token-Endpunkt (Token abrufen / aktualisieren) | `POST https://auth.acedata.cloud/oauth2/token`    |
+| Token widerrufen               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
+| Benutzerinformationen (UserInfo)     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
+| Anwendungsregistrierungsverwaltung (Self-Service)         | `https://auth.acedata.cloud/user/oauth-apps`      |
+
+Unterstützte Funktionen: `response_type=code`, `grant_types=authorization_code, refresh_token`, `code_challenge_methods=S256, plain`, Client-Authentifizierungsmethoden `client_secret_post` (vertraulicher Client) / `none` (öffentlicher PKCE-Client).
+
+## Berechtigungsbereiche (Scope)
+
+Beantrage Berechtigungen nach dem Prinzip der „minimalen Berechtigung“; Benutzer sehen auf der Autorisierungsseite jede von dir beantragte Berechtigung.
+
+**Identitätsbezogen (OIDC-kompatibel)**
+
+| Scope     | Bedeutung      | Von `/users/me` zurückgegebene Felder                                           |
+| --------- | ------- | ---------------------------------------------------------- |
+| `openid`  | Eindeutige Benutzerkennung  | `id`                                                       |
+| `profile` | Grundlegende Profildaten    | `username`、`nickname`、`avatar`、`is_verified`、`date_joined` |
+| `email`   | E-Mail-Adresse      | `email`                                                    |
+| `phone`   | Mobiltelefonnummer (sensibel) | `phone`、`region`                                           |
+
+**Plattformressourcen**
+
+| Scope                                      | Bedeutung                     |
+| ------------------------------------------ | ---------------------- |
+| `applications:read` / `applications:write` | Service-Abonnements und Kontingente des Benutzers lesen / ändern       |
+| `credentials:read` / `credentials:write`   | API-Token des Benutzers lesen / erstellen und widerrufen |
+| `usage:read`                               | Aufrufhistorie des Benutzers lesen               |
+| `orders:read` / `orders:write`             | Bestellungen lesen / Bestellungen aufgeben und Zahlungen initiieren          |
+
+**Zusammengefasste Bereiche (automatisch erweitert)**
+
+| Scope            | Wird erweitert zu                                                                     |
+| ---------------- | ----------------------------------------------------------------------- |
+| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
+| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
+| `platform`       | `platform:read` + `platform:write`                                      |
+
+**Speziell**
+
+| Scope            | Bedeutung                                                 |
+| ---------------- | -------------------------------------------------- |
+| `offline_access` | Stellt einen **Refresh Token** aus (ohne Beantragung wird nur ein Access Token ausgegeben; nach Ablauf ist eine erneute Autorisierung erforderlich) |
+
+> Typische Kombinationen: Drittanbieter-„Ein-Klick-Anmeldung“ = `openid profile`; MCP- / IDE-Clients benötigen automatische Key-Konfiguration = `openid profile credentials:read credentials:write`; vollständige Verwaltungsoberfläche = `openid profile email platform offline_access`.
+
+## Schritt 1: Eine OAuth-Anwendung registrieren
+
+Öffne [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) → „Anwendung erstellen“ und fülle Folgendes aus:
+
+1. **Anwendungsname / Beschreibung / Logo**: Wird auf der Autorisierungseinwilligungsseite des Benutzers angezeigt.
+2. **Client-Typ (Client Type)**:
+   - **Vertraulich (confidential)** — Du hast ein Backend und kannst `client_secret` sicher verwahren (Webdienst, Backenddienst).
+   - **Öffentlich (public)** — Reines Frontend / Desktop / CLI / Mobilgerät, **kann** kein Geheimnis verwahren und muss **PKCE** verwenden.
+3. **Callback-Adressen (Redirect URIs)**: Die Adresse, zu der der Benutzer nach Abschluss der Autorisierung zurückgeleitet wird; sie **muss vollständig mit der `redirect_uri` übereinstimmen, die du beim Starten der Autorisierung übergibst**. Mehrere Adressen können eingetragen werden.
+4. **Berechtigungsbereiche (Scopes)**: Wähle die im vorherigen Abschnitt benötigten Scopes aus.
+
+Nach dem Speichern erhältst du die **`client_id`**; vertrauliche Clients zeigen außerdem **einmalig** das **`client_secret`** an — speichere es sofort, denn nach dem Schließen kann es nicht erneut angezeigt werden (es kann auf der Detailseite über „Schlüssel rotieren / Rotate Secret“ neu generiert werden; der alte Schlüssel wird sofort ungültig).
+
+> Jedes Konto kann maximal **20** OAuth-Anwendungen erstellen.
+
+## Schritt 2: Den Benutzer zur Autorisierungsseite weiterleiten
+
+Leite im Browser deiner Anwendung den Benutzer zur Autorisierungsseite weiter und füge die Abfrageparameter hinzu:
+
+```
+https://auth.acedata.cloud/oauth2/authorize
+  ?response_type=code
+  &client_id=<deine client_id>
+  &redirect_uri=<deine registrierte Callback-Adresse>
+  &scope=openid%20profile%20credentials:read
+  &state=<zufällige Anti-CSRF-Zeichenfolge>
+  &code_challenge=<PKCE-Challenge-Wert>          # Für öffentliche Clients erforderlich
+  &code_challenge_method=S256            # Für öffentliche Clients erforderlich
+```
+
+- `state`: Eine von dir selbst generierte zufällige Zeichenfolge, die beim Callback unverändert zurückgegeben wird und zur Abwehr von CSRF dient; **unbedingt prüfen**.
+- **PKCE (für öffentliche Clients verpflichtend, auch für vertrauliche Clients empfohlen)**: Generiere zuerst einen zufälligen `code_verifier` und berechne dann
+  `code_challenge = BASE64URL( SHA256( code_verifier ) )`. Füge `code_challenge` in die Autorisierungs-URL ein
+  und bewahre `code_verifier` selbst für Schritt 4 auf.
+
+Nachdem der Benutzer sich angemeldet und auf „Zustimmen“ geklickt hat, wird der Browser zurückgeleitet zu:
+
+```
+<redirect_uri>?code=<Autorisierungscode>&state=<unverändert zurückgegebener state>
+```
+
+Wenn der Benutzer ablehnt: `<redirect_uri>?error=access_denied&error_description=...&state=...`.
+
+> Der Autorisierungscode ist **10 Minuten** gültig und kann **nur einmal verwendet werden**.
+
+## Schritt 3: Token mit dem Autorisierungscode abrufen
+
+Rufe am **Backend** (vertraulicher Client) oder im Client (öffentlicher PKCE-Client) mit `code` den Token-Endpunkt auf.
+
+**Vertraulicher Client (mit client_secret):**
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<上一步拿到的 code> \
+  -d client_id=<你的 client_id> \
+  -d client_secret=<你的 client_secret> \
+  -d redirect_uri=<和第 2 步完全一致的回调地址>
+```
+
+**Öffentlicher Client (PKCE, ohne client_secret):**
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<code> \
+  -d client_id=<deine client_id> \
+  -d code_verifier=<in Schritt 2 generierter code_verifier> \
+  -d redirect_uri=<Callback-Adresse>
+```
+
+Erfolgreiche Rückgabe (`refresh_token` erscheint nur, wenn `offline_access` beantragt wurde):
+
+```json
+{
+  "access_token": "<JWT>",
+  "token_type": "Bearer",
+  "expires_in": 1296000,
+  "scope": "openid profile credentials:read",
+  "refresh_token": "<JWT, nur bei offline_access>"
+}
+```
+
+`access_token` ist ein JWT und enthält die `scope`-Deklaration; die Gültigkeitsdauer beträgt **15 Tage** (`expires_in` in Sekunden). Das Refresh Token ist **30 Tage** gültig.
+
+## Schritt 4: Schnittstellen mit dem Access Token aufrufen
+
+Füge das Token einfach in den `Authorization: Bearer`-Header ein.
+
+**Benutzerinformationen lesen (UserInfo, Felder werden nach autorisiertem Scope gefiltert):**
+
+```bash
+curl https://auth.acedata.cloud/api/v1/users/me \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Plattformressourcen-Schnittstelle aufrufen** (`platform.acedata.cloud`, Autorisierung nach Scope). Zum Beispiel, wenn `credentials:read` erteilt wurde:
+
+```bash
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<aus UserInfo zurückgegebene id>" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Das Plattform-Backend prüft die `scope`-Deklaration im JWT — das Token kann nur auf Ressourcen zugreifen, die der Benutzer autorisiert hat. Wenn auf nicht autorisierte Ressourcen zugegriffen wird, wird `403` zurückgegeben.
+
+## Token aktualisieren
+
+Nachdem das Access Token abgelaufen ist, verwende das Refresh Token, um ein neues Token-Paar zu erhalten (vorausgesetzt, `offline_access` wurde ursprünglich beantragt):
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=refresh_token \
+  -d refresh_token=<dein refresh_token>
+```
+
+Die Rückgabestruktur entspricht Schritt 3; der Scope wird aus der ursprünglichen Autorisierung **unverändert beibehalten**. Nach dem Aktualisieren wird das alte Refresh Token ungültig (Rotation), bitte speichere das neue.
+
+## Token widerrufen
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/revoke \
+  -d token=<access_token oder refresh_token>
+```
+
+## Praxisbeispiel: So sind auch unsere eigenen MCP-Server angebunden
+
+Die Verbindungen „Sign in with Ace Data Cloud“, die bei den über 15 MCP-Servern von Ace Data Cloud (NanoBanana, Midjourney, Suno, Seedance, Kling…) in Claude Desktop / Cursor erscheinen, verwenden genau diesen Ablauf: Sie sind alle als OAuth-Anwendungen des Typs **öffentlich (PKCE)** registriert, beantragen `credentials`-bezogene Scopes und können nach der Benutzerautorisierung im Namen des Benutzers `api.acedata.cloud` aufrufen — ohne dass der Benutzer einen API Key manuell einfügen muss. Deine Anbindung ist genau dieselbe wie ihre.
+
+## Häufige Fehler
+
+Fehlerantworten haben einheitlich das Format `{ "error": "<code>", "error_description": "<menschenlesbare Beschreibung>" }`:
+
+| error                    | Bedeutung / Fehlerbehebung                                                        |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| `invalid_request`        | Fehlender oder ungültiger Parameter (z. B. kein `code` / `client_id` übergeben)   |
+| `invalid_client`         | `client_id` existiert nicht, Anwendung ist deaktiviert oder `client_secret` ist falsch |
+| `invalid_grant`          | Autorisierungscode existiert nicht / ist abgelaufen (>10 Minuten) / wurde bereits verwendet / PKCE-Prüfung fehlgeschlagen / `redirect_uri` stimmt nicht mit der bei der Autorisierung überein |
+| `access_denied`          | Der Benutzer hat auf der Autorisierungsseite „Ablehnen“ geklickt                  |
+| `unsupported_grant_type` | `grant_type` ist nicht `authorization_code` oder `refresh_token`                  |
+
+## Einschränkungen im Überblick
+
+| Element                 | Wert                                              |
+| ----------------------- | ------------------------------------------------- |
+| Maximale OAuth-Anwendungsanzahl pro Konto | 20                                |
+| Gültigkeitsdauer des Autorisierungscodes | 10 Minuten, einmalige Verwendung    |
+| Gültigkeitsdauer des Access Tokens | 15 Tage                                   |
+| Gültigkeitsdauer des Refresh Tokens | 30 Tage (Rotation)                        |
+| `redirect_uri`          | Muss exakt mit dem registrierten Wert übereinstimmen |
+| `client_secret`        | Wird nur beim Erstellen / bei der Rotation einmal angezeigt, serverseitig als SHA-256-Hash gespeichert |
+
+## Drittanbieter-OAuth-Anwendungen auf der Studio-Startseite einbetten
+
+Unter „Einstellungen → Startseite → Website-Komponenten“ in Studio kann OAuth aktiviert und die `client_id` sowie die registrierte Callback-Adresse der Drittanbieteranwendung konfiguriert werden.
+Die Website und der Callback müssen HTTPS verwenden, denselben Ursprung haben (Protokoll, Domain und Port) und einen anderen Ursprung als Studio verwenden.
+In der Konfiguration darf kein `client_secret` eingetragen werden; Anwendungsschlüssel dürfen nur im Backend des Drittanbieters gespeichert werden.
+
+Die von der Komponente beantragten Berechtigungen sind `profile:read credentials:read`. Jeder Besucher muss einzeln zustimmen; die Konfiguration der Komponente durch den Websitebetreiber stellt keine Autorisierung durch Besucher dar.
+Die Drittanbieterseite generiert einen zufälligen `state` und PKCE-Verifier und sendet eine S256-Challenge an Studio. Studio hostet die offizielle Autorisierungsseite im Komponentenbereich,
+nach der Zustimmung des Benutzers erhält der Drittanbieter einen einmaligen Autorisierungscode und ruft den Token-Endpunkt auf, um ein OAuth-Access-Token zu erhalten; anschließend wird
+`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=<Benutzer-ID>` aufgerufen, um vorhandene API Keys zu lesen.
+Die Benutzer-ID stammt aus der im vorherigen Schritt von `GET https://auth.acedata.cloud/api/v1/users/me` zurückgegebenen `id`; die Schnittstelle für die Anmeldedatenliste akzeptiert kein `user_id=me`.
+Studio übermittelt Drittanbietern weder sein eigenes Login-Token noch liest es den Key des Benutzers direkt aus und fügt ihn ein.
+
+Öffentliche Clients müssen **S256 PKCE** verwenden. Beim Abrufen des Tokens muss eine `redirect_uri` übergeben werden, die exakt mit der Autorisierungsanfrage übereinstimmt.
+Der Autorisierungscode kann nur einmal eingelöst werden. Vor der Autorisierung wird geprüft, ob die Callback-Adresse registriert ist.
+
+Die Drittanbieterseite muss das Nachrichtenprotokoll implementieren; keine beliebige bestehende Webseite kann sich allein durch das Eintragen einer URL automatisch anbinden.
+Ein vollständiges Beispiel findest du im [Leitfaden zur Anbindung der Studio-OAuth-Komponente](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
+
+**Die Autorisierung zum Lesen von API Keys entspricht der Erlaubnis für den Drittanbieter, diesen Key zu speichern und zu verwenden. Das Aufheben der OAuth-Autorisierung macht bereits vom Drittanbieter kopierte Keys nicht ungültig;
+der Benutzer muss den Key zusätzlich widerrufen oder rotieren.**

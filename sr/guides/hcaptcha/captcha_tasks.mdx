@@ -1,0 +1,127 @@
+---
+title: "API za upit zadataka sa verifikacionim kodom (asinkroni zadaci na serveru) - uputstvo za integraciju"
+description: "hCaptcha verification code recognition service API guide - Ace Data Cloud"
+---
+
+Ovaj dokument opisuje asinkroni interfejs za upit zadataka sa verifikacionim kodom `POST /captcha/tasks`. Kada pozovete bilo koji interfejs za verifikacione kodove (serija tokena ili serija prepoznavanja) i prosledite `async: true`, interfejs će odmah vratiti `task_id`, server će odmah preuzeti i nastaviti sa obradom; možete koristiti taj `task_id` za upit konačnog rezultata, ali upit nije preduslov za nastavak izvršavanja zadatka. Pogodno za scenarije kao što je rotacija više reševača (multi-solver rotation): nakon slanja zadatka odmah dobijate `task_id`, prvo rasporedite druge reševače, a zatim se vratite da pročitate rezultate.
+
+> 📘 Kompletna interaktivna dokumentacija (uključujući online debagovanje): [API za upit zadataka sa verifikacionim kodom →](https://platform.acedata.cloud/documents/captcha-tasks)
+
+## Proces prijave
+
+Da biste koristili ovaj interfejs, prvo idite na [Ace Data Cloud kontrolnu tablu](https://platform.acedata.cloud/console/applications) da dobijete svoj API Token, koji čuvate za kasniju upotrebu. **Jedan API Token može pozvati sve usluge platforme, nije potrebno da se za svaku uslugu posebno prijavljujete.**
+
+## Osnovna upotreba
+
+### Prvi korak: kreiranje zadatka na asinkroni način
+
+U telu zahteva za bilo koji interfejs za verifikacione kodove prosledite `async: true`, interfejs će odmah vratiti `task_id` (HTTP 201), bez blokiranja čekanja:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/captcha/token/recaptcha2' \
+-H 'accept: application/json' \
+-H 'authorization: Bearer {token}' \
+-H 'content-type: application/json' \
+-d '{
+  "website_key": "6Le-wvkSAAAAAPBMRTvw0Q4Muexq9bi0DJwx_mJ-",
+  "website_url": "https://www.google.com/recaptcha/api2/demo",
+  "async": true
+}'
+```
+
+```json
+{
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "trace_id": "2efa9340-b21b-4e26-9e14-4aac95f343ab"
+}
+```
+
+### Drugi korak (opciono): upit rezultata pomoću task_id
+
+Ako želite aktivno da pratite napredak, možete koristiti `task_id` koji je vraćen u prethodnom koraku za upit `POST /captcha/tasks` (preporučuje se svake 3~5 sekundi). Ovaj interfejs neće pokrenuti ili unaprediti obradu zadatka; prilikom čitanja gotovih rezultata koristi se postojeće ponašanje jednokratnog obračuna:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/captcha/tasks' \
+-H 'accept: application/json' \
+-H 'authorization: Bearer {token}' \
+-H 'content-type: application/json' \
+-d '{
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002"
+}'
+```
+
+Tokom obrade biće vraćen `status: processing`:
+
+```json
+{
+  "success": true,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "processing"
+}
+```
+
+Kada se obrada završi, biće vraćen `status: ready` i odgovarajući rezultati - struktura polja je potpuno identična onoj u sinhronom režimu:
+
+- **serija tokena** (hcaptcha, recaptcha2, recaptcha3) vraća `token`:
+
+```json
+{
+  "success": true,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "ready",
+  "started_at": 1784885653.0,
+  "finished_at": 1784885665.4,
+  "elapsed": 12.4,
+  "token": "03AFcWeA5kjJyDQ9S1a9UYimR6nuxnpEnAs5x2Pixao0dXZhMB......"
+}
+```
+
+- **kategorija prepoznavanja** (recognition/recaptcha2, recognition/hcaptcha) vraća `solution`; **recognition/image2text** vraća `text`.
+
+`/captcha/tasks` je univerzalan za sve interfejse za verifikacione kodove (serije tokena i prepoznavanja), može se koristiti isti `task_id` za upit.
+
+Server nastavlja obradu od trenutka kreiranja, najduže 120 sekundi. Ako do poslednjeg upita pre isteka roka još uvek nije dobijen rezultat, biće vraćen HTTP 504. Ovaj status je terminalni, klijent treba da prestane sa upitima; ponovni upit istog `task_id` će stabilno vraćati isti neuspešni rezultat:
+
+```json
+{
+  "detail": "Zadatak sa verifikacionim kodom je istekao.",
+  "code": "timeout",
+  "success": false,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "failed",
+  "started_at": 1784885653.0,
+  "finished_at": 1784885765.4,
+  "elapsed": 112.4
+}
+```
+
+`status: ready` i HTTP 504 terminalni odgovori će sadržati vremenske oznake.
+
+- `started_at`, vreme početka obrade zadatka, Unix vremenska oznaka (sekunde, decimalni).
+- `finished_at`, vreme kada je zadatak proizveo rezultate, Unix vremenska oznaka (sekunde, decimalni). Ova oznaka se ne vraća dok je u obradi.
+- `elapsed`, vreme obrade zadatka, jedinica je sekunda (decimalni, sa 3 decimale). Ova oznaka se ne vraća dok je u obradi.
+
+## Objašnjenje naplate
+
+U asinkronom režimu, kreiranje zadatka i čitanje statusa "u obradi" se ne naplaćuju; **klijent se naplaćuje samo kada prvi put pročita uspešne rezultate** (u skladu sa postojećim ponašanjem i cenama sinhronog režima). Server će samostalno napredovati zadatak, ali neće naplatiti unapred samo zato što je pozadinski zadatak završen. Zadatak koji nije uspeo unutar 120 sekundi roka biće prekinut sa HTTP 504 i neće se naplatiti.
+
+## Obrada grešaka
+
+Kada pozivate ovaj interfejs, ako naiđete na grešku, biće vraćen odgovarajući kod greške i informacije. Na primer:
+
+- `400 invalid_request`: zahtev nedostaje parametar `task_id`.
+- `401 invalid_token`: neovlašćeno, autorizacioni token je nevažeći ili nedostaje.
+- `404 not_found`: `task_id` ne postoji ili ne pripada trenutnom nalogu.
+- `504 timeout`: zadatak je prekinut i nije proizveo rezultate; molimo prestanite sa upitima za taj `task_id`. Ova greška se neće naplatiti.
+
+### Primer greške u odgovoru
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "not_found",
+    "message": "zadatak nije pronađen"
+  }
+}
+```

@@ -1,63 +1,216 @@
 ---
-title: "WebExtrator tehtävän haku API"
-description: "WebExtrator Web Render & Extract 集成指南 - Ace Data Cloud"
+title: "WebExtrator tehtäväkysely API -integraatio-opas"
+description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/webextrator/tasks` （**ilmainen**）
+`POST https://api.acedata.cloud/webextrator/tasks`
 
-Hae historiallisia `render` / `extract` tehtäviä (säilytetään 7 päivää).
+WebExtrator tehtäväkysely API:tä käytetään historiallisten `render` / `extract` tehtävien tulosten kyselyyn. Yleisiä käyttötapoja:
 
-## Yksittäinen haku
+- Asynkronisten tehtävien valmistuttua **kysytään** täydellinen envelope (paitsi `callback_url` -työntö tai aktiivinen kysely).
+- **Tarkastetaan** mitä on itse lähettänyt - tehtävärekisteri tallentaa sekä alkuperäisen `request` että lopullisen `response`.
+- **Massapäivitys** - useiden rivien hakeminen kerralla `id` tai `trace_id` mukaan.
+
+Tehtävärekisteri säilytetään Redisissä **7 päivää**.
+
+Tehtäväkyselyrajapinta on **ilmainen** (ei lasketa Credits-käyttöön).
+
+## Todentaminen
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+Vain omat AceDataCloud-tilin tehtävät ovat saatavilla.
+
+## Pyyntöparametrit
+
+Pyyntöruumis on jaettu `action`-perusteisesti, yhteensä kahta toimintoa:
+
+### `action: "retrieve"` —— Yksittäinen kysely
+
+| Kenttä      | Tyyppi   | Pakollinen | Selitys                                                   |
+| ----------- | -------- | :--------: | -------------------------------------------------------- |
+| `action`    | const    |    ✅     | Kiinteä `"retrieve"`                                     |
+| `id`        | string   | valinnainen | Tehtävä ID (ilmenee jokaisen render/extract envelope `task_id` kentässä). |
+| `trace_id`  | string   | valinnainen | Kutsuketjun ID (envelopen `trace_id` kenttä).          |
+
+`id` ja `trace_id` annetaan valinnaisesti.
+
+### `action: "retrieve_batch"` —— Massakysely
+
+| Kenttä       | Tyyppi       | Pakollinen | Selitys                     |
+| ------------ | ------------ | :--------: | -------------------------- |
+| `action`     | const        |    ✅     | Kiinteä `"retrieve_batch"` |
+| `ids`        | string[]     | valinnainen | Tehtävä ID -lista.         |
+| `trace_ids`  | string[]     | valinnainen | Kutsuketjun ID -lista.     |
+| `offset`     | number       |   ❌      | Sivutus (oletus 0).        |
+| `limit`      | number       |   ❌      | Sivun koko, 1–100 (oletus 50). |
+
+`ids` ja `trace_ids` annetaan valinnaisesti.
+
+## Yksittäinen vastaus
 
 ```json
 {
-  "action": "retrieve",
-  "id": "550e8400-e29b-41d4-a716-446655440000"
+  "task": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+    "type": "extract",
+    "created_at": 1777717800.05,
+    "started_at": 1777717800.123,
+    "finished_at": 1777717802.535,
+    "elapsed": 2.412,
+    "request": {
+      "url": "https://en.wikipedia.org/wiki/Diffbot",
+      "expected_type": "article"
+    },
+    "response": {
+      "success": true,
+      "data": { /* Täydellinen extract envelope */ }
+    }
+  }
 }
 ```
 
-Tai `trace_id` avulla:
+Jos ei löydy, palauttaa `{ "task": null }` (HTTP 200, ei 404).
+
+`task`-objektin aikakenttien selitykset ovat seuraavat.
+
+- `created_at`, tehtävän luontiaika, Unix aikaleima (sekunnit, liukuluku).
+- `started_at`, tehtävän aloitusaika, Unix aikaleima (sekunnit, liukuluku). Jos tehtävä ei ole vielä alkanut, on `null`.
+- `finished_at`, tehtävän valmistumisaika, Unix aikaleima (sekunnit, liukuluku). Jos tehtävä ei ole valmis, on `null`.
+- `elapsed`, tehtävän suoritusaika, yksikkönä sekunnit (liukuluku, 3 desimaalia). Jos tehtävä ei ole valmis, on `null`.
+
+## Massavastaus
 
 ```json
 {
-  "action": "retrieve",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  "tasks": [
+    { /* Sama kuin yksittäinen .task rakenne */ },
+    { /* ... */ }
+  ],
+  "offset": 0,
+  "limit":  50
 }
 ```
 
-Palauttaa yksittäisen tehtäväobjektin (sisältäen kentät kuten `request` / `response` / `started_at` / `finished_at`).
+Ei-olemassa olevat ID:t eivät aiheuta virhettä, vaan puuttuvat vain `tasks`-listasta.
 
-## Ryhmähaku
+## Esimerkki
+
+### Kysely yksittäisestä task_id:stä
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  }'
+```
+
+### Kysely yksittäisestä trace_id:stä
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve",
+    "trace_id": "550e8400-e29b-41d4-a716-446655440001"
+  }'
+```
+
+### Massakysely
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/tasks \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "retrieve_batch",
+    "ids": [
+      "550e8400-e29b-41d4-a716-446655440000",
+      "550e8400-e29b-41d4-a716-446655440002"
+    ],
+    "limit": 50
+  }'
+```
+
+### Python (requests) —— Kysely kunnes valmis
+
+```python
+import os, time, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+BASE = "https://api.acedata.cloud"
+
+# 1) Lähetä asynkroninen extract
+queue = requests.post(
+    f"{BASE}/webextrator/extract",
+    headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+    json={"url": "https://example.com", "mode": "async"},
+).json()
+
+job_id = queue["jobId"]
+
+# 2) Käytä Tasks API:ta kyselyyn kunnes tehtävä on valmis
+while True:
+    r = requests.post(
+        f"{BASE}/webextrator/tasks",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"action": "retrieve", "id": job_id},
+    ).json()
+    task = r.get("task")
+    if task and task.get("finished_at"):
+        print("Kesto", task["elapsed"], "sekuntia")
+        print(task["response"]["data"]["title"])
+        break
+    time.sleep(2)
+```
+
+### Node.js (fetch) —— Vastaanota callback ja hae täydellinen envelope
+
+```js
+// Callback_url käsittelyfunktiossa:
+app.post('/hooks/webextrator', async (req, res) => {
+  res.status(200).end();              // Nopeasti ack
+
+  const taskId = req.body?.task_id;
+  if (!taskId) return;
+
+  const fetchRes = await fetch('https://api.acedata.cloud/webextrator/tasks', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.ACEDATA_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ action: 'retrieve', id: taskId }),
+  });
+  const { task } = await fetchRes.json();
+  console.log('Täydellinen envelope:', task.response.data);
+});
+```
+
+## Virhevastaukset
+
+| HTTP | `error.code`   | Merkitys                                      |
+| ---- | -------------- | --------------------------------------------- |
+| 400  | `bad_request`  | Tarkistus epäonnistui (puuttuu `action`, sekä `id` ja `trace_id` lähetetty samanaikaisesti jne.). |
+| 401  | `unauthorized` | Puuttuva tai virheellinen `Authorization: Bearer …`. |
 
 ```json
-{
-  "action": "retrieve_batch",
-  "ids": ["...", "..."],
-  "limit": 12,
-  "offset": 0
-}
+{ "error": { "code": "bad_request", "message": "..." } }
 ```
 
-Tai käytä `trace_ids` tai älä lähetä kumpaakaan, jolloin haetaan omien tehtävien historia sivutettuna.
-
-Palauttaa:
-
-```json
-{
-  "items": [ { /* task */ }, ... ],
-  "count": 2
-}
-```
-
-## Kenttien määrittely
-
-| Kenttä | Selitys |
-|--------|---------|
-| `id` / `task_id` | Tehtävän yksilöllinen ID |
-| `trace_id` | Kutsuketjun ID (yhdenmukainen PlatformGateway / CLS kanssa) |
-| `type` | `render` tai `extract` |
-| `request` | Alkuperäinen pyyntödata |
-| `response` | Renderöinti- / poimintatulokset (sama kuin sync response:n `data`) |
-| `started_at` / `finished_at` / `elapsed` | Aikaleimat ja kesto (sekunteina) |
-
-> Tämä rajapinta on ilmainen, eikä se vaikuta käyttömäärään.
+## Vinkit ja sudenkuopat
+- **Voit määrittää `trace_id`:n itse.** Alkuperäisessä renderointi/poiminta-pyynnössä lähetä
+  `?trace_id=…` (QueryString), ja synkronoi se oman liiketoiminta-ID:si (työnkulun suoritus-ID jne.) kanssa,
+  sen jälkeen voit etsiä tehtäviä liiketoiminta-ID:llä. Jos et lähetä, palvelin luo automaattisesti UUID:n.
+- **Säilytysaika 7 päivää.** Aikaisemmat tehtävät palauttavat `task: null` — jos tarvitset pitkäaikaista arkistointia, tallenna itse.
+- **Tehtävien haku on ilmainen.** Voit tarkistaa niin monta kertaa kuin haluat, alkuperäisen renderointi/poiminta-kutsun kustannukset on jo maksettu.
+- **Käytä ensisijaisesti asynkronista + palautetta, ei pollingia.** Jos liiketoiminta sallii, lähetä alkuperäisessä pyynnössä
+  `callback_url`, jotta alusta voi lähettää envelope sinulle, se on tehokkaampaa kuin kysyä joka 2 sekunti.

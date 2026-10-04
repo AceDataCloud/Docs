@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` 与 `upto` 计费方案"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 目前使用两类 scheme：`exact` 和 `upto`。它们解决的是不同计费问题。
+
+## `exact`
+
+`exact` 表示本次请求在进入目标 API 前就能确定价格。客户端签名的金额就是最终扣款金额。
+
+适合：
+
+- 固定价格的图片生成；
+- 固定价格的视频任务创建；
+- 固定价格的搜索或工具 API；
+- 订单支付。
+
+EVM `exact` 使用 USDC EIP-3009 `TransferWithAuthorization`：
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+Facilitator 在 `/verify` 阶段验证签名和金额，在 `/settle` 阶段把这笔授权提交到链上。
+
+## `upto`
+
+`upto` 表示客户端授权一个最大上限，Ace Data Cloud 在请求完成后按实际用量结算，实际扣款不能超过上限。
+
+适合：
+
+- 聊天补全：最终价格取决于 prompt tokens 和 completion tokens；
+- 流式响应：真实输出长度结束后才知道；
+- 未来的后置计量 API。
+
+`upto` 使用 Permit2 `PermitWitnessTransferFrom`。客户端签名的不是固定转账，而是一个带 witness 的上限授权：
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount` 是上限，不一定是最终扣款。Gateway 在 `/record` 阶段会把实际用量转换成 `amount` 传给 Facilitator。Facilitator 只允许结算 `amount &lt;= permitted.amount`。
+
+Base `upto` 的程序运行结果：
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+说明：
+
+- 402 中返回的授权上限是 `95215` atomic USDC，客户端按这个上限签名。
+- 模型实际响应后只结算 `3` atomic USDC，链上交易已在 BaseScan 可查。
+- 这个结果能说明 `upto` 的关键差异：签名金额是上限，链上 settlement 可以小于上限。
+- 如果实际用量超过上限，Facilitator 应拒绝 settlement，客户端需要重新按更高上限授权。
+
+`upto` 目前只在 Base 上提供。SKALE 只提供 `exact`，如果你需要后置计量，请使用 Base。
+
+## 为什么需要 Permit2 approve
+
+`upto` 最终由 x402 proxy 通过 Permit2 从付款钱包拉取 USDC。第一次使用前，付款钱包需要给 Permit2 一次 ERC-20 allowance。
+
+Python CLI：
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+程序方式：
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+授权完成后，每次请求仍然需要签一个新的 `upto` envelope，因为 nonce、deadline、witness 和金额上限都不同。
+
+## 零金额结算
+
+`upto` 支持实际金额为 0 的情况。例如目标 API 没有成功产生可计费用量，Gateway 可以传入 `amount = "0"`。Facilitator 会返回成功，但不会发链上交易。
+
+这可以避免“请求没有成功但仍然扣链上费用”的问题。
+
+## 选择建议
+
+| 场景 | 建议 |
+| --- | --- |
+| 固定价格 API | 使用 `exact`，逻辑简单。 |
+| 订单支付 | 使用 `exact`。 |
+| 聊天补全、按 token 计费 | 使用 Base `upto`。 |
+| 还没有做 Permit2 approve | 先用 `exact` 跑通，再切 `upto`。 |
+| 需要在 SKALE 上后置计量 | 暂不支持，SKALE 只提供 `exact`。 |
+
+如果你不确定该选哪个，先使用 SDK 默认行为；SDK 会选择服务器返回的匹配网络 payment requirement。
+
+## Base `upto` 检查清单
+
+接入或排查时，请确认以下参数来自同一次 402 响应，并在客户端签名时保持一致：
+
+| 参数 | 检查点 |
+| --- | --- |
+| `network` | 必须为 `eip155:8453`。 |
+| `scheme` | 必须为 `upto`。 |
+| `extra.chainId` | Base chain id 为 `8453`。 |
+| `asset` | 使用 402 响应中的 Base USDC 合约地址。 |
+| `extra.facilitatorAddress` | 必须参与 witness，并与 Facilitator `/supported` 一致。 |
+| Permit2 allowance | 付款钱包需要先对 Base USDC 授权 Permit2。 |
+
+常见错误及处理方式：
+
+| 错误 | 处理方式 |
+| --- | --- |
+| `invalid_upto_evm_payload_invalid_signature` | 检查 chain id、facilitator 地址、Permit2 domain、spender、签名账户和 witness 是否与 402 响应一致。 |
+| `PERMIT2_ALLOWANCE_REQUIRED` | 对目标链 USDC 执行 Permit2 approve 后重新发起请求。 |
+| `amount exceeds permitted amount` | 实际用量超过签名上限，需要重新按更高上限签名。 |

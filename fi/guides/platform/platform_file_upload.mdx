@@ -1,0 +1,132 @@
+---
+title: "Tiedoston lataaminen AceDataCloud-alustan CDN:ään"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Lataa paikallinen tiedosto AceDataCloud-alustan CDN:ään ja hanki julkisesti käytettävissä oleva URL-osoite (`https://cdn.acedata.cloud/xxxxxx.png` -tyyliin), johon voidaan heti viitata muiden liiketoimintarajapintojen (kuten Midjourney, Suno, Flux) parametreissa, kuten `image_url`, `reference_url`.
+
+Soveltuvat tilanteet:
+
+- Lataa pohjakuva CDN:ään ja hanki URL ennen Midjourney `/midjourney/imagine` -kutsua.
+- Tallenna edellisessä vaiheessa luotu video välimuistiin käytettäväksi seuraavan vaiheen syötteenä.
+- Isännöi käyttäjän lataamia materiaaleja tilapäisesti, jotta omaa S3-palvelua ei tarvitse rakentaa.
+
+> ℹ️ Tämä rajapinta kuuluu **AceDataCloud-alustan hallinta-APIin**, jonka yhtenäinen etuliite on `https://platform.acedata.cloud/api/v1/`.
+
+## Rajapinnan yleiskatsaus
+
+| Kohta            | Sisältö                                             |
+| ------------ | ---------------------------------------------- |
+| Menetelmä           | `POST`                                         |
+| URL          | `https://platform.acedata.cloud/api/v1/files/` |
+| Tunnistautuminen           | ✅ Edellyttää tilitunnusta                                       |
+| Content-Type | `multipart/form-data`（**ei JSON**）             |
+
+## Tunnistautumisohjeet (tilitunnuksen hankkiminen)
+
+Pyyntöotsake:
+
+```http
+Authorization: Bearer ${PLATFORM_TOKEN}
+```
+
+Hankintatapa: kirjaudu sisään [AceDataCloud-alustalle](https://platform.acedata.cloud) → [Account Token -hallintapaneeliin](https://platform.acedata.cloud/console/platform-tokens) → napsauta ”Luo”-painiketta. Katso lisätietoja kohdasta [AceDataCloud-alustan tilitunnusten hallinta](https://platform.acedata.cloud/documents/platform-token).
+
+## Pyyntörunko (multipart/form-data)
+
+| Kenttä     | Tyyppi   | Pakollinen  | Kuvaus                        |
+| ------ | ---- | --- | ------------------------- |
+| `file` | file | ✅   | Binääritiedostovirta. **Yhden tiedoston oletusraja on 100 Mt** |
+
+## Pyyntöesimerkit
+
+### cURL
+
+```shell
+curl -X POST 'https://platform.acedata.cloud/api/v1/files/' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}" \
+  -F 'file=@./photo.jpg'
+```
+
+### Python
+
+```python
+import os
+import requests
+
+PLATFORM_TOKEN = os.environ["PLATFORM_TOKEN"]
+
+with open("photo.jpg", "rb") as f:
+    resp = requests.post(
+        "https://platform.acedata.cloud/api/v1/files/",
+        headers={
+            "accept": "application/json",
+            "authorization": f"Bearer {PLATFORM_TOKEN}",
+        },
+        files={"file": ("photo.jpg", f, "image/jpeg")},
+        timeout=60,
+    )
+
+data = resp.json()
+print(f"✅ 上传成功：{data['file_url']}")
+# 直接用于其他业务接口：
+# requests.post("https://api.acedata.cloud/midjourney/imagine",
+#     json={"prompt": "...", "image_urls": [data["file_url"]]}, ...)
+```
+
+### Node.js
+
+```javascript
+const fs = require('fs')
+const FormData = require('form-data')
+
+const form = new FormData()
+form.append('file', fs.createReadStream('./photo.jpg'))
+
+const r = await fetch('https://platform.acedata.cloud/api/v1/files/', {
+  method: 'POST',
+  headers: {
+    authorization: `Bearer ${process.env.PLATFORM_TOKEN}`,
+    ...form.getHeaders(),
+  },
+  body: form,
+})
+const data = await r.json()
+console.log('CDN URL:', data.file_url)
+```
+
+## Vastausesimerkki (HTTP 200)
+
+```json
+{
+  "file_url": "https://cdn.acedata.cloud/qrd7gw.jpg"
+}
+```
+
+Käytä vain `file_url`-kenttää suoraan muissa liiketoimintarajapinnoissa — CDN-URL on tällä hetkellä julkisesti käytettävissä eikä vaadi tunnistautumista; älä pidä sitä pysyvän arkistoinnin lupauksena.
+
+## Vastauskenttien kuvaus
+
+| Kenttä         | Tyyppi     | Kuvaus         |
+| ---------- | ------ | ---------- |
+| `file_url` | string | CDN-käyttö-URL |
+
+## Virheenkäsittely
+
+| HTTP | Vastausesimerkki                                         | Merkitys                 |
+| ---- | -------------------------------------------- | ------------------ |
+| 400  | `{"error":"No file provided"}`               | `file`-kenttää ei liitetty tai kentän nimi on väärä |
+| 401  | DRF:n tunnistusvirhevastaus                                   | Tilitunnus puuttuu tai on virheellinen       |
+| 413  | `{"error":"File too large","max_bytes":...}` | Tiedosto ylittää 100 Mt:n oletusrajan    |
+
+## Käytännön vinkit
+
+- **Kuvan lataaminen pohjakuvaksi**: Midjourney `image_urls`, Flux `image_url` ja Veo `reference_url` hyväksyvät kaikki CDN-URL-osoitteita, **eivät** base64:ää. URL-osoitteen hankkiminen ensin tällä rajapinnalla on tavanomainen käytäntö.
+- **Älä lataa arkaluonteisia tietoja**: palautettu URL on julkisesti käytettävissä; säilytysaika määräytyy alustan kulloinkin voimassa olevan tallennuskäytännön mukaan, joten käytä omaa objektitallennustasi pitkäaikaiseen arkistointiin.
+- **Suurten erien lataaminen**: hallitse samanaikaisten latausten määrää ja aseta aikakatkaisu jokaiselle lataukselle; läpäisykyky riippuu tiedostokoosta ja verkkoympäristöstä.
+
+## Aiheeseen liittyvät rajapinnat
+
+- [AceDataCloud-alustan palveluluettelon hakeminen](https://platform.acedata.cloud/documents/platform-service-list) — etsi liiketoimintapalvelut, jotka hyväksyvät URL-syötteen
+- [AceDataCloud-alustan API-tunnistetietojen luominen](https://platform.acedata.cloud/documents/platform-credential-create) — lataamisen jälkeen seuraava vaihe on yleensä tunnistetietojen luominen liiketoimintarajapinnan kutsumista varten

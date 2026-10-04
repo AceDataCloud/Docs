@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` 및 `upto` 요금제"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402는 현재 두 가지 유형의 스킴: `exact`와 `upto`를 사용하고 있습니다. 이들은 서로 다른 요금 문제를 해결합니다.
+
+## `exact`
+
+`exact`는 이번 요청이 목표 API에 도달하기 전에 가격을 확정할 수 있음을 의미합니다. 클라이언트가 서명한 금액이 최종 차감 금액입니다.
+
+적합한 경우:
+
+- 고정 가격의 이미지 생성;
+- 고정 가격의 비디오 작업 생성;
+- 고정 가격의 검색 또는 도구 API;
+- 주문 결제.
+
+EVM `exact`는 USDC EIP-3009 `TransferWithAuthorization`을 사용합니다:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+Facilitator는 `/verify` 단계에서 서명과 금액을 검증하고, `/settle` 단계에서 이 승인을 체인에 제출합니다.
+
+## `upto`
+
+`upto`는 클라이언트가 최대 한도를 승인하는 것을 의미하며, Ace Data Cloud는 요청이 완료된 후 실제 사용량에 따라 정산하며, 실제 차감 금액은 한도를 초과할 수 없습니다.
+
+적합한 경우:
+
+- 채팅 완성: 최종 가격은 prompt tokens와 completion tokens에 따라 달라집니다;
+- 스트리밍 응답: 실제 출력 길이가 끝난 후에야 알 수 있습니다;
+- 미래의 후속 계량 API.
+
+`upto`는 Permit2 `PermitWitnessTransferFrom`을 사용합니다. 클라이언트가 서명하는 것은 고정 전송이 아니라 witness가 포함된 한도 승인입니다:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount`는 한도이며, 반드시 최종 차감 금액은 아닙니다. Gateway는 `/record` 단계에서 실제 사용량을 `amount`로 변환하여 Facilitator에 전달합니다. Facilitator는 `amount &lt;= permitted.amount`만 정산할 수 있습니다.
+
+Base `upto`의 프로그램 실행 결과:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+설명:
+
+- 402에서 반환된 승인 한도는 `95215` atomic USDC이며, 클라이언트는 이 한도로 서명합니다.
+- 모델이 실제로 응답한 후에는 `3` atomic USDC만 정산되며, 체인 상의 거래는 BaseScan에서 확인할 수 있습니다.
+- 이 결과는 `upto`의 주요 차이를 설명합니다: 서명 금액은 한도이며, 체인 상의 정산은 한도보다 작을 수 있습니다.
+- 실제 사용량이 한도를 초과하면, Facilitator는 정산을 거부해야 하며, 클라이언트는 더 높은 한도로 다시 승인해야 합니다.
+
+`upto`는 현재 Base에서만 제공됩니다. SKALE은 `exact`만 제공하며, 후속 계량이 필요하면 Base를 사용하십시오.
+
+## 왜 Permit2 승인이 필요한가
+
+`upto`는 최종적으로 x402 프록시를 통해 Permit2로부터 결제 지갑에서 USDC를 인출합니다. 처음 사용하기 전에 결제 지갑은 Permit2에 대해 한 번 ERC-20 허용을 부여해야 합니다.
+
+Python CLI:
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+프로그램 방식:
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+승인이 완료된 후에도 매 요청마다 새로운 `upto` envelope에 서명해야 합니다. nonce, deadline, witness 및 금액 한도가 모두 다르기 때문입니다.
+
+## 제로 금액 정산
+
+`upto`는 실제 금액이 0인 경우를 지원합니다. 예를 들어 목표 API가 성공적으로 청구 가능한 양을 생성하지 못한 경우, Gateway는 `amount = "0"`을 전달할 수 있습니다. Facilitator는 성공을 반환하지만 체인 상의 거래는 발생하지 않습니다.
+
+이것은 "요청이 성공하지 않았지만 여전히 체인 상의 비용이 차감되는" 문제를 피할 수 있습니다.
+
+## 선택 권장 사항
+
+| 상황                   | 권장 사항                       |
+| -------------------- | ------------------------ |
+| 고정 가격 API             | `exact` 사용, 논리가 간단합니다.         |
+| 주문 결제                 | `exact` 사용.              |
+| 채팅 완성, 토큰 기준 요금      | Base `upto` 사용.          |
+| 아직 Permit2 승인하지 않음 | 먼저 `exact`로 통과한 후 `upto`로 전환. |
+| SKALE에서 후속 계량 필요      | 현재 지원되지 않음, SKALE은 `exact`만 제공.  |
+
+어떤 것을 선택해야 할지 확실하지 않은 경우, SDK의 기본 동작을 사용하십시오; SDK는 서버가 반환한 일치하는 네트워크 결제 요구 사항을 선택합니다.
+
+## Base `upto` 체크리스트
+
+접속 또는 문제 해결 시, 다음 매개변수가 동일한 402 응답에서 온 것인지 확인하고 클라이언트 서명 시 일관성을 유지하십시오:
+
+| 매개변수                         | 체크 포인트                                          |
+| -------------------------- | -------------------------------------------- |
+| `network`                  | 반드시 `eip155:8453`이어야 합니다.                           |
+| `scheme`                   | 반드시 `upto`이어야 합니다.                                  |
+| `extra.chainId`            | Base 체인 ID는 `8453`입니다.                      |
+| `asset`                    | 402 응답에서의 Base USDC 계약 주소를 사용하십시오.                  |
+| `extra.facilitatorAddress` | 반드시 witness에 참여해야 하며, Facilitator `/supported`와 일치해야 합니다. |
+| Permit2 허용              | 결제 지갑은 먼저 Base USDC에 대해 Permit2를 승인해야 합니다.               |
+
+일반적인 오류 및 처리 방법:
+
+| 오류                                           | 처리 방법                                                                          |
+| -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `invalid_upto_evm_payload_invalid_signature` | 체인 ID, facilitator 주소, Permit2 도메인, spender, 서명 계정 및 witness가 402 응답과 일치하는지 확인하십시오. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | 목표 체인 USDC에 대해 Permit2 승인을 수행한 후 요청을 다시 시작하십시오.                                         |
+| `amount exceeds permitted amount`            | 실제 사용량이 서명 한도를 초과하므로, 더 높은 한도로 다시 서명해야 합니다.                                                       |

@@ -1,0 +1,206 @@
+---
+title: "X402 TypeScript SDK - Liittymisopas"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+TypeScript on yksi suositelluimmista tavoista liittää Ace Data Cloud X402. Virallinen SDK vastaa tavallisista API-kutsuista, tehtävien kyselystä, virheiden käsittelystä ja automaattisista uusintakokeista; `@acedatacloud/x402-client` vastaa `402 Payment Required` -tilanteissa `PAYMENT-SIGNATURE` -pyyntöpään allekirjoittamisesta.
+
+Lähdekoodi ja pakettiosoitteet:
+
+- SDK-repositorio: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- X402 Client -repositorio: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm SDK: [https://www.npmjs.com/package/@acedatacloud/sdk](https://www.npmjs.com/package/@acedatacloud/sdk)
+- npm X402 Client: [https://www.npmjs.com/package/@acedatacloud/x402-client](https://www.npmjs.com/package/@acedatacloud/x402-client)
+
+## Asenna riippuvuudet
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client
+```
+
+Jos käytät Basea tai SKALEa, tarvitset EVM-allekirjoituskyvyn:
+
+```bash
+npm install ethers
+```
+
+Jos käytät Solanaa, tarvitset Solana-lompakkosovittimen tai `@solana/web3.js`:
+
+```bash
+npm install @solana/web3.js
+```
+
+Puhtaan npm-projektin asennus ja tuontitarkistuksen tuloste:
+
+```text
+imports_ok true true true true true
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+```
+
+Tuloksen selitys:
+
+- `@acedatacloud/sdk` ja `@acedatacloud/x402-client` voidaan molemmat asentaa npm:stä ja tuoda Node.js:ään.
+- `ethers` on tarkoitettu EVM-tyyppisten tietojen allekirjoittamiseen, `@solana/web3.js` on tarkoitettu Solana-transaktioiden rakentamiseen.
+
+## Base tai SKALE Esimerkki
+
+Selaimessa voidaan käyttää suoraan `window.ethereum`. Node.js:ssä voidaan käyttää `ethers.Wallet` -pakettia EIP-1193-tyylisen tarjoajan ympärillä.
+
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`unsupported method: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+
+console.log(result.choices[0].message.content);
+```
+
+Tämän esimerkin ohjelman suoritus tulos:
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+Tuloksen selitys:
+
+- Ohjelma laukaisee ensin tunnistamattoman 402-virheen, sitten käsittelijä allekirjoittaa `PAYMENT-SIGNATURE`, ja lopuksi yritetään samaa pyyntöä uudelleen.
+- `content ADC_TS_SDK_X402_OK` on mallin todellinen palauttama kiinteä merkkijono, mikä osoittaa, että uudelleenyritys pääsi kohde-API:in.
+- `id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT` on tämän chat completion -vastauksen ID, jota voidaan käyttää vertailussa alustan käyttöhistorian kanssa.
+- Ketjussa tapahtuvan selvityksen tulokset löytyvät [E2E vahvistus ja vianetsintä](https://platform.acedata.cloud/documents/x402-e2e-troubleshooting).
+
+Vaihda `network` arvoksi `skale`, niin voit käyttää SKALEa. SKALEn etuna on alhaiset ketjukohtaiset transaktiokustannukset; Basen etuna on USDC:n likviditeetti ja lompakkotuki, joka on kehittyneempi, ja vain Base tarjoaa `upto` jälkikäteen mittauksen.
+
+Huomaa: SKALE tukee tällä hetkellä vain `exact`-mittausta. Jos `network: 'skale'` -asetuksessa lähetetään `preferScheme: 'upto'`, käsittelijä ei löydä `upto`-mittausta ja siirtyy hiljaa takaisin `exact`-mittaukseen, eikä virhettä ilmoiteta - chat completion -tyyppiset, token-pohjaiset mittauskohtaiset tilanteet laskutetaan näin ollen kiinteällä hinnalla, ei todellisen käytön mukaan. Jälkikäteen mittausta varten käytä Basea.
+
+## Selaimen lompakkosovelluksen esimerkki
+
+Kun käytät etupään sovelluksessa MetaMaskia, Coinbase Walletia tai WalletConnectia, voit yleensä siirtää EIP-1193 tarjoajan suoraan:
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: window.ethereum,
+    evmAddress: address
+  })
+});
+
+const image = await client.images.generate({
+  provider: 'nano-banana',
+  prompt: 'a yellow banana on a white background'
+});
+```
+
+Selaimen lompakkosovellus avaa allekirjoitusvahvistuksen. Käyttäjä ei allekirjoita mitä tahansa viestiä, vaan API:n palauttaman maksupyynnön: vastaanottosoitteen, USDC-sopimuksen, summan, voimassaolon ja nonce:n, jotka kaikki sisältyvät allekirjoitukseen.
+
+## Solana Esimerkki
+
+Solana käyttää SPL USDC `TransferChecked` -toimintoa. Siirrettävän lompakkosovittimen on oltava näkyvissä `publicKey` ja `signAndSendTransaction`.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'solana',
+    solanaWallet: phantomWallet
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+```
+
+Solana-reitti tukee tällä hetkellä vain `exact`-mittausta, ei `upto`-mittausta. Jos API palauttaa useita `accepts`-arvoja, käsittelijä valitsee sen, jossa `network = 'solana'`.
+
+Solana-reitti on vahvistettu maksullisessa uudelleenyrityksessä, joka voi palauttaa HTTP 200 ja `ADC_SOLANA_E2E_OK` samalla julkisella API:lla. Julkiset RPC-kyselyt voivat olla rajoitettuja, joten tässä artikkelissa ei mainita Solana tx hashia; jos tarvitset ketjukohtaista tiliä, käytä omaa Solana RPC:täsi tai konsolilokien vahvistusta.
+
+## Valitse `exact` tai `upto`
+
+Nykyinen TypeScript-käsittelijä valitsee palvelimen palauttamista ensimmäisestä verkon mukaisesta maksuvaatimuksesta. Ace Data Cloudin API asettaa yleensä saman verkon `exact`-vaatimuksen `upto`-vaatimuksen eteen, joten jos haluat selvästi käyttää jälkikäteen mittausta, sinun on lähetettävä `preferScheme: 'upto'`.
+
+Esimerkki:
+
+```ts
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address,
+    preferScheme: 'upto'
+  })
+});
+```
+
+Jos palvelin ei ole palauttanut kyseisen verkon `upto`-vaatimusta, käsittelijä siirtyy automaattisesti ensimmäiseen saatavilla olevaan vaatimukseen, joka on yleensä `exact`.
+
+`upto` vaatii kertaluonteisen valtuutuksen Permit2. `upto` on tällä hetkellä saatavilla vain Base-verkossa, joten sinun on vain valtuutettava Base USDC kerran:
+```bash
+npx tsx scripts/approve-permit2.ts --network base
+```
+
+Base `upto` on suorittanut julkisen API-todennuksen: HTTP 402 -> HTTP 200, jälkimmäinen settlement tx on `0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036`. Täydellinen tuloste löytyy laskutussuunnitelman kuvauksesta.
+
+## SDK teki mitä
+
+`@acedatacloud/sdk`:n transport suorittaa maksuhandlerin kerran, kun se vastaanottaa 402:
+
+```ts
+type PaymentHandler = (ctx: {
+  url: string;
+  method: string;
+  body?: unknown;
+  accepts: PaymentRequirement[];
+}) => Promise<{ headers: Record<string, string> }>;
+```
+
+`@acedatacloud/x402-client`:in palauttama handler:
+
+1. Valitsee kohdeverkon maksuvaatimuksen `ctx.accepts`:ista.
+2. Rakentaa EVM EIP-712 allekirjoituksen tai Solana siirtotapahtuman verkon mukaan.
+3. Sarjoittaa envelope Base64-muotoon.
+4. Palauttaa `{ headers: { 'PAYMENT-SIGNATURE': '<base64>' } }`.
+5. SDK yrittää automaattisesti alkuperäisellä pyynnön rungolla uudelleen.
+
+Tämä tarkoittaa, että liiketoimintakoodin tarvitsee vain kirjoittaa kuten tavallisessa SDK-kutsussa, eikä 402-uudelleenyritystä tarvitse käsitellä manuaalisesti.

@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` ja `upto` laskutussuunnitelmat"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 käyttää tällä hetkellä kahta tyyppiä scheme: `exact` ja `upto`. Ne ratkaisevat erilaisia laskutusongelmia.
+
+## `exact`
+
+`exact` tarkoittaa, että tämän pyynnön hinta voidaan määrittää ennen kuin se saapuu kohde-API:iin. Asiakkaan allekirjoittama summa on lopullinen veloitussumma.
+
+Sopii:
+
+- Kiinteähintaiset kuvageneroinnit;
+- Kiinteähintaiset videotehtävien luomiset;
+- Kiinteähintaiset hakemukset tai työkalut API;
+- Tilausten maksaminen.
+
+EVM `exact` käyttää USDC EIP-3009 `TransferWithAuthorization`:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+Facilitator vahvistaa allekirjoituksen ja summan `/verify` vaiheessa, ja `/settle` vaiheessa tämä valtuutus lähetetään ketjuun.
+
+## `upto`
+
+`upto` tarkoittaa, että asiakas valtuuttaa maksimi rajan, ja Ace Data Cloud laskuttaa todellisen käytön mukaan pyynnön valmistuttua, eikä todellinen veloitus voi ylittää rajaa.
+
+Sopii:
+
+- Keskustelun täydentäminen: Lopullinen hinta riippuu prompt-tokeneista ja completion-tokeneista;
+- Virtaava vastaus: Todellinen tuloksen pituus selviää vasta lopussa;
+- Tulevat jälkikäteen mitattavat API:t.
+
+`upto` käyttää Permit2 `PermitWitnessTransferFrom`. Asiakkaan allekirjoittama ei ole kiinteä siirto, vaan rajavaltaistus, jossa on todistaja:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount` on yläraja, ei välttämättä lopullinen veloitus. Gateway muuntaa todellisen käytön `amount`-arvoksi `/record` vaiheessa ja välittää sen Facilitatorille. Facilitator sallii vain laskutuksen, jossa `amount &lt;= permitted.amount`.
+
+Base `upto` ohjelman tulos:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+Selitys:
+
+- 402:sta palautettu valtuutusraja on `95215` atomic USDC, asiakas allekirjoittaa tämän rajan mukaan.
+- Mallin todellisen vastauksen jälkeen veloitetaan vain `3` atomic USDC, ketjun tapahtuma on nähtävissä BaseScanissa.
+- Tämä tulos osoittaa `upto`:n keskeisen eron: allekirjoitettu summa on yläraja, ketjun laskutus voi olla pienempi kuin yläraja.
+- Jos todellinen käyttö ylittää ylärajan, Facilitatorin tulisi hylätä laskutus, ja asiakkaan on valtuutettava korkeampi yläraja.
+
+`upto` on tällä hetkellä saatavilla vain Base:lla. SKALE tarjoaa vain `exact`, jos tarvitset jälkikäteen mittausta, käytä Basea.
+
+## Miksi tarvitaan Permit2 hyväksyntä
+
+`upto` lopulta x402 proxy:n kautta Permit2 vetää USDC maksulompakosta. Ensimmäistä kertaa käytettäessä maksulompakon on annettava Permit2:lle kerran ERC-20 lupa.
+
+Python CLI:
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+Ohjelmallinen tapa:
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+Valtuutuksen jälkeen jokaisessa pyynnössä on edelleen allekirjoitettava uusi `upto` envelope, koska nonce, deadline, todistaja ja yläraja ovat kaikki erilaisia.
+
+## Nollasumman laskutus
+
+`upto` tukee tilannetta, jossa todellinen summa on 0. Esimerkiksi jos kohde-API ei onnistunut tuottamaan laskutettavaa määrää, Gateway voi siirtää `amount = "0"`. Facilitator palauttaa onnistumisen, mutta ei tee ketjun tapahtumaa.
+
+Tämä voi estää ongelman "pyyntö ei onnistunut, mutta silti veloitetaan ketjussa".
+
+## Valintasuositukset
+
+| Tilanne                   | Suositus                       |
+| -------------------- | ------------------------ |
+| Kiinteähintainen API             | Käytä `exact`, logiikka on yksinkertainen.         |
+| Tilausten maksaminen                 | Käytä `exact`.              |
+| Keskustelun täydentäminen, token-pohjainen laskutus      | Käytä Base `upto`.          |
+| Ei ole vielä tehty Permit2 hyväksyntää | Käytä ensin `exact`, sitten vaihda `upto`:hon. |
+| Tarvitsetko jälkikäteen mittausta SKALE:lla      | Ei tueta, SKALE tarjoaa vain `exact`.  |
+
+Jos et ole varma, mitä valita, käytä ensin SDK:n oletuskäyttäytymistä; SDK valitsee palvelimen palauttaman vastaavan verkon maksutarpeen.
+
+## Base `upto` tarkistuslista
+
+Liittyessä tai vianetsinnässä varmista, että seuraavat parametrit ovat peräisin samasta 402 vastauksesta ja pidä ne yhtenäisinä asiakasallekirjoituksessa:
+
+| Parametri                         | Tarkistus                                          |
+| -------------------------- | -------------------------------------------- |
+| `network`                  | On oltava `eip155:8453`.                           |
+| `scheme`                   | On oltava `upto`.                                  |
+| `extra.chainId`            | Base ketjun id on `8453`.                      |
+| `asset`                    | Käytä 402 vastauksessa olevaa Base USDC -sopimusosoitetta.                  |
+| `extra.facilitatorAddress` | On oltava mukana todistuksessa ja vastattava Facilitatorin `/supported` osoitetta. |
+| Permit2 lupa          | Maksulompakon on ensin valtuutettava Base USDC Permit2:lle.               |
+
+Yleisimmät virheet ja käsittelytavat:
+
+| Virhe                                           | Käsittelytapa                                                                          |
+| -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `invalid_upto_evm_payload_invalid_signature` | Tarkista ketjun id, facilitator-osoite, Permit2-domain, spender, allekirjoittava tili ja todistaja, että ne vastaavat 402 vastausta. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | Suorita Permit2 hyväksyntä kohdeketjun USDC:lle ja yritä uudelleen.                                         |
+| `amount exceeds permitted amount`            | Todellinen käyttö ylittää allekirjoitetun ylärajan, on tarpeen allekirjoittaa uudelleen korkeammalla ylärajalla.                                                       |

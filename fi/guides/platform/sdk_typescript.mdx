@@ -1,0 +1,360 @@
+---
+title: "TypeScript SDK - Liittymisopas"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`@acedatacloud/sdk`](https://www.npmjs.com/package/@acedatacloud/sdk) on Ace Data Cloudin virallinen TypeScript / JavaScript SDK, joka kapseloi kaikki palvelut `api.acedata.cloud`-osoitteessa tyypitettyihin menetelmiin kuten `client.openai.chat.completions.create(...)`, `client.images.generate(...)`, `client.search.google(...)` jne., ja sisältää SSE-virran, uudelleenkäynnistysviiveen ja tyypitetyt poikkeukset.
+
+Sitä voidaan käyttää Node.js:ssä, Deno:ssa, Bun:ssa ja moderneissa selaimissa (bundlerin kanssa).
+
+Lähdekoodi ja paketti:
+
+- SDK-repositorio: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- npm SDK: [https://www.npmjs.com/package/@acedatacloud/sdk](https://www.npmjs.com/package/@acedatacloud/sdk)
+
+## Asennus
+
+```bash
+npm install @acedatacloud/sdk
+# tai pnpm add / yarn add / bun add
+```
+
+Jos tarvitset maksua X402-lohkossa (ilman API Token -polkua), asenna vielä yksi:
+
+```bash
+npm install @acedatacloud/x402-client ethers
+```
+
+Puhdas npm-projektin version tarkistus:
+
+```text
+$ npm ls @acedatacloud/sdk
+└── @acedatacloud/sdk@2026.504.2
+
+$ node -e "console.log(require('@acedatacloud/sdk').AceDataCloud?.name)"
+AceDataCloud
+```
+
+Tuloksen selitys:
+
+- Paketin versio on `2026.504.2` (CalVer, vuoden 2026 504. ISO-viikon 2. tarkistus).
+- `AceDataCloud` on pääluokka, jota käytetään asiakkaan rakentamiseen, ja se on saatavilla oletusvientiä kautta.
+
+## Valmistele API Token
+
+Viittaus [SDK Yleiskatsaus - Hae API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) saadaksesi tokenin, ja sitten `export` shellissä:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+Asiakkaan rakentamisessa, jos et anna `apiToken`, SDK lukee automaattisesti `ACEDATACLOUD_API_TOKEN` ympäristömuuttujan. Jos ympäristössäsi on jo `ACEDATACLOUD_API_KEY` (projektin varasto-ehdotus), voit antaa sen eksplisiittisesti: `new AceDataCloud({ apiToken: process.env.ACEDATACLOUD_API_KEY })`.
+
+## Esimerkki 1: chat.completions (ei-virtaava)
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [
+    { role: 'user', content: 'Reply with exactly: ADC_TS_SDK_OK' }
+  ],
+  max_tokens: 20,
+  temperature: 0
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('id', res.id);
+console.log('model', res.model);
+console.log('content', res.choices[0].message.content);
+console.log('usage', JSON.stringify(res.usage));
+```
+
+Ohjelman suoritus tulos:
+
+```text
+elapsed_ms 2543
+id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA
+model gpt-4o-mini
+content ADC_TS_SDK_OK
+usage {"prompt_tokens":16,"completion_tokens":6,"total_tokens":22}
+```
+
+Tuloksen selitys:
+
+- `id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA` on OpenAI-yhteensopiva vastaus ID, jonka voit löytää konsolin [käyttöhistoriasta](https://platform.acedata.cloud/console/usages).
+- `content ADC_TS_SDK_OK` on mallin todellinen palautettu kiinteä tunnus, joka todistaa, että vastausta ei ole muokattu SDK:lla.
+- Yksi chat completion kuluttaa noin 22 tokenia, laskettuna gpt-4o-mini yksikköhinnan mukaan.
+- SDK julistaa vastauksen `Record<string, unknown>`-tyyppiseksi, ja ajonaikaisesti se on JSON-objekti; `.id` / `.choices[0].message.content`-tyyppinen pistekäyttö toimii `.mjs`-, Node REPL- ja Bun-ympäristöissä; tiukassa TypeScript-projektissa saatat tarvita `(res as any).id` tai sulkea `noImplicitAny` tsconfigissa.
+
+## Esimerkki 2: chat.completions (SSE-virtaava)
+
+Kun `stream: true` on avattu, `create` palauttaa asynkronisen iteraattorin, jossa jokainen kehys on `ChatCompletionChunk`.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+let firstChunkMs: number | null = null;
+let chunks = 0;
+const collected: string[] = [];
+
+const stream = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [
+    { role: 'user', content: 'Count from 1 to 5, separated by single spaces, no extra text.' }
+  ],
+  max_tokens: 20,
+  stream: true
+});
+
+for await (const chunk of stream) {
+  if (firstChunkMs === null) firstChunkMs = Date.now() - t0;
+  chunks++;
+  const delta = chunk.choices[0]?.delta?.content;
+  if (delta) collected.push(delta);
+}
+
+console.log('total_elapsed_ms', Date.now() - t0);
+console.log('first_chunk_ms', firstChunkMs);
+console.log('chunks', chunks);
+console.log('collected', collected.join('').trim());
+```
+
+Ohjelman suoritus tulos:
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+Tuloksen selitys:
+
+- Ensimmäisen kehys viive 2481 ms on mallin ensimmäisen tokenin generointiaika; seuraavat 12 kehystä saapuvat kaikki 135 ms sisällä.
+- 13 kehystä yhdessä ovat `"1 2 3 4 5"`, jokainen token erikseen kehystetty + viimeinen kehys sisältää `finish_reason`.
+- Virtaava ei kuluta vähemmän tokenia kuin ei-virtaava, mutta ensimmäisen sanan viive on merkittävästi alhaisempi, mikä sopii reaaliaikaiseen käyttöliittymään.
+
+## Esimerkki 3: images.generate (NanoBanana)
+
+`client.images.generate({ provider: 'nano-banana', ... })` palauttaa suoraan synkronoidusti, **ei tarvitse antaa `wait`-parametria** — NanoBanana API on itsessään synkroninen.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const img = await client.images.generate({
+  provider: 'nano-banana',
+  prompt: 'A minimalist logo of a yellow banana on a white background, flat design'
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('task_id', img.task_id);
+console.log('trace_id', img.trace_id);
+console.log('image_url', img.data[0].image_url);
+```
+
+Ohjelman suoritus tulos:
+
+```text
+elapsed_ms 16634
+task_id 8e4b44a6-5ece-46a4-9013-9e0c8aca2217
+trace_id 9529e241-54fe-40da-98a2-871e14989fb5
+image_url https://platform.cdn.acedata.cloud/nanobanana/331be1d3-3330-4196-bd1c-aa75717c549c.png
+```
+
+Tuloksen selitys:
+
+- `image_url` on CDN:ssä oleva vakaa osoite, jota voidaan käyttää suoraan `<img src />` tai ladata.
+- 16.6 sekunnissa suurin osa ajasta on mallin päättelyssä, paikallisen SDK:n kustannukset ovat vähäiset.
+- `trace_id` on alustan myöntämä pyyntö ID, jos ongelmia ilmenee, liitä tämä ID asiakaspalvelulle nopeaa paikallistamista varten.
+- Asynkronisille palveluille (Midjourney, Sora, Veo jne.) tarvitaan TaskHandle-pollaus, katso tarkemmin [SDK Tehtäväpollaus ja virtaava vastaus](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+## Esimerkki 4: Tyypitetty virheiden käsittely
+
+SDK heittää virheet HTTP-tilan mukaan tarkkoina aliluokkina (`AuthenticationError` / `BadRequestError` / `RateLimitError` / `InternalServerError` / `APIConnectionError` jne.), joita voidaan käyttää `instanceof`-tarkistuksilla tarkkoihin haaroihin.
+```ts
+import { AceDataCloud, AuthenticationError } from '@acedatacloud/sdk';
+
+const bad = new AceDataCloud({ apiToken: 'definitely-not-a-real-token' });
+
+try {
+  await bad.openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'hi' }],
+    max_tokens: 5
+  });
+} catch (err: any) {
+  console.log('err_class', err.constructor.name);
+  console.log('status', err.statusCode);
+  console.log('code', err.code);
+  console.log('instanceof AuthenticationError =', err instanceof AuthenticationError);
+}
+```
+
+Ohjelman tulos:
+
+```text
+A. err_class AuthenticationError
+A. status 401
+A. code invalid_token
+A. instanceof AuthenticationError = true
+```
+
+Tuloksen selitys:
+
+- 401 karttuu automaattisesti `AuthenticationError`-virheeksi, liiketoimintakoodi voi käyttää `instanceof`-tarkistusta tarkkaan haaroittamiseen.
+- `code: invalid_token` tulee PlatformGateway:ltä, mikä helpottaa vertailua taustajärjestelmän lokien kanssa.
+- Samoin 429 → `RateLimitError`, 400 → `BadRequestError`, 5xx → `InternalServerError`.
+
+## Esimerkki 5: Monimallireititys
+
+Sama asiakas voi vaihtaa vapaasti useiden palveluiden välillä, kunhan mallin nimi on sama.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const MODELS = ['gpt-4o-mini', 'gemini-2.5-flash', 'deepseek-v3', 'grok-3-fast'];
+
+for (const model of MODELS) {
+  const t0 = Date.now();
+  try {
+    const r = await client.openai.chat.completions.create({
+      model,
+      messages: [{ role: 'user', content: 'Reply with exactly: ADC_OK' }],
+      max_tokens: 5
+    });
+    console.log(model.padEnd(28), `${Date.now() - t0}ms`, `content="${r.choices[0].message.content}"`);
+  } catch (err: any) {
+    console.log(model.padEnd(28), `${Date.now() - t0}ms`, 'ERR', err.statusCode, err.code);
+  }
+}
+```
+
+Ohjelman tulos:
+
+```text
+gpt-4o-mini                  2189ms   content="ADC_OK"
+gemini-2.5-flash             2569ms   content=""
+deepseek-v3                  2047ms   content="ADC_OK"
+grok-3-fast                  3598ms   content="ADC_OK"
+```
+
+Tuloksen selitys:
+
+- Yksi koodi, yksi token, kattaa OpenAI / Google / DeepSeek / xAI neljä eri mallipalvelua.
+- `gemini-2.5-flash` ei tällä kertaa palannut `ADC_OK`:ta, mikä johtuu mallin omasta tulostustyylistä - SDK ei ole hiljaa niellyt mitään, vaan välittää mallin alkuperäiset sanat liiketoiminnalle.
+- Hinta lasketaan kunkin todellisen token-hinnan mukaan, reitti kulkee vain kerran PlatformGatewayn kautta.
+
+## Esimerkki 6: Google-haku
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const r = await client.search.google({
+  query: 'Ace Data Cloud',
+  resource: 'web'
+});
+const items = (r as any).organic ?? [];
+console.log('elapsed_ms', Date.now() - t0);
+console.log('organic_count', items.length);
+items.slice(0, 2).forEach((it: any, i: number) => {
+  console.log(`#${i + 1}`, it.title, '->', it.link);
+});
+```
+
+Ohjelman tulos:
+
+```text
+elapsed_ms 2382
+organic_count 10
+#1 Ace Data Cloud -> https://platform.acedata.cloud/
+#2 Ace Data Cloud - GitHub -> https://github.com/acedatacloud
+```
+
+Tuloksen selitys:
+
+- Yhdellä pyynnöllä saadaan 10 orgaanista tulosta, kentän nimi on `organic` (ei `organic_results`).
+- Haku kulkee [Serp-palvelun](https://platform.acedata.cloud/services/serp) kautta, ja se veloitetaan per kerta.
+- Sama asiakasinstanssi voi sekä keskustella että etsiä, yksi token riittää.
+
+## Konfigurointivaihtoehdot
+
+```ts
+const client = new AceDataCloud({
+  // Pakollinen: eksplisiittinen token tai ympäristömuuttuja ACEDATACLOUD_API_TOKEN
+  apiToken: process.env.MY_TOKEN,
+
+  // Alustan API-juuriosoite, oletusarvo https://api.acedata.cloud
+  baseURL: 'https://api.acedata.cloud',
+
+  // Osa palveluista (kuten dashboard-metadata) kulkee alustan verkkotunnuksen kautta
+  platformBaseURL: 'https://platform.acedata.cloud',
+
+  // Yhden pyynnön aikakatkaisu, millisekunteina; oletusarvo 300_000 (5 minuuttia)
+  timeout: 300_000,
+
+  // Automaattisten uusintayritysten määrä, oletusarvo 2; uusintakriteerit: 408 / 409 / 429 / 5xx / verkkovirheet
+  maxRetries: 2,
+
+  // Mukautetut pyyntöotsikot
+  defaultHeaders: { 'x-app': 'my-service/1.0' }
+});
+```
+
+## Selaimen käyttö
+
+`@acedatacloud/sdk` on ESM + ISO (yhteensopiva) paketti, jota voidaan käyttää suoraan `import`-komennolla moderneissa selaimissa, joissa on bundler. Huomaa: **Älä kovakoodaa API-tokenia etupään koodiin**. Etupään suositus:
+
+1. Käytä [X402 `paymentHandler`](https://platform.acedata.cloud/documents/sdk-x402-payment) - käyttäjän lompakko maksaa USDC:ta per kerta, ei tarvita tokenia.
+2. Tai käytä SDK:ta omalla palvelinpuolellasi, selain vain kutsuu omaa taustajärjestelmääsi.
+
+## Edistynyt: Tehtävien kysely ja virtaava vastaus
+
+- Tehtävätyyppiset palvelut (Midjourney, Sora, Veo, Suno): käytä `TaskHandle`-kyselyä, yksikkö, aikakatkaisu ja uusintatiedot löytyvät [SDK-tehtävien kysely ja virtaava vastaus](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+- Virtaava keskustelu: tämän sivun esimerkki 2 on jo demonstroitu; virtaava audio / video tukee myös.
+
+## Edistynyt: X402 maksuhookit
+
+Jos et halua hakea API-tokenia ja haluat maksaa per kerta lohkoketjussa, voit käyttää `paymentHandler`:
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: (window as any).ethereum,  // EIP-1193 provider, tai viem walletClient
+    evmAddress: userAddress
+  })
+});
+```
+
+> `createX402PaymentHandler` TypeScript-puolella hyväksyy `{ network, evmProvider, evmAddress, preferScheme? }` (EVM-ketju) tai `{ network: 'solana', solanaWallet }` (Solana). Node-palvelinpuolella, jos `window.ethereum` ei ole saatavilla, käytä viemin `createWalletClient` (perustuu yksityiseen avaimen) paketoidaksesi EIP-1193-yhteensopivan providerin ja siirrä se sisään; tarkat menetelmät ja todelliset tulokset lohkoketjussa löytyvät [SDK + X402 maksuhookit](https://platform.acedata.cloud/documents/sdk-x402-payment).
+
+## Kuinka tarkistaa jäljellä oleva saldo
+
+Voit tarkistaa nykyisen tilisi jäljellä olevan saldon [Ace Data Cloud -hallintapaneelista - Sovellusluettelo](https://platform.acedata.cloud/console/applications).
+
+Voit tarkistaa kaikki käyttöhistorian ja veloitusyksityiskohdat [Ace Data Cloud -hallintapaneelista - Käyttöhistoria](https://platform.acedata.cloud/console/usages).
+
+## Lisätietoja
+
+- 📦 [`@acedatacloud/sdk` npm:ssä](https://www.npmjs.com/package/@acedatacloud/sdk)
+- 🗂 [SDK-lähdekoodi](https://github.com/AceDataCloud/SDK/tree/main/typescript)
+- 🐍 [Python SDK -integraatio-opas](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Go SDK -integraatio-opas](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 maksuhookit](https://platform.acedata.cloud/documents/sdk-x402-payment)

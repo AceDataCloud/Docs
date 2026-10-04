@@ -1,0 +1,215 @@
+---
+title: "X402 Facilitator Integration"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Facilitator ist die serverseitige Abrechnungs-Komponente im X402-Link. Der Client ist für die Signatur verantwortlich, Gateway oder dein Server sind für den Aufruf von Facilitator's `/verify` und `/settle` zuständig.
+
+Die Produktionsadresse des Facilitators von Ace Data Cloud lautet:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+Quellcode-Repository: [https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 Wire Vereinbarung
+
+Der X402-Link von Ace Data Cloud verwendet vollständig die offizielle x402 v2 und akzeptiert keine v1 `X-Payment`-Anforderungsheader mehr. Bei der Integration sind drei Punkte zu beachten:
+
+- Der Anforderungsheader ist `PAYMENT-SIGNATURE`, der Wert ist ein base64-kodiertes JSON-Envelope.
+- Die oberste Ebene des Envelopes muss `x402Version: 2` sein und das `accepted`-Objekt muss das gewählte `scheme` und `network` deklarieren.
+- `network` verwendet die CAIP-2 Kennung (z. B. `eip155:8453`), Abkürzungen wie `base` sind nicht zulässig.
+
+Envelope-Struktur:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+Die 402-Antwort enthält neben dem JSON-Body auch einen `PAYMENT-REQUIRED`-Anforderungsheader, dessen Wert die base64-kodierte Herausforderung ist, um dem Client das Lesen der Zahlungsanforderung zu erleichtern, ohne den Body zu analysieren.
+
+## Kernschnittstellen
+
+### `GET /supported`
+
+Unterstützte Netzwerke und Schemes anzeigen:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Beispielantwort:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": ["3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"]
+  }
+}
+```
+
+Ergebnisbeschreibung:
+
+- `network` verwendet die CAIP-2 Kennung, nicht Abkürzungen wie `base`, `skale`.
+- `/supported` zeigt an, dass der Facilitator über die entsprechenden Validierungs- und Abrechnungsfähigkeiten verfügt.
+- Base, SKALE und Solana unterstützen `exact`; `upto` wird derzeit nur auf Base angeboten.
+- `signers` sind die Adressen, die der Facilitator zur Einreichung von Abrechnungstransaktionen verwendet.
+- Ob eine bestimmte API diese Optionen zulässt, hängt weiterhin von den `accepts` der API 402 ab.
+
+### `POST /verify`
+
+Überprüfen, ob die vom Client übermittelte `PAYMENT-SIGNATURE` eine bestimmte Zahlungsanforderung erfüllt.
+
+Anforderungstext:
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+Das `paymentRequirements`-Feld von v2 umfasst `scheme`, `network`, `asset`, `amount`, `payTo`, `maxTimeoutSeconds` und `extra`, wobei das Betragsfeld `amount` ist. Die API 402-Antwort enthält zusätzlich `maxAmountRequired` in `accepts[]`, damit der Client das Limit ablesen kann, es gehört jedoch nicht zu den Feldern des Facilitator-Anforderungstextes.
+
+Erfolgreiche Antwort:
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+Die `PAYMENT-RESPONSE`-Antwort für die Zahlung einer Produktionsbestellung enthält nach der Dekodierung das Abrechnungsergebnis. Das Ergebnis der Programmausführung für die Zahlung einer Base-Bestellung:
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Ergebnisbeschreibung:
+
+- `success=True` zeigt an, dass die Abrechnung des Facilitators erfolgreich war.
+- `transaction` ist der Hash der On-Chain-Transaktion, die `pay_id` der Bestellung wird ebenfalls in denselben Wert geschrieben.
+- Im Explorer kann die Überweisung von `1200000` atomic USDC auf Base USDC eingesehen werden.
+- `errorReason=None` zeigt an, dass bei dieser Abrechnung kein geschäftlicher Fehler zurückgegeben wurde.
+
+Eine fehlgeschlagene Validierung gibt normalerweise auch HTTP 200 zurück, aber `isValid` ist `false`. Die Geschäftseite sollte `invalidReason` lesen und nicht nur den HTTP-Statuscode betrachten.
+
+### `POST /settle`
+
+Die bereits validierte Genehmigung auf der Blockchain abrechnen.
+
+Der Anforderungstext ist im Wesentlichen identisch mit dem von `/verify`. Der Unterschied bei `upto` ist: Der `paymentRequirements.amount` wird beim Abrechnen auf den tatsächlichen Abrechnungsbetrag geändert; das Signaturlimit wird vom Facilitator in der Verifizierungsphase aufgezeichnet, und beim Abrechnen wird überprüft, dass der tatsächliche Betrag dieses Limit nicht überschreitet.
+
+Erfolgreiche Antwort:
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+Wenn der tatsächliche Betrag für `upto` 0 beträgt, kann `transaction` eine leere Zeichenfolge sein, was bedeutet, dass keine On-Chain-Transaktion erforderlich ist.
+
+## Wie Ace Data Cloud Gateway den Facilitator verwendet
+
+Der Link des Ace Data Cloud API Gateways ist wie folgt:
+
+1. Der Client fordert zum ersten Mal die API an, ohne `Authorization` und `PAYMENT-SIGNATURE`.
+2. Gateway berechnet den geschätzten Preis der Anfrage und gibt 402 und `accepts` zurück.
+3. Der Client signiert und versucht es erneut mit `PAYMENT-SIGNATURE`.
+4. Gateway dekodiert `PAYMENT-SIGNATURE` und wählt die passende Zahlungsanforderung aus.
+5. Gateway ruft Facilitator `/verify` auf.
+6. Nach erfolgreichem `/verify` lässt Gateway die Anfrage an die Ziel-API weiter.
+7. Nach der Rückgabe der Ziel-API ruft Gateway in der Phase `/record` Facilitator `/settle` auf.
+8. Gateway schreibt den On-Chain-Transaktionshash in die verwendete Aufzeichnungsmetadaten.
+`exact` in Schritt 7 den Betrag der Signatur abrechnen; `upto` in Schritt 7 den `amount` basierend auf dem tatsächlichen Verbrauch schreiben und dann den tatsächlichen Betrag abrechnen.
+
+## Eigene API-Anbindung
+
+Wenn du deine eigene API X402-fähig machen möchtest, kannst du diese Struktur umsetzen:
+
+1. Bereite für jede kostenpflichtige Schnittstelle `paymentRequirements` vor, die Netzwerk, Betrag, Empfangsadresse, Vermögensadresse und Signatur-Domain enthält.
+2. Wenn die Anfrage kein `PAYMENT-SIGNATURE` hat, gib HTTP 402 und `accepts` zurück.
+3. Wenn die Anfrage ein `PAYMENT-SIGNATURE` hat, dekodiere es in Base64, um `paymentPayload` zu erhalten.
+4. Rufe den Facilitator `/verify` auf.
+5. Führe die Geschäftslogik nach erfolgreicher Validierung aus.
+6. Rufe nach erfolgreichem Geschäft den Facilitator `/settle` auf.
+7. Speichere `payer`, `transaction`, `amount`, `network` zur Abrechnung.
+
+Der Server muss seine eigenen generierten `paymentRequirements` für `/verify` und `/settle` verwenden und sollte den vom Client zurückgegebenen Betrag, die Empfangsadresse oder die Vermögensadresse nicht vertrauen.
+
+## Replay-Schutz
+
+Der Facilitator wird nonce aufzeichnen. Genehmigungen mit demselben nonce können nicht wiederholt validiert und abgerechnet werden.
+
+Das bedeutet:
+
+- Der Client sollte bei jeder Anfrage ein neues Envelope signieren;
+- Wenn `/settle` eine Transaktion eingereicht hat, aber vorübergehend nicht bestätigt ist, kann `/settle` mit demselben nonce erneut versucht werden, um eine idempotente Abrechnung durchzuführen;
+- Verwende dasselbe `PAYMENT-SIGNATURE` nicht im Cache für mehrere API-Aufrufe.
+
+## Häufige Fehler
+
+| Fehler                                           | Häufige Ursachen                                                       |
+| -------------------------------------------- | -------------------------------------------------------------- |
+| `Authorization nonce already processed`      | Das gleiche `PAYMENT-SIGNATURE` wurde wiederverwendet.                     |
+| `Authorization destination mismatch`         | `to` in der Client-Signatur stimmt nicht mit `payTo` der Zahlungsanforderung überein. |
+| `invalid_upto_evm_payload_invalid_signature` | `upto` typed data's chainId, facilitator, Permit2 domain oder Signaturadresse stimmen nicht überein. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | Die Brieftasche hat noch nicht genügend USDC für Permit2 genehmigt.          |
+| `Payer has insufficient USDC balance`        | Der USDC-Betrag der Zahlung Brieftasche ist unzureichend.                     |
+| `Solana signer private key not configured`   | Der Facilitator muss als Gebührenschuldner signieren, aber der Server hat keine Solana-Signer-Konfiguration. |

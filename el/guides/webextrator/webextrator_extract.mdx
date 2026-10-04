@@ -1,67 +1,395 @@
 ---
-title: "Οδηγός Ενσωμάτωσης API Έξυπνης Εξαγωγής WebExtrator"
-description: "WebExtrator Web Render & Extract 集成指南 - Ace Data Cloud"
+title: "WebExtrator 智智能抽取 API 集成指南"
+description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
 `POST https://api.acedata.cloud/webextrator/extract`
 
-Εξαγωγή περιεχομένου βασισμένη στο `/webextrator/render`. Εκτός από όλες τις παραμέτρους του render endpoint, υποστηρίζονται επιπλέον:
+WebExtrator 智能抽取 API μετατρέπει ένα URL σε **τυποποιημένα δομημένα αποτελέσματα** — άρθρα, προϊόντα, συνταγές, βίντεο, συζητήσεις, προσλήψεις κ.λπ., συνοδευόμενα από καθαρό Markdown και απλό κείμενο. Όταν θέλετε "καθαρά δομημένα δεδομένα" αντί για αρχικό HTML, αυτό είναι το API που πρέπει να χρησιμοποιήσετε.
 
-| Πεδίο | Τύπος | Υποχρεωτικό | Προεπιλογή | Περιγραφή |
-|-------|-------|:-----------:|------------|----------|
-| `expected_type` | string | ❌ | `markdown` | Αναμενόμενο αποτέλεσμα εξαγωγής: `markdown` / `article` / `text` / `links` / `structured` |
-| `enable_llm` | boolean | ❌ | false | Ενεργοποίηση επεξεργασίας LLM (κατάλληλο για `article` / `structured`) |
-| `instruction` | string | ❌ | - | Οδηγία εξαγωγής LLM, π.χ. «εξαγωγή τίτλου προϊόντος, τιμής, προδιαγραφών» |
+Η υποδομή είναι μια τριών επιπέδων γραμμή παραγωγής:
 
-## Συγχρονική Απόκριση
+1. **schema.org JSON-LD μεταφραστής** — καθοριστικός, μηδενικό κόστος LLM. Καλύπτει Wikipedia / BestBuy / AllRecipes / YouTube / τις περισσότερες ειδήσεις / τις περισσότερες σελίδες προϊόντων.
+2. **τυποποιημένη LLM εξαγωγή** — ενεργοποιείται μόνο όταν δεν υπάρχει schema.org. Επιλέξτε Schema ανά τύπο σελίδας, αυστηρός έλεγχος Zod.
+3. **Readability + Markdown υποστήριξη** — εκτελείται πάντα, συμπληρώνοντας τα κορυφαία πεδία που δεν έχουν συμπληρωθεί από τα δύο προηγούμενα επίπεδα.
+
+Επαναλαμβανόμενα αιτήματα URL θα πιαστούν από την cache αποτελεσμάτων Redis, &lt;1 ms επιστροφή.
+
+## Διαδικασία αίτησης
+
+Για να χρησιμοποιήσετε τη σελίδα υπηρεσιών WebExtrator, πρώτα πηγαίνετε στο [Ace Data Cloud κονσόλα](https://platform.acedata.cloud/console/applications) για να αποκτήσετε το API Token σας, κρατήστε το για μελλοντική χρήση.
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Εάν δεν έχετε συνδεθεί ή εγγραφεί, θα μεταφερθείτε αυτόματα στη σελίδα σύνδεσης που σας προσκαλεί να εγγραφείτε και να συνδεθείτε, και μετά θα επιστρέψετε αυτόματα στη τρέχουσα σελίδα.
+
+**Ένα API Token αρκεί για να καλέσετε όλες τις υπηρεσίες της πλατφόρμας, δεν χρειάζεται να κάνετε ξεχωριστές αιτήσεις για κάθε υπηρεσία.** Η πρώτη αίτηση θα σας δώσει δωρεάν πιστώσεις, μπορείτε να το δοκιμάσετε δωρεάν; όταν οι πιστώσεις είναι ανεπαρκείς, μπορείτε να ανανεώσετε το γενικό υπόλοιπο στην [κονσόλα](https://platform.acedata.cloud/console/coin).
+
+> 📘 Πλήρης τεκμηρίωση: [WebExtrator σελίδα υπηρεσιών →](https://platform.acedata.cloud/service/webextrator)
+
+## Αυθεντικοποίηση
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+## Παράμετροι αιτήματος
+
+Η εξαγωγή δέχεται **όλες** τις παραμέτρους [Render API](/el/guides/webextrator/webextrator_render) (`url`, `user_agent`, `timeout`, `wait_until`, `delay`, `wait_for_selector`, `block_resources`, `headers`, `cookies`, `callback_url`, `bypass_cache`, `cache_ttl_seconds`, `async`), συν δύο ειδικά πεδία για την εξαγωγή:
+
+| Πεδίο            | Τύπος    | Υποχρεωτικό | Προεπιλογή | Περιγραφή                                                                                      |
+| --------------- | ------- | :-: | ------- | --------------------------------------------------------------------------------------- |
+| `expected_type` | enum    |  ❌  | Αυτόματη εκτίμηση    | Υπόδειξη τύπου σελίδας: `product` / `article` / `general`. Παράκαμψη URL / κειμένου, απευθείας στο αντίστοιχο κλάδο.                        |
+| `enable_llm`    | boolean |  ❌  | `false` | Επιτρέπει την κλήση LLM εξαγωγής όταν δεν υπάρχει schema.org. Σε σελίδες χωρίς JSON-LD όπως Amazon / HN / Greenhouse, πρέπει να ενεργοποιηθεί για να ληφθούν τυποποιημένα αποτελέσματα. |
+
+> Όταν η σελίδα έχει schema.org JSON-LD, το `enable_llm` είναι ανενεργό — ο καθοριστικός μεταφραστής επιστρέφει άμεσα αποτελέσματα, δεν θα σπαταλήσετε ποτέ κλήσεις LLM. Εσείς **κερδίζετε** τυποποιημένα αποτελέσματα.
+
+## Συγχρονισμένη απόκριση
+
+```json
+{
+  "success": true,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+  "started_at": 1777717800.123,
+  "finished_at": 1777717802.535,
+  "elapsed": 2.412,
+  "data": {
+    "kind": "extract",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "finalUrl": "https://en.wikipedia.org/wiki/Diffbot",
+    "contentType": "article",
+    "title": "Diffbot",
+    "description": "Αμερικανική εταιρεία μηχανικής μάθησης και διαχείρισης γνώσης",
+    "byline": "Συνεργάτες στα έργα Wikimedia",
+    "language": "en",
+    "siteName": "Wikipedia",
+    "publishedAt": "2007-08-08T05:47:27Z",
+    "images": ["https://en.wikipedia.org/static/images/icons/enwiki-25.svg"],
+    "links": ["https://en.wikipedia.org/wiki/Machine_learning"],
+    "markdown": "# Diffbot\n\nDiffbot είναι ένας προγραμματιστής αλγορίθμων μηχανικής μάθησης ...",
+    "text": "Diffbot είναι ένας προγραμματιστής αλγορίθμων μηχανικής μάθησης ...",
+    "structured": {
+      "schemaOrg": { "primary": { /* Τυποποιημένη οντότητα */ }, "breadcrumbs": [], "all": [] },
+      "openGraph": { "title": "...", "description": "...", "image": "...", "type": "..." },
+      "jsonLd": [ /* Αρχικό JSON-LD */ ]
+    },
+    "rawSignals": {
+      "hasJsonLd": true,
+      "title": "Diffbot - Wikipedia",
+      "metaDescription": null,
+      "pageStatus": 200,
+      "textLength": 11473
+    },
+    "elapsedMs": 2412
+  }
+}
+```
+
+### Κορυφαία πεδία
+
+| Πεδίο            | Τύπος       | Περιγραφή                                                                                   |
+| --------------- | -------- | ------------------------------------------------------------------------------------ |
+| `kind`          | string   | Σταθερό `"extract"`.                                                                      |
+| `url`           | string   | Το URL που υποβάλατε.                                                                            |
+| `finalUrl`      | string   | Το τελικό URL μετά από ανακατεύθυνση.                                                                         |
+| `contentType`   | enum     | `product` / `article` / `general`, καθορίζεται από `expected_type` → schema.org primary → ευρετική  κατά σειρά. |
+| `title`         | string   | Readability `<title>` ή το `document.title` μετά την απόδοση.                                        |
+| `description`   | string?  | Προτεραιότητα: `<meta name="description" />` → `og:description` → schema.org / LLM εξαγωγή → αποκοπή πρώτης παραγράφου κειμένου.   |
+| `byline`        | string?  | Συγγραφέας / κανάλι / εταιρεία. Προέλευση `<meta name="author" />` → schema.org / LLM.                           |
+| `language`      | string?  | `<html lang>`.                                                                       |
+| `siteName`      | string?  | `og:site_name`.                                                                      |
+| `publishedAt`   | string?  | ISO 8601. Προτεραιότητα: `article:published_time` → `<time datetime>` → schema.org / LLM.        |
+| `images`        | string[] | Μέχρι 50 `<img src />`, έχει αναλυθεί σε απόλυτα URL, χωρίς επαναλήψεις, απορρίπτοντας `data:` URI.                                    |
+| `links`         | string[] | Μέχρι 100 εξωτερικοί σύνδεσμοι, έχουν φιλτραριστεί τμήματα / `javascript:` / `mailto:` / `tel:`.                               |
+| `markdown`      | string   | Markdown που έχει μετατραπεί από Turndown.                                                               |
+| `text`          | string   | `textContent` που έχει εξαγάγει η Mozilla Readability.                                               |
+| `structured`    | object   | Πλήρη δομημένα αποτελέσματα, δείτε παρακάτω.                                                                          |
+| `rawSignals`    | object   | Διαγνωστικές πληροφορίες για debugging.                                                                            |
+| `cached`        | boolean? | Είναι `true` όταν έχει χτυπηθεί η cache.                                                                       |
+| `cacheStoredAt` | number?  | Χρονική σφραγίδα Unix σε χιλιοστά του δευτερολέπτου κατά την πρώτη εγγραφή του στοιχείου cache.                                                                |
+
+### Υποπεδία `data.structured`
+| 子字段         | 何时出现               | 说明                                                                   |
+| ----------- | ------------------ | -------------------------------------------------------------------- |
+| `schemaOrg` | 始终                 | `{ primary, breadcrumbs, all }`。`primary` είναι ο τύπος οντότητας με την υψηλότερη προτεραιότητα; αν δεν βρεθεί, είναι `null`. |
+| `openGraph` | 始终                 | `{ title, description, image, type }`，προέρχεται από `<meta property="og:*" />`。   |
+| `jsonLd`    | 始终                 | Όλα τα πρωτότυπα JSON arrays από `<script type="application/ld+json">` 块.               |
+| `llm`       | LLM 跑了且成功时         | `{ kind, data, model, promptCharCount }`，τύποι που έχουν ελεγχθεί από το Zod.              |
+| `llmError`  | LLM 跑了但失败时         | `{ kind, error, model }`，η αίτηση δεν θα αποτύχει, τα ημιτελή αποτελέσματα θα επιστραφούν.                         |
+| `amazon`    | URL 是 `amazon.*` 时 | Παλιές ειδικές εξαγωγές από το amazon (θα καταργηθούν σταδιακά).                                            |
+
+## schema.org 映射器覆盖范围
+
+按优先级排序（命中即作为 `structured.schemaOrg.primary`）：
+
+| schema.org 类型                                                                                              | 映射 kind      | 输出字段                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Product`                                                                                                  | product      | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]`                                 |
+| `Recipe`                                                                                                   | recipe       | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
+| `VideoObject`                                                                                              | video        | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount`                                                                                 |
+| `JobPosting`                                                                                               | job          | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType`                                                                              |
+| `Event`（含 `*Event`）                                                                                        | event        | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}`                                                                                  |
+| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | article      | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]`                                                                                 |
+| `FAQPage`                                                                                                  | faq          | `questions[{question, answer}]`                                                                                                                                                          |
+| `BreadcrumbList`                                                                                           | （挂在 sibling） | 始终输出到 `structured.schemaOrg.breadcrumbs[]`，不会作为 primary。                                                                                                                                 |
+
+映射器处理：
+
+- `@graph` 容器（递归展开）；
+- `@type` 数组（如 `["Recipe", "NewsArticle"]` —— 两个都识别，按优先级取胜）；
+- `http://schema.org/` 前缀变体；
+- 嵌套 `Offer` 与 `AggregateOffer`（后者读 `lowPrice`）；
+- 相对图像 URL（按 `finalUrl` 解析为绝对）。
+
+## LLM 类型化 Schema
+
+当 `enable_llm: true` **且** schema.org 没有 primary 时，抽取器按 URL 启发式
+（或 `expected_type` 提示）选下面之一的 Zod Schema 校验模型输出：
+
+| Kind         | URL 启发式                                                                            | 必填字段       | 可选字段                                                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `article`    | 文本 ≥400 字且其它未命中                                                                    | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]`                                                                                          |
+| `product`    | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*`                | `name`     | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]`                                                      |
+| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs`                                    | `title`    | `author, postedAt, points, commentCount, body, url`                                                                                                                          |
+| `recipe`     | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes` | `name`     | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]`                                              |
+| `video`      | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video`               | `name`     | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript`                                                                                 |
+| `job`        | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr`          | `title`    | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
+
+LLM 成功时还会向顶层字段做"last-resort"回填：
+
+- `article` → `description` / `byline` / `publishedAt` / `language`
+- `product` → `description`
+- `discussion` → `description`（= body 前 280 字）/ `byline`（= author）/ `publishedAt`（= postedAt）
+- `recipe` → `description` / `byline`（= author）
+- `video` → `description` / `byline`（= channel）/ `publishedAt`（= uploadDate）
+- `job` → `description` / `byline`（= company）/ `publishedAt`（= datePosted）
+
+回填只在确定性数据源**没填**对应字段时触发 —— LLM 始终是最后一道兜底。
+
+## 缓存
+
+相同请求会被哈希到同一个 Redis Key：
+`webextrator:cache:extract:<sha256(canonical-json)>`。缓存 Key **忽略** `async`、
+`bypass_cache`、`cache_ttl_seconds`（这是操作开关，不影响响应）。`cookies` /
+`headers` **会**分桶缓存。
+
+| 字段                     | 效果                         |
+| ---------------------- | -------------------------- |
+| `bypass_cache: true`   | 跳过读取；本次结果仍会写回缓存，下次相同请求能命中。 |
+| `cache_ttl_seconds: 0` | 本次响应**不缓存**。               |
+| `cache_ttl_seconds: N` | 自定义本条目的 TTL（默认 3600 秒）。    |
+
+命中缓存的响应会带上 `data.cached: true` 与 `data.cacheStoredAt: <unix-ms>`。
+
+## 异步模式与回调
+
+设置 `async: true` 进入异步模式（提供 `callback_url` 也会自动进入）。平台立即返回（HTTP 200）：
 
 ```json
 {
   "success": true,
   "task_id": "550e8400-...",
-  "trace_id": "550e8400-...",
-  "started_at": "2026-05-02T10:30:00.123Z",
-  "finished_at": "2026-05-02T10:30:08.789Z",
-  "elapsed": 8.666,
-  "data": {
-    "kind": "extract",
-    "expected_type": "article",
-    "url": "https://example.com/post/1",
-    "title": "Παράδειγμα Άρθρου",
-    "author": "Ζανγκ Σαν",
-    "published_at": "2026-05-01",
-    "content": "# Παράδειγμα Άρθρου\n\nΚείμενο ...",
-    "summary": "Αυτό το άρθρο παρουσιάζει ..."
-  }
+  "trace_id": "6ba7b810-...",
+  "started_at": 1777717800.123
 }
 ```
 
-Η ασύγχρονη λειτουργία, οι κωδικοί σφαλμάτων και οι κανόνες χρέωσης είναι απολύτως ίδιοι με το `/webextrator/render`.
+任务完成时把完整 envelope `POST` 到你的 `callback_url`（如果配置了）。也可以事
+后通过 [`/webextrator/tasks`](/el/guides/webextrator/webextrator_tasks) 主动查询。
 
-## Παράδειγμα: Εξαγωγή Κειμένου Άρθρου (με ενεργοποίηση LLM)
+## 示例
+
+### 1. Wikipedia 文章（schema.org 命中，不需要 LLM）
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://example.com/news/1",
-    "expected_type": "article",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "expected_type": "article"
+  }'
+```
+
+`data.structured.schemaOrg.primary` 关键字段：
+```json
+{
+  "kind": "article",
+  "subtype": "Article",
+  "headline": "Αμερικανική εταιρεία μηχανικής μάθησης και διαχείρισης γνώσης",
+  "datePublished": "2007-08-08T05:47:27Z",
+  "dateModified": "2025-07-10T20:42:45Z",
+  "author": { "name": "Συγγραφείς έργων Wikimedia", "type": "Οργάνωση" },
+  "publisher": { "name": "Ίδρυμα Wikimedia, Inc." }
+}
+```
+
+### 2. Σελίδα προϊόντος BestBuy (schema.org hit)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.bestbuy.com/product/apple-airpods-pro-2nd-generation-white/JJ8ZH6TPSW",
+    "expected_type": "product"
+  }'
+```
+
+schema.org εξαγωγή:
+
+```json
+{
+  "kind": "product",
+  "name": "Apple - Ανακαινισμένα Άριστα - AirPods Pro (2ης γενιάς) - Λευκό",
+  "sku": "10845412",
+  "model": "MQD83AM/A",
+  "color": "Λευκό",
+  "brand": "Apple",
+  "offer": { "price": 159.99, "currency": "USD", "availability": "https://schema.org/InStock", "seller": "Best Buy" },
+  "rating": { "value": 4.4, "count": 8 }
+}
+```
+
+### 3. Σελίδα συνταγής AllRecipes (με θρεπτικά στοιχεία και βήματα)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.allrecipes.com/recipe/16354/easy-meatloaf/"
+  }'
+```
+
+schema.org εξαγωγή:
+
+```json
+{
+  "kind": "recipe",
+  "name": "Εύκολη Μηλόπιτα",
+  "cookTime": "PT60M",
+  "totalTime": "PT75M",
+  "recipeYield": "8 / 1 (9x5-inch) μηλόπιτα",
+  "ingredients": ["1 1/2 λίβρες κιμά", "..."],
+  "instructions": [{ "text": "Προθερμάνετε τον φούρνο στους 350°F ..." }, "..."],
+  "rating": { "value": 4.7, "count": 9348 }
+}
+```
+
+### 4. Σελίδα συζήτησης HN (χωρίς JSON-LD — χρειάζεται ενεργοποίηση LLM)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://news.ycombinator.com/item?id=37000000",
     "enable_llm": true
   }'
 ```
 
-## Παράδειγμα: Ασύγχρονη Λειτουργία + Προσαρμοσμένη Δομημένη Εξαγωγή
+`data.structured.llm.data`:
+
+```json
+{
+  "kind": "discussion",
+  "title": "Δείξτε HN: Ένας νέος τρόπος εξαγωγής ιστοσελίδων",
+  "author": "alice",
+  "points": 173,
+  "commentCount": 42,
+  "body": "Γεια σας HN, δημιουργήσαμε μια αυτοφιλοξενούμενη εναλλακτική λύση στο API Ανάλυσης του Diffbot ..."
+}
+```
+
+Τα κορυφαία πεδία έχουν επίσης συμπληρωθεί: `byline = "alice"`, `publishedAt = "..."`.
+
+### 5. Σελίδα προϊόντος Amazon (Amazon χωρίς JSON-LD — χρειάζεται ενεργοποίηση LLM)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://shop.example.com/item/123",
-    "expected_type": "structured",
-    "enable_llm": true,
-    "instruction": "εξαγωγή τίτλου προϊόντος, τιμής, αποθέματος, URL 3 κύριων εικόνων",
-    "callback_url": "https://your-domain.com/wbx-callback"
+    "url": "https://www.amazon.com/dp/B0BSHF7WHW",
+    "expected_type": "product",
+    "enable_llm": true
   }'
 ```
+
+`data.structured.llm.data` (τυποποιημένο `product`):
+
+```json
+{
+  "kind": "product",
+  "name": "Apple 2023 MacBook Pro M2 Pro 14-inch",
+  "brand": "Apple",
+  "price": 1799,
+  "currency": "USD",
+  "bullets": ["Apple M2 Pro chip με 10-core CPU", "..."],
+  "specifications": [{ "name": "Μέγεθος οθόνης", "value": "14.2 ίντσες" }, "..."]
+}
+```
+
+### Python (requests)
+
+```python
+import os, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+
+resp = requests.post(
+    "https://api.acedata.cloud/webextrator/extract",
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "url": "https://en.wikipedia.org/wiki/Diffbot",
+        "expected_type": "article",
+    },
+    timeout=120,
+)
+resp.raise_for_status()
+data = resp.json()["data"]
+
+primary = (data.get("structured") or {}).get("schemaOrg", {}).get("primary")
+print("contentType:", data["contentType"])
+print("title:      ", data["title"])
+print("byline:     ", data.get("byline"))
+print("publishedAt:", data.get("publishedAt"))
+if primary and primary["kind"] == "article":
+    print("headline:    ", primary["headline"])
+    print("dateModified:", primary.get("dateModified"))
+```
+
+### Node.js (fetch)
+
+```js
+const apiKey = process.env.ACEDATA_API_KEY;
+
+const res = await fetch('https://api.acedata.cloud/webextrator/extract', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    url: 'https://www.allrecipes.com/recipe/16354/easy-meatloaf/',
+  }),
+});
+const { data } = await res.json();
+const recipe = data?.structured?.schemaOrg?.primary;
+console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, 'είδη συστατικών');
+```
+
+## Υποδείξεις και παγίδες
+
+- **Αν μπορείτε να περάσετε `expected_type`, κάντε το.** Δωρεάν υπόδειξη, παραλείψτε την ηθελημένη εκτίμηση, είναι ιδιαίτερα χρήσιμη για σελίδες που δεν είναι στη λίστα ενσωματωμένων.
+- **`enable_llm: true` σε σελίδες με schema.org hit είναι δωρεάν.** Το LLM καλείται μόνο όταν δεν υπάρχει primary στο schema.org, οπότε είναι ασφαλές να είναι ενεργοποιημένο από προεπιλογή.
+- **Κατά την αποσφαλμάτωση, ελέγξτε πρώτα το `rawSignals.hasJsonLd`.** Αν είναι `true` αλλά το `structured.schemaOrg.primary` είναι `null`, σημαίνει ότι η σελίδα χρησιμοποίησε έναν τύπο που δεν έχουμε καλύψει με τον μετατροπέα μας — υποβάλετε ένα ζήτημα, θα το προσθέσουμε.
+- **Το `structured.llmError` είναι πληροφοριακό.** Η αίτηση είναι ακόμα επιτυχής, τα ηθελημένα αποτελέσματα επιστρέφονται. Δείτε το `llmError.error` για να εντοπίσετε την αιτία (χρόνος εκτέλεσης, αποτυχία ανάλυσης JSON, αποτυχία επαλήθευσης Zod).
+- **Οι `links[]` που δεν είναι σελίδες άρθρων δεν θα ταξινομηθούν σχεσιακά.** Μόνο κατά "άνω όριο 100 στοιχείων + φιλτράρισμα άκυρων πρωτοκόλλων" προσπαθούμε να καθαρίσουμε.
+- **Η χρέωση ισχύει και για τις επιτυχίες της μνήμης cache.** Η cache είναι για καθυστέρηση και προστασία της δεξαμενής προγράμματος περιήγησης, όχι για εξοικονόμηση χρημάτων.

@@ -1,0 +1,252 @@
+---
+title: "X402 Брза почетак"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Овај водич описује комплетан процес Ace Data Cloud X402 уз минимални API захтев. Циљ није да се прво напише сложен код, већ да се прво разуме: зашто први захтев враћа 402, шта има у `accepts`, и како `PAYMENT-SIGNATURE` претвара исти API захтев у захтев који је плаћен.
+
+## Припремни радови
+
+Потребно је припремити:
+
+| Пројекат | Опис                                                      |
+| ---- | ------------------------------------------------------- |
+| Новац   | Новац који подржава циљну мрежу. Base / SKALE користи EVM новчаник, Solana користи Solana новчаник. |
+| USDC | У новчанику треба да има довољно USDC. Стварни износ је према `maxAmountRequired` у 402 одговору.    |
+| Развојно окружење | TypeScript препоручује Node.js 18+; Python препоручује Python 3.10+.       |
+| SDK  | Препоручује се коришћење званичног SDK, не препоручује се ручно писање детаља потписа.                                   |
+
+X402 позив Ace Data Cloud API-ју не захтева API токен. SDK први захтев не садржи `Authorization`, Gateway ће вратити `402 Payment Required` и захтев за плаћање; SDK ће аутоматски поново покушати након потписивања.
+
+## Инсталација SDK
+
+Изворни код и адреса пакета:
+
+- SDK репозиторијум: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- X402 Client репозиторијум: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm: `@acedatacloud/sdk`, `@acedatacloud/x402-client`
+- PyPI: `acedatacloud`, `acedatacloud-x402`
+
+TypeScript:
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client ethers
+```
+
+Python:
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+Ако желите да користите Solana, такође треба да инсталирате одговарајуће зависности:
+
+```bash
+npm install @solana/web3.js
+```
+
+Python верзија Solana signer зависности је већ укључена у `acedatacloud-x402`.
+
+Инсталација и проверa увоза у чистом привременом окружењу:
+
+```text
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+
+acedatacloud 2026.4.26.1
+acedatacloud-x402 2026.5.31.3
+imports_ok True True True True True True
+usage: acedatacloud-x402 [-h] {approve-permit2} ...
+```
+
+Резултат објашњава:
+
+- npm пакети и PyPI пакети су стварно објављени пакети, а не називи за заузимање у документацији.
+- `acedatacloud-x402[cli]` ће инсталирати CLI, `approve-permit2` подкоманда може се користити за Permit2 овлашћење у `upto` сценаријима.
+
+## Први захтев ће вратити 402
+
+Можете прво користити `curl` да видите шта враћа неплаћени захтев. Испод наведени пример неће произвести наплату, јер не садржи `PAYMENT-SIGNATURE`:
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/openai/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 1
+  }'
+```
+
+Враћени садржај ће садржати `accepts` низ, уобичајена структура изгледа овако:
+
+```json
+{
+  "x402Version": 2,
+  "resource": {
+    "url": "/openai/chat/completions",
+    "description": "AceDataCloud API call",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "maxAmountRequired": "95215",
+      "amount": "95215",
+      "maxTimeoutSeconds": 3600,
+      "resource": "/openai/chat/completions",
+      "description": "...",
+      "payTo": "0x...",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      }
+    }
+  ],
+  "error": "PAYMENT-SIGNATURE header is required"
+}
+```
+
+Иста тајна садржина ће бити постављена у `PAYMENT-REQUIRED` одговорном заглављу у base64 формату, што олакшава клијенту да прочита захтев за плаћање без парсирања тела.
+
+Извештај о програму за неплаћене захтеве производног API-а изгледа овако:
+
+```text
+status=402
+x402Version 2
+accepts [
+  ('eip155:8453', 'exact', '95215'),
+  ('eip155:8453', 'upto', '95215'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '95215'),
+  ('eip155:1187947933', 'exact', '95215')
+]
+```
+
+Резултат објашњава:
+
+- Први захтев није садржао `Authorization` или `PAYMENT-SIGNATURE`, па је враћен HTTP 402, неће произвести наплату.
+- `accepts` је једини поуздан потпис за овај захтев, садржи опционе мреже, шему, максимални износ, адресу за плаћање и адресу имовине.
+- `network` је CAIP-2 идентификатор, клијент мора да се придржава CAIP-2 стринг подударања приликом избора мреже.
+- Овај пут је минимални износ за `gpt-4o-mini` захтев за ћаскање `95215` атомских USDC, што је `0.095215` USDC.
+- Сваког пута када се захтева, треба прочитати 402 одговор, не треба хардкодирати примерне износе у пословни код.
+
+Значење поља:
+
+| Поље                  | Опис                                                                       |
+| ------------------- | ------------------------------------------------------------------------ |
+| `scheme`            | Плаћени план. `exact` означава фиксни износ, `upto` означава овлашћење, по стварној потрошњи.                               |
+| `network`           | CAIP-2 идентификатор платне мреже, на пример `eip155:8453`, `eip155:1187947933`, `solana:5eykt4...`. |
+| `maxAmountRequired` | Максимални износ плаћања, јединица је атомски USDC, `95215` означава `0.095215` USDC.                 |
+| `amount`            | Износ који се плаћа; `exact` је исти као `maxAmountRequired`, `upto` се у фази плаћања прерачунава на стварну потрошњу.           |
+| `payTo`             | Адреса за плаћање.                                                                    |
+| `asset`             | Адреса USDC уговора или Solana mint адреса.                                               |
+| `extra`             | Додатне информације потребне за потпис, као што су ID ланца, EIP-712 домена, Permit2 адреса и сл.                                |
+
+## Завршите плаћање поновним покушајем помоћу SDK
+
+Испод је минимални TypeScript пример. Он одређује `network: 'skale'`, handler ће из овог 402 одговора изабрати SKALE захтев за плаћање; стварни износ и адреса за плаћање остају према `accepts`.
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.SKALE_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`nepodržana metoda: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'skale',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const response = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Odgovori tačno: hello' }],
+  max_tokens: 8
+});
+
+console.log(response.choices[0].message.content);
+```
+
+Rezultat programa koji se izvršava putem TypeScript SDK:
+
+```text
+platioc 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+prošlo_ms 6782
+sadržaj ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+Objašnjenje rezultata:
+
+- `sadržaj ADC_TS_SDK_X402_OK` je fiksni string koji model vraća prema uputstvu, što ukazuje da je plaćanje ponovo pokušano i da je zahtev stvarno ušao u model API.
+- `platioc` je adresa lokalnog potpisanog novčanika, privatni ključ nije poslat Ace Data Cloud-u.
+- SDK je završio 402 analizu, `PAYMENT-SIGNATURE` potpis i ponovo pokušao originalni zahtev; poslovni kod je i dalje napisan prema običnom SDK pozivu.
+
+U ovoj kodu se dešava četiri koraka:
+
+1. SDK šalje jedan običan API zahtev, bez `Authorization`.
+2. Gateway vraća `402 Payment Required` i `accepts`.
+3. `createX402PaymentHandler` bira `network = 'skale'` kao zahtev za plaćanje i potpisuje `PAYMENT-SIGNATURE`.
+4. SDK ponovo pokušava sa istim telom zahteva, Gateway poziva Facilitator da verifikuje i obračuna pre nego što pusti do ciljanog API.
+
+## Pregled sposobnosti Facilitatora
+
+X402 API ne zavisi od direktorijuma resursa. Klijent direktno poziva poznati API i koristi `402 Payment Required` i `accepts` koji se vraćaju u tom zahtevu kao jedini osnov za cenu i potpis.
+
+Deklaracija sposobnosti Facilitatora se nalazi na:
+
+```bash
+curl https://facilitator.acedata.cloud/.well-known/x402
+```
+
+Ona samo opisuje `/supported`, `/verify`, `/settle` i trenutno aktivne mreže plaćanja, ne navodeći API resurse.
+
+Proizvodni adresar Facilitatora Ace Data Cloud je:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+Možete proveriti koje mreže i sheme podržava:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Vraćeni `kinds` će navesti mreže i sheme koje Facilitator podržava. Tokom stvarnog poziva, i dalje se oslanjajte na `accepts` koji vraća API.
+
+Izlaz Facilitatora `/supported`:
+
+```text
+kinds [
+  ('eip155:8453', 'exact'),
+  ('eip155:8453', 'upto', {'facilitatorAddress': '0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708'}),
+  ('eip155:1187947933', 'exact'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact')
+]
+```
+
+Objašnjenje rezultata:
+
+- `/supported` objašnjava da Facilitator ima sposobnosti verifikacije i obračuna za ove mreže i sheme.
+- Base, SKALE i Solana podržavaju `exact`; `upto` trenutno je dostupno samo na Base.
+- Da li određeni API dozvoljava neku mrežu, i dalje zavisi od 402 `accepts` tog API.

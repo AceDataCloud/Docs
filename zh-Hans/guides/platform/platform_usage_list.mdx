@@ -1,0 +1,201 @@
+---
+title: "获取 AceDataCloud 平台 API 调用记录"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+查询当前账户最近 60 天的业务 API 调用明细，适合核对扣费、定位失败请求，以及按服务、Application、API 或凭证排查问题。
+
+> 本页查询的是账户自己的调用流水。若只想查看某个 API 在整个平台上的公开调用统计，请使用[API 调用统计](https://platform.acedata.cloud/documents/platform-api-usage)。
+
+## 准备工作
+
+### 1. 创建账户令牌
+
+本接口属于平台管理 API，需要使用 **Account Token（账户令牌）**：
+
+1. 登录 [AceDataCloud 平台](https://platform.acedata.cloud)。
+2. 打开 [Account Token 控制台](https://platform.acedata.cloud/console/platform-tokens)。
+3. 点击「创建」，立即将令牌保存到密码管理器或 Secret Manager。
+
+完整说明见[管理 AceDataCloud 平台账户令牌](https://platform.acedata.cloud/documents/platform-token)。账户令牌用于 `platform.acedata.cloud/api/v1/**`；调用 `api.acedata.cloud/**` 业务接口使用的是 API 凭证（Credential），两者不能混用。
+
+```shell
+export PLATFORM_TOKEN='你的账户令牌'
+```
+
+不要把令牌写入前端代码、日志或公开仓库；如果泄露，请立即在控制台删除并重建。
+
+### 2. 准备筛选 ID（可选）
+
+不传筛选条件即可查看当前账户有权查看的记录。需要缩小范围时：
+
+- `application_id`：从[服务申请列表](https://platform.acedata.cloud/documents/platform-application-list)获取；
+- `credential_id`：从[API 凭证列表](https://platform.acedata.cloud/documents/platform-credential-list)获取；
+- `api_id`：从[API 列表](https://platform.acedata.cloud/documents/platform-api-list)获取；
+- `service_id`：从[服务列表](https://platform.acedata.cloud/documents/platform-service-list)获取。
+
+普通用户无需传 `user_id`；若显式传入，必须与当前账户一致，否则返回 `403`。管理员可用该参数跨账户筛选。
+
+## 接口概览
+
+| 项 | 内容 |
+| --- | --- |
+| 方法 | `GET` |
+| URL | `https://platform.acedata.cloud/api/v1/usage/apis/` |
+| 鉴权 | `Authorization: Bearer ${PLATFORM_TOKEN}` |
+| OAuth Scope | `usage:read`（`platform:read` / `platform` 可展开包含） |
+| 分页 | `count` + `items`，默认每页 10 条 |
+
+## 查询范围
+
+| `perspective` | 含义 |
+| --- | --- |
+| `both` | 默认值；返回由当前账户付费或实际调用的记录 |
+| `billing` | 仅返回由当前账户付费的记录 |
+| `actor` | 仅返回由当前账户实际调用的记录 |
+
+## 查询参数
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `perspective` | string | 否 | `both` | `billing`、`actor` 或 `both` |
+| `user_id` | UUID | 否 | — | 仅管理员按用户筛选；支持重复参数 |
+| `service_id` | UUID | 否 | — | 按服务筛选；支持重复参数 |
+| `application_id` | UUID | 否 | — | 按 Application 筛选；支持重复参数 |
+| `api_id` | UUID | 否 | — | 按 API 筛选；支持重复参数 |
+| `credential_id` | UUID | 否 | — | 按 API 凭证筛选；支持重复参数 |
+| `status_code` | integer | 否 | — | 按 HTTP 状态码筛选；支持重复或逗号分隔值 |
+| `created_at_from` | datetime | 否 | — | 创建时间下界，ISO 8601 |
+| `created_at_to` | datetime | 否 | — | 创建时间上界，ISO 8601 |
+| `limit` | integer | 否 | 10 | 每页条数，最大 100 |
+| `offset` | integer | 否 | 0 | 分页偏移量 |
+| `ordering` | string | 否 | `-created_at` | 按创建时间倒序 |
+
+请求时间早于最近 60 天时，接口返回 `400` 字段校验错误，提示完整调用明细仅保留 60 天。
+
+## 请求示例
+
+查询最近 100 条记录：
+
+```shell
+curl --get 'https://platform.acedata.cloud/api/v1/usage/apis/' \
+  --data-urlencode 'perspective=both' \
+  --data-urlencode 'limit=100' \
+  --data-urlencode 'ordering=-created_at' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+按时间、Application 和失败状态筛选：
+
+```shell
+export APPLICATION_ID='你的 Application ID'
+
+curl --get 'https://platform.acedata.cloud/api/v1/usage/apis/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-02T00:00:00Z' \
+  --data-urlencode 'status_code=500' \
+  --data-urlencode 'limit=100' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+Python 分页示例：
+
+```python
+import os
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {"perspective": "both", "limit": 100, "offset": 0}
+
+response = requests.get(url, headers=headers, params=params, timeout=30)
+response.raise_for_status()
+data = response.json()
+
+for usage in data["items"]:
+    print(usage["created_at"], usage["status_code"], usage["deducted_amount"], usage["trace_id"])
+
+if params["offset"] + len(data["items"]) < data["count"]:
+    params["offset"] += len(data["items"])
+```
+
+## 响应示例
+
+```json
+{
+  "count": 1,
+  "items": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "user_id": "00000000-0000-4000-8000-000000000002",
+      "actor_user_id": "00000000-0000-4000-8000-000000000002",
+      "application_id": "00000000-0000-4000-8000-000000000003",
+      "api_id": "00000000-0000-4000-8000-000000000004",
+      "credential_id": "00000000-0000-4000-8000-000000000005",
+      "trace_id": "example-trace-id",
+      "status_code": 200,
+      "used_amount": 1.25,
+      "original_amount": 1.25,
+      "deducted_amount": 1.25,
+      "remaining_amount": 98.75,
+      "started_at": "2026-09-01T08:00:00Z",
+      "finished_at": "2026-09-01T08:00:01Z",
+      "elapsed": 1.0,
+      "created_at": "2026-09-01T08:00:01Z",
+      "updated_at": "2026-09-01T08:00:01Z",
+      "metadata": {
+        "model": "example-model"
+      },
+      "api": {
+        "title": "Example API"
+      },
+      "service": {
+        "id": "00000000-0000-4000-8000-000000000006",
+        "title": "Example Service"
+      },
+      "credential": {
+        "id": "00000000-0000-4000-8000-000000000005",
+        "name": "Production"
+      }
+    }
+  ]
+}
+```
+
+## 关键字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `user_id` | 承担本次扣费的账户 |
+| `actor_user_id` | 实际发起调用的账户；授权他人使用凭证时可能与 `user_id` 不同 |
+| `used_amount` | 本次调用按原规则计算的用量 |
+| `original_amount` | 应用折扣前的原始用量 |
+| `deducted_amount` | 最终实际扣除的额度 |
+| `remaining_amount` | 本次扣费完成后的 Application 剩余额度 |
+| `elapsed` | 服务端记录的调用耗时，单位为秒 |
+| `trace_id` | 排查单次请求时使用的追踪标识 |
+| `metadata` | 公开元数据；列表不会返回完整请求或响应内容 |
+| `api` / `service` / `credential` | 便于展示的关联对象摘要；关联对象已不存在时可能为空 |
+
+额度单位由对应 Application 的 `service.unit` 决定，不应默认当作美元。
+
+## 错误与重试
+
+| HTTP | `error` | 含义 | 处理方式 |
+| --- | --- | --- | --- |
+| 400 | 字段校验错误 | 查询范围早于 60 天保留期 | 将起始时间调整到最近 60 天以内 |
+| 401 | `not_authenticated` | 账户令牌缺失或无效 | 检查 Account Token，不要误用业务 Credential |
+| 403 | `permission_denied` | 请求包含无权查看的记录 | 移除未授权的用户筛选条件 |
+| 429 | `usage_query_in_progress` | 完全相同的查询仍在执行 | 等待 `Retry-After` 后退避重试 |
+| 503 | `usage_query_timeout` | 查询超过服务端安全时限 | 缩小时间范围或增加筛选条件后重试 |
+
+同一组查询参数最多保持一个在途请求。大范围查询优先使用一天或更小的窗口，不要用固定间隔叠加相同请求。
+
+## 下一步
+
+- [聚合调用量](https://platform.acedata.cloud/documents/platform-usage-aggregate)：查看按日期和 API 汇总的用量。
+- [导出调用量](https://platform.acedata.cloud/documents/platform-usage-export)：将大量明细直接下载为 CSV。
+- [查看 Proxy 调用记录](https://platform.acedata.cloud/documents/platform-proxy-usage)：查询 Proxy 类型服务的记录。
+- [查看服务申请详情](https://platform.acedata.cloud/documents/platform-application-detail)：核对余额和额度单位。
+- [轮换 API 凭证](https://platform.acedata.cloud/documents/platform-credential-rotate)：凭证疑似泄露时立即更换。

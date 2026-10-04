@@ -1,0 +1,46 @@
+---
+title: "GPT-Live reaaliaikainen äänikeskustelu"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live tukee samanaikaista kuuntelua ja puhumista, kaksisuuntaisia tekstityksiä sekä taustatehtäviä. Studion ChatGPT-äänipuhelut käyttävät `gpt-live-1`-mallia puheen käsittelyyn, ja monimutkaiset kysymykset käsittelee edelleen tällä hetkellä valittu chat-malli.
+
+## Yhteys
+
+Yhdistä `wss://realtime.acedata.cloud/v1/live/sessions`-osoitteeseen alustan API-tokenilla. Studio- tai chat-palvelun tunnistetietoja varten käytetään osoitetta `wss://realtime.acedata.cloud/aichat2/live`. Palvelin todentaa `Authorization: Bearer <token>` -otsakkeella; selain välittää tunnistetiedot WebSocket-aliprotokollan kautta, jotta niitä ei kirjoiteta URL-osoitteeseen:
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+Odota `session.started`-tapahtumaa ja lähetä sitten jatkuvasti `session.input_audio.append`-tapahtumia, joissa `audio` on Base64-koodattua raakaa 24 kHz:n, monokanavaista, 16-bittistä little-endian PCM-ääntä ilman WAV-tiedoston otsaketta. Lähetä ääni todellisen näytteenottotaajuuden mukaan, ja säilytä jatkuvuus myös hiljaisissa jaksoissa.
+
+Toista `session.output_audio.delta.delta` järjestyksessä. Käyttäjän ja avustajan tekstitykset tulevat vastaavasti tapahtumista `session.input_transcript.delta` ja `session.output_transcript.delta`; säilytä kunkin osuuden `delta`, `start_ms` ja `end_ms`; kummankin osapuolen tekstitykset voivat kasvaa samanaikaisesti. Livessä ei ole yksittäisen puhevastauksen päättymistapahtumaa, joten ”vastaa parhaillaan” -tila tulee päivittää paikallisen toistojonon perusteella.
+
+## Taustatehtävät
+
+Tällä hetkellä tuetaan `client`-delegointitilaa. Kun `session.delegation.created` vastaanotetaan, sovellus kutsuu omaa taustaansa puheen tekstitysten ja tallennetun kontekstin perusteella ja palauttaa tuloksen `session.thinking.append`- tai `session.commentary.append`-tapahtumalla, mukana vastaava `delegation_id` ja enintään 500 tokenia sisältävä pelkkää tekstiä oleva `content`. Tulosten tulee olla peräisin valmiiksi suoritetuista taustatoiminnoista; puheen keskeytyminen ei tarkoita, että taustatehtävä on peruttu.
+
+Hallittua Responses-delegointia, tallenteiden tallennusta, `session.update`-toimintoa, istunnon palautusta tai automaattista uudelleenyhdistämistä ei toistaiseksi tueta. Malli on kiinteästi `gpt-live-1`, ääni on kiinteästi 24 kHz PCM16, ja äänenväri valitaan puhelun alkaessa. Vanhaa Realtime API:a voi edelleen käyttää.
+
+## Laskutus ja puhelun lopettaminen
+
+Puheesta laskutetaan aktiivisen istunnon keston mukaan: **0.01 Credits/sekunti, eli 0.6 Credits/minuutti**, eikä aikaa pyöristetä ylöspäin kokonaisiin minuutteihin. Käyttäjän puhe, avustajan puhe, hiljaisuus, molempien osapuolten hiljaisuus ja taustatehtävien odotusaika ovat kaikki laskutettavia. Taustamalleista tai työkalukutsuista laskutetaan erikseen vastaavan API:n mukaisesti. Creditien dollarimääräinen hinta riippuu latauspaketista; katso ajantasainen hinta konsolista.
+
+`session.usage.updated.usage.seconds` on kumulatiivinen käyttömäärä. Jos esimerkiksi vastaanotetaan ensin 12 sekuntia ja sitten 15 sekuntia, kokonaismäärä on 15 sekuntia. Alusta laskuttaa vain lisätyn keston eikä laske tilannekuvia uudelleen yhteen.
+
+Lopettaessasi lähetä `session.close`, jatka vastaanottamista, kunnes saat `session.closed`-tapahtuman, sulje sitten yhteys ja vapauta mikrofoni. Pakotettu katkaisu voi johtaa siihen, ettei lopullista käyttömäärää vahvisteta, ja käyttöliittymän tulee ilmoittaa tästä selkeästi. Kun saldo ei riitä, laskutus epäonnistuu tai istuntoraja saavutetaan, yhteys päättyy. Yksittäinen puhelu kestää oletuksena enintään 30 minuuttia.
+
+Parametrivirheet palautetaan `error`-tapahtumalla; `error.client_event_id` vastaa epäonnistunutta komentoa. Käynnistysvirheen yhteydessä nauhoitus tulee lopettaa ja virhe näyttää, eikä mallia tule vaihtaa automaattisesti tai yrittää uudelleen siten, että syntyy uusia kuluja.

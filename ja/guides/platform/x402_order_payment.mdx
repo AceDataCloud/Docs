@@ -1,0 +1,233 @@
+---
+title: "X402 注文支払いチュートリアル"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+API リクエストごとに直接支払う方法に加えて、Ace Data Cloud は X402 でコンソール注文を支払うこともサポートしています。注文支払いと API 呼び出しのコアプロトコルは同じです：最初のリクエストは 402 を返し、クライアントが `PAYMENT-SIGNATURE` に署名してから、同じリクエストで再試行します。
+
+違いは、注文支払いはアカウントトークンを必要とするプラットフォーム API であることです。一方、`x402.acedata.cloud` の AI API を直接呼び出す場合は、X402 のみを使用でき、API Token は不要です。
+
+## 注文を準備する
+
+[Ace Data Cloud コンソール](https://platform.acedata.cloud/console/orders)にアクセスし、支払いが必要な注文を選択して、注文 ID を記録します。
+
+まだ注文がない場合は、プランページで未払い注文を作成できます。注文価格はページに表示される内容に従い、X402 の 402 レスポンス内の `amount` が最終的な署名根拠となります。
+
+## アカウントトークンを作成する
+
+注文支払いリクエストにはアカウントトークンが必要です。[プラットフォーム Token ページ](https://platform.acedata.cloud/console/platform-tokens)を開き、`platform-v1-...` 形式の token を作成します。
+
+以降のリクエストでは以下を使用します：
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+アカウントトークンは通常の API Token とは異なります。通常の API Token は API クレジットの消費に使用されます。アカウントトークンは、注文支払いなどのプラットフォームリソースを、あなたのアカウントを代表して操作するために使用されます。
+
+## 402 をトリガーする
+
+まず、`PAYMENT-SIGNATURE` を付けずにリクエストを 1 回送信します：
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+ステータス 402 が返され、レスポンスには `accepts` が含まれます：
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+注文支払いでは公式 x402 v2 を使用します：`x402Version` は `2`、`network` は CAIP-2 識別子を使用し、金額フィールドは `amount` です。
+
+10 Credits の注文を作成して 402 をトリガーしたプログラム実行結果：
+
+> 以下の取引記録は旧ポリシー下における過去の実測サンプルであり、金額とトランザクションハッシュはそのまま保持しています。新しい X402 注文では支払い方法の割引は適用されません。今回の 402 レスポンスの `amount` を署名および支払いの根拠としてください。
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+結果の説明：
+
+- 注文の作成に成功すると、状態は `Pending` となり、この時点ではまだオンチェーン支払いは行われていません。
+- 最初の `pay/` リクエストには `PAYMENT-SIGNATURE` が含まれていないため、HTTP 402 が返されます。
+- `accepts` は Base `exact` と Solana `exact` の両方を提示しており、このチュートリアルでは以降 Base を選択します。
+- 注文作成時の価格は `1.26` であり、旧 X402 支払い割引ポリシー期間中に支払われたため、実際の署名および決済金額は `1.2` USDC、すなわち `1200000` atomic USDC です。
+
+ここでの `resource` はサーバー側から返され、署名にも関与するフィールドです。クライアント側で、その中のプロトコル、パス、または注文 ID を自分で書き換えないでください。
+
+## 署名して再試行する
+
+注文支払いでは、`@acedatacloud/x402-client` または `acedatacloud-x402` の低レベル署名関数を再利用できます。以下は TypeScript の例です：
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+同じ注文に対して Base `exact` で署名し、再試行した後のプログラム実行結果：
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+オンチェーン確認結果：
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+結果の説明：
+
+- `status 200` は、プラットフォームの注文支払いインターフェースがこの `PAYMENT-SIGNATURE` を受け付けたことを示します。
+- `has_x_payment_response True` は、レスポンスヘッダーに Base64 エンコードされた `PAYMENT-RESPONSE` レシートが含まれていることを示します。
+- `settle_header.success=True` かつ `network=base` は、Facilitator が Base settlement を完了したことを示します。
+- 注文の最終ステータスは `Finished`、`pay_way` は `X402`、`pay_id` にはオンチェーン取引ハッシュが書き込まれます。
+- BaseScan 上の `Transfer` イベントは、支払いアドレスがプラットフォームの受取アドレスへ `1200000` atomic USDC、すなわち `1.2` USDC を送金したことを示します。
+
+## 成功レスポンスとレシート
+
+注文の支払いが成功すると、レスポンスボディは注文情報です。プラットフォームはレスポンスヘッダー `PAYMENT-RESPONSE` に Base64 エンコードされた settlement response も含めます。デコード後の一般的なフィールドは以下のとおりです：
+
+| フィールド            | 説明                           |
+| ------------- | ---------------------------- |
+| `success`     | Facilitator settlement が成功したかどうか。 |
+| `transaction` | オンチェーン決済取引ハッシュ。                    |
+| `network`     | 支払いネットワーク。                        |
+| `payer`       | 支払いウォレットアドレス。                      |
+| `amount`      | 実際の決済金額。atomic units を使用。      |
+
+照合が必要な場合は、注文 ID、支払いウォレットアドレス、`transaction`、および注文の最終ステータスを同時に保存することを推奨します。
+
+## 注意事項
+
+- 注文の支払いにはプラットフォームのアカウントトークンが必要であり、X402 ウォレット署名だけでは完了できません。
+- `amount` は USDC atomic units を使用し、`1200000` は `1.2` USDC を表します。
+- 受取アドレスや資産アドレスを自分で組み立てず、402 レスポンス内の `accepts` を基準にしてください。
+- 同じ `PAYMENT-SIGNATURE` が繰り返し送信された場合、Facilitator は nonce によるリプレイ保護を行います。
+
+## 支払い失敗レスポンス
+
+`PAYMENT-SIGNATURE` を伴わない最初の HTTP 402 は通常の支払いチャレンジであり、支払い失敗を意味するものではありません。署名後の検証または決済に失敗した場合も、互換性のために標準の文字列 `error` を残し、`extensions.acedatacloud.paymentError` で安定したエラー構造を返します：
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+クライアントは `code` に基づくローカライズを優先し、不明な code は汎用的な支払い失敗にフォールバックする必要があります。`charged` は三値フィールドです。決済前に明確に拒否された場合にのみ `false` が返されます。フィールドが欠落している場合は、請求状態が不明であることを示し、「請求されていない」と解釈することはできません。現在、注文が `Failed` になった後は同じ注文を再試行できません。ウォレットの問題を修正した後、新しい注文を作成してください。
+
+完全な `PAYMENT-SIGNATURE`、ウォレット署名、認可 payload、Facilitator の生診断情報、または RPC レスポンスを記録または送信しないでください。カスタマーサポートの調査には、注文 ID と公開されたエラー `code` だけが必要です。

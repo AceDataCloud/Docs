@@ -1,0 +1,146 @@
+---
+title: "AceDataCloud プラットフォーム API 呼び出し記録のエクスポート"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+現在のアカウントの API 呼び出し明細を CSV として直接ダウンロードします。財務照合、オフライン分析、または大量の記録の保存に適しています。ページ上で少量の明細のみを確認する場合は、先に[呼び出し記録一覧](https://platform.acedata.cloud/documents/platform-usage-list)をご利用ください。
+
+## 準備
+
+1. [AceDataCloud プラットフォーム](https://platform.acedata.cloud)にログインします。
+2. [Account Token コンソール](https://platform.acedata.cloud/console/platform-tokens)でアカウントトークンを作成し、直ちにパスワードマネージャーまたは Secret Manager に保存します。
+3. 必要に応じて、[サービス申請一覧](https://platform.acedata.cloud/documents/platform-application-list)、[API 認証情報一覧](https://platform.acedata.cloud/documents/platform-credential-list)、または[API 一覧](https://platform.acedata.cloud/documents/platform-api-list)からフィルタリング ID を取得します。
+
+完全なトークンの説明については、[アカウントトークンの管理](https://platform.acedata.cloud/documents/platform-token)をご覧ください。アカウントトークンとビジネス API を呼び出すための Credential は混用できません。
+
+```shell
+export PLATFORM_TOKEN='あなたのアカウントトークン'
+```
+
+## インターフェース概要
+
+| 項目           | 内容                                                         |
+| ----------- | ---------------------------------------------------------- |
+| メソッド          | `GET`                                                      |
+| URL         | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| 認証          | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope | `usage:read`（`platform:read` / `platform` に展開して含まれる）           |
+| レスポンス          | `200 text/csv; charset=utf-8`                              |
+| ファイル名         | `usages.csv`                                               |
+
+このインターフェースは CSV を同期的にストリーミング返却し、エクスポートタスクの作成、JSON またはダウンロードリンクの返却は行いません。開始時刻と終了時刻の両方が未指定の場合にのみ、現在の暦月の開始から現在時刻までの記録をデフォルトでエクスポートします。一方の境界のみを指定した場合、もう一方が当月の境界で自動補完されることはありません。
+
+## クエリパラメータ
+
+| パラメータ                | 型       | 必須  | デフォルト     | 説明                         |
+| ----------------- | -------- | --- | ------ | -------------------------- |
+| `perspective`     | string   | 否   | `both` | `billing`、`actor` または `both` |
+| `service_id`      | UUID     | 否   | —      | サービスでフィルタリング；繰り返しパラメータをサポート               |
+| `application_id`  | UUID     | 否   | —      | Application でフィルタリング；繰り返しパラメータをサポート    |
+| `api_id`          | UUID     | 否   | —      | API でフィルタリング；繰り返しパラメータをサポート            |
+| `credential_id`   | UUID     | 否   | —      | API 認証情報でフィルタリング；繰り返しパラメータをサポート          |
+| `status_code`     | integer  | 否   | —      | 繰り返しまたはカンマ区切りの値をサポート                 |
+| `created_at_from` | datetime | 否   | —      | ISO 8601 開始時刻              |
+| `created_at_to`   | datetime | 否   | —      | ISO 8601 終了時刻              |
+
+エクスポート範囲は常に、現在のアカウントが支払主体および/または実際の呼び出し元として閲覧可能な記録に限定され、アカウントをまたいだエクスポートはサポートされません。
+
+## リクエスト例
+
+現在月の CSV を直接保存する場合：
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Application、時間、およびステータスコードでエクスポートする場合：
+
+```shell
+export APPLICATION_ID='あなたの Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Python でストリーミング保存し、完全性を確認する場合：
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("サーバーが CSV を返しませんでした")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"エクスポートが不完全です：{last_line}")
+```
+
+## CSV 列
+
+CSV ヘッダーの順序は固定です：
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| 列                 | 説明                         |
+| ----------------- | -------------------------- |
+| `Usage ID`        | 呼び出し記録 ID                    |
+| `API`             | API タイトル；一致しない場合は API ID または空値となる可能性があります |
+| `Status Code`     | HTTP ステータスコード                   |
+| `Deducted Amount` | 最終的に実際に差し引かれたクレジット                   |
+| `Original Amount` | アプリケーション割引前の元のクレジット                 |
+| `Trace ID`        | リクエストトレース識別子                     |
+| `Created At`      | 記録作成時刻、ISO 8601            |
+
+クレジットの単位は、対応する Application の `service.unit` によって決まります。
+
+## エクスポートが完全かどうかの判断
+
+1 回につき最大 1,000,000 件のデータを出力します。サーバーが CSV の返却を開始した後は、途中のエラーを別の HTTP ステータスに変更できないため、クライアントは必ず最終行を確認する必要があります：
+
+- `# truncated:`：行数上限に到達しています；より小さな時間ウィンドウで分割してエクスポートします。
+- `# error:`：ストリーミング読み取りが中断されました；範囲を縮小して再度エクスポートします。
+
+照合プログラムは、いずれかの marker を検出した場合、必ずファイルを不完全として扱い、黙って計上してはなりません。
+
+## エラーと再試行
+
+| 状況                          | 対処方法                                  |
+| --------------------------- | ------------------------------------- |
+| `400 usage_history_expired` | レスポンス内の `available_from` を使用して直近 60 日の範囲内に調整 |
+| `401 not_authenticated`     | Account Token が存在し、正確で、削除されていないか確認          |
+| CSV 以外のレスポンス                    | 成功ファイルとして保存しない；まずエラーレスポンスを読み取り、リクエストを修正                |
+| ダウンロードの中断または marker                | 時間ウィンドウを縮小し、バックオフ戦略を使用して再度エクスポート                     |
+
+## 次のステップ
+
+- [呼び出し記録を確認](https://platform.acedata.cloud/documents/platform-usage-list)：オンラインでフィルタリングし、単一リクエストを特定します。
+- [呼び出し量を集計](https://platform.acedata.cloud/documents/platform-usage-aggregate)：日付、API、またはモデルごとに集計されたデータを確認します。
+- [サービス申請詳細を確認](https://platform.acedata.cloud/documents/platform-application-detail)：クレジット単位と残りのクレジットを照合します。

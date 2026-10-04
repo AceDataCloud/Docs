@@ -1,0 +1,226 @@
+---
+title: "X402 Python SDK Guida all'integrazione"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Il Python SDK è adatto per servizi backend, attività di dati, agenti di automazione e script di elaborazione batch. `acedatacloud` si occupa delle chiamate API, `acedatacloud-x402` gestisce l'intestazione della richiesta `PAYMENT-SIGNATURE`.
+
+Indirizzi del codice sorgente e del pacchetto:
+
+- Repository SDK: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- Repository X402 Client: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- PyPI SDK: [https://pypi.org/project/acedatacloud/](https://pypi.org/project/acedatacloud/)
+- PyPI X402 Client: [https://pypi.org/project/acedatacloud-x402/](https://pypi.org/project/acedatacloud-x402/)
+
+## Installazione delle dipendenze
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+Se si desidera utilizzare `upto`, è necessario chiamare una volta il CLI Permit2 approve, che dipende da `web3`:
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+```
+
+Output di installazione e controllo importazioni in un venv Python pulito:
+
+```text
+acedatacloud 2026.4.26.1
+acedatacloud-x402 2026.5.31.3
+imports_ok True True True True True True
+usage: acedatacloud-x402 [-h] {approve-permit2} ...
+approve-permit2  Necessario un approvazione ERC-20 una tantum (Permit2, amount) prima di firmare i pagamenti upto.
+```
+
+Spiegazione dei risultati:
+
+- `acedatacloud` e `acedatacloud-x402` possono essere installati e importati da PyPI.
+- `pip install 'acedatacloud-x402[cli]'` include il CLI `approve-permit2`, utilizzato per l'autorizzazione preliminare di `upto`.
+
+## Esempio Base o SKALE
+
+L'esempio seguente non richiede un API Token. La chiave privata del portafoglio viene firmata solo localmente e non verrà inviata ad Ace Data Cloud.
+
+```python
+import os
+
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import EVMAccountSigner, create_x402_payment_handler
+
+signer = EVMAccountSigner.from_private_key(os.environ["EVM_PRIVATE_KEY"])
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+    )
+)
+
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Say hi in 3 words"}],
+    max_tokens=10,
+)
+
+print(res["choices"][0]["message"]["content"])
+```
+
+Il Python SDK attualmente restituisce un `dict`, quindi l'esempio utilizza `res["choices"][0]["message"]["content"]`. Non assumere direttamente che abbia necessariamente l'attributo `.choices`.
+
+Risultato dell'esecuzione del programma per la chiamata a pagamento SKALE:
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 4786
+content ADC_PY_SDK_X402_OK
+id chatcmpl-DlcWajqAHOop3iebmO19XRfT5bTPz
+```
+
+Spiegazione dei risultati:
+
+- Il programma ha completato l'analisi 402, la firma `PAYMENT-SIGNATURE` e il ripristino della richiesta originale.
+- `content ADC_PY_SDK_X402_OK` è una stringa fissa restituita realmente dal modello, che indica che la richiesta è stata inviata attraverso il percorso di pagamento X402 all'API di destinazione.
+- `id chatcmpl-DlcWajqAHOop3iebmO19XRfT5bTPz` è l'ID della risposta di questa chat completion.
+
+Quando si utilizza SKALE, è sufficiente modificare il nome della rete:
+
+```python
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="skale",
+        evm_signer=signer,
+    )
+)
+```
+
+## Esempio Solana
+
+Solana utilizza una chiave segreta codificata in base58:
+
+```python
+import os
+
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import SolanaKeypairSigner, create_x402_payment_handler
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="solana",
+        solana_signer=SolanaKeypairSigner.from_base58(os.environ["SOLANA_SECRET_KEY"]),
+    )
+)
+
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Say hi in 3 words"}],
+    max_tokens=10,
+)
+```
+
+Il percorso Solana costruirà e invierà una transazione `TransferChecked` di SPL USDC, quindi inserirà la firma della transazione nell'involucro `PAYMENT-SIGNATURE`.
+
+Il tentativo di pagamento Solana ha restituito HTTP 200 e `ADC_SOLANA_E2E_OK` sull'API di produzione. Questa query RPC pubblica ha incontrato limitazioni, non ha confermato stabilmente la firma sulla catena; per la riconciliazione, si prega di utilizzare il proprio RPC Solana per verificare questa transazione.
+
+## Client Async
+
+Lo stesso gestore di pagamento può essere utilizzato per `AsyncAceDataCloud`:
+
+```python
+import os
+
+from acedatacloud import AsyncAceDataCloud
+from acedatacloud_x402 import EVMAccountSigner, create_x402_payment_handler
+
+signer = EVMAccountSigner.from_private_key(os.environ["EVM_PRIVATE_KEY"])
+
+client = AsyncAceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+    )
+)
+
+res = await client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Say hi in 3 words"}],
+    max_tokens=10,
+)
+```
+
+## Utilizzo di `upto` per la misurazione posteriore
+
+Il costo reale delle API come completamenti di chat e chiamate ai modelli potrebbe essere noto solo dopo la fine della risposta. In questo caso, l'API potrebbe restituire sia `exact` che `upto`. Se si desidera dare priorità a `upto`:
+
+```python
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+        prefer_scheme="upto",
+    )
+)
+```
+
+Risultato dell'esecuzione del programma per `upto` su Base:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+settlement tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+settled value 3 atomic USDC
+```
+
+Conferma sulla catena:
+
+```text
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+transfer value 3 atomic USDC
+```
+
+Spiegazione dei risultati:
+
+- `content ADC_BASE_UPTO_OK` indica che la richiesta è realmente entrata nell'API del modello.
+- `settled value 3 atomic USDC` indica che `upto` è stato regolato in base all'uso effettivo, e non è stato detratto l'intero limite.
+- `settlement tx` può essere aperto su BaseScan; durante la riconciliazione, salvare tx hash, payer, completion id e sommario della richiesta.
+
+`upto` utilizza l'autorizzazione Permit2 per un limite, l'importo effettivo della regolazione non può superare tale limite. Prima del primo utilizzo, è necessario effettuare un `approve(Permit2, amount)` per l'USDC sulla catena di destinazione.
+
+Modo CLI:
+
+```bash
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+Modo programmatico:
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+Questo helper è idempotente. Se l'allowance è già sufficiente, restituirà `{"skipped": true}`, senza ripetere la transazione sulla catena.
+
+## Firma a basso livello
+Se non utilizzi l'SDK, puoi anche chiamare direttamente le funzioni di firma a basso livello:
+
+```python
+import base64
+import json
+
+from acedatacloud_x402 import EVMAccountSigner, sign_evm_payment
+
+envelope = sign_evm_payment(requirement, EVMAccountSigner.from_private_key("0x..."))
+x_payment = base64.b64encode(json.dumps(envelope, separators=(",", ":")).encode()).decode()
+```
+
+Le funzioni a basso livello sono adatte per test, strati di proxy, integrazione di gateway o SDK non ufficiali. Il codice aziendale normale dovrebbe preferire l'uso di `create_x402_payment_handler`.

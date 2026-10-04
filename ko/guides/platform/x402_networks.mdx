@@ -1,0 +1,190 @@
+---
+title: "X402 네트워크 및 결제 방식"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402은 현재 USDC 결제를 중심으로 하며, EVM과 Solana 두 종류의 체인을 지원합니다. 네트워크마다 서명 방식, 자산 주소, gas 동작 및 적용 시나리오가 다르므로, 연동 전에 네트워크를 먼저 선택해야 합니다.
+
+## 네트워크 식별자는 CAIP-2 사용
+
+x402 v2의 `accepts[].network`는 `base`, `skale`과 같은 약칭이 아닌 CAIP-2 식별자입니다. 클라이언트는 네트워크를 매칭할 때 반드시 CAIP-2 문자열로 비교해야 합니다:
+
+| 네트워크             | CAIP-2 식별자                                 |
+| -------------- | ----------------------------------------- |
+| Base           | `eip155:8453`                             |
+| SKALE Base     | `eip155:1187947933`                       |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` |
+
+## 지원 매트릭스
+
+| 네트워크     | scheme  | 자산                  | 서명 방식                                 | 적용 시나리오                        |
+| ------ | ------- | ------------------- | ------------------------------------ | --------------------------- |
+| Base   | `exact` | Base USDC           | EIP-3009 `TransferWithAuthorization` | 기본 권장, 지갑 및 유동성 지원이 성숙함.            |
+| Base   | `upto`  | Base USDC + Permit2 | Permit2 `PermitWitnessTransferFrom`  | 채팅, 모델 등의 후불 계량 API.             |
+| SKALE  | `exact` | SKALE bridged USDC  | EIP-3009 `TransferWithAuthorization` | 낮은 gas 비용, EVM 결제 검증 및 저비용 호출에 적합. |
+| Solana | `exact` | Solana USDC         | SPL `TransferChecked`                | Solana 지갑, Agent 또는 온체인 애플리케이션 시나리오.    |
+
+`upto`는 현재 Base에서만 제공됩니다. 실제 사용 가능한 항목은 API가 반환하는 `accepts`를 기준으로 합니다. Facilitator도 확인할 수 있습니다:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Facilitator `/supported`의 반환값:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ]
+}
+```
+
+결과 설명:
+
+- Base, SKALE 및 Solana의 `exact`는 고정 금액 결제 경로입니다.
+- Base만 `upto` 후불 계량 경로를 제공하며, Permit2 approve에 의존합니다.
+- `upto` 항목의 `extra.facilitatorAddress`는 클라이언트가 서명할 때 witness에 작성해야 하는 주소이며, 서버가 반환한 값과 반드시 일치해야 합니다.
+
+## Base
+
+Base는 공식 USDC 컨트랙트를 사용합니다:
+
+```text
+0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+```
+
+`exact` 방식에서 클라이언트는 EIP-712 `TransferWithAuthorization`에 서명합니다. 서명 내용에는 다음이 포함됩니다:
+
+- `from`: 결제 지갑 주소
+- `to`: Ace Data Cloud 수금 주소
+- `value`: 이번 결제 금액
+- `validAfter` / `validBefore`: 서명 유효 시간 범위
+- `nonce`: 32바이트 랜덤 nonce
+
+Facilitator는 서명을 검증한 후 온체인에서 USDC의 `transferWithAuthorization`을 호출하여 이체를 완료합니다.
+
+Base는 가장 권장되는 정식 연동 네트워크이며, 특히 Permit2, USDC 및 지갑 생태계가 모두 더 성숙했기 때문에 `upto` 후불 계량에 적합합니다.
+
+Base `exact` 검증 결과 예시:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+```
+
+결과 설명:
+
+- API paid retry는 모델 내용 `ADC_BASE_E2E_OK`를 반환합니다.
+- 온체인 거래는 이미 BaseScan에서 조회할 수 있으며, 블록 번호는 `46726299`입니다.
+- `95215` atomic USDC는 `0.095215` USDC에 해당하며, 이번 API 호출의 실제 결제 금액입니다.
+
+주문 결제 Base `exact`의 프로그램 실행 결과:
+
+```text
+order 78481793-304e-47f7-bc0c-8231aec9cc1e
+state Finished
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+결과 설명:
+
+- 플랫폼 주문의 최종 상태는 `Finished`입니다.
+- 주문 `pay_id`에는 동일한 Base 거래 해시가 기록됩니다.
+- `1200000` atomic USDC는 `1.2` USDC에 해당하며, 이전 정책에서 해당 10 Credits 주문의 과거 실제 결제 금액입니다. 새 주문은 더 이상 X402 결제 방식 할인을 추가로 받지 않으며, 구체적인 서명 금액은 이번 402 응답을 기준으로 합니다.
+
+## SKALE
+
+SKALE은 bridged USDC를 사용하며, 서명 방식은 Base와 유사하게 EIP-3009입니다. 낮은 gas 비용의 EVM 결제 시나리오에 적합하며, 실제 호출은 여전히 API가 반환하는 `accepts`를 기준으로 합니다.
+
+SKALE의 일반적인 402 `accepts`에는 다음이 포함됩니다:
+
+```json
+{
+  "network": "eip155:1187947933",
+  "scheme": "exact",
+  "extra": {
+    "name": "Bridged USDC (SKALE Bridge)",
+    "version": "2",
+    "chainId": 1187947933,
+    "verifyingContract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+  }
+}
+```
+
+SKALE은 현재 `exact`만 제공합니다. 후불 계량이 필요하다면 Base `upto`를 사용하십시오.
+
+SKALE `exact` 검증 결과 예시:
+
+```text
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+```
+
+결과 설명:
+- API 유료 재시도가 모델 내용 `ADC_SKALE_E2E_OK`를 반환합니다.
+- 거래는 SKALE explorer에서 조회할 수 있으며, 블록 번호는 `1969317`입니다.
+- 이번 `exact` 결제의 정산 금액은 `0.095215` USDC입니다.
+
+## Solana
+
+Solana는 SPL USDC `TransferChecked`를 사용합니다. 클라이언트는 전송 거래를 구성하고, 서명하여 제출한 후 거래 서명 또는 직렬화된 거래를 `PAYMENT-SIGNATURE` envelope에 넣습니다.
+
+Solana의 특징:
+
+- Solana wallet adapter 또는 base58 secret key를 사용합니다;
+- 자산은 Solana USDC mint입니다;
+- 현재 `exact`만 지원합니다;
+- Facilitator는 transfer instruction의 mint, destination, authority 및 amount를 검증합니다.
+
+지갑 fee payer 모드를 사용하는 경우, 지갑이 직접 거래를 제출하고, Facilitator가 거래를 확인하여 settlement 결과를 반환합니다.
+
+Solana `exact` 검증 결과 예시:
+
+```text
+payer AY2RmGm2zPxB1uKvvF4dKyYdr2VySyL3wcD1MKJZoLRd
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run
+```
+
+결과 설명:
+
+- 유료 재시장은 이미 HTTP 200을 반환했고, 모델은 `ADC_SOLANA_E2E_OK`를 출력했습니다.
+- 공개 RPC로 온체인 signature를 조회할 때 속도 제한이 발생할 수 있습니다.
+- 공개 RPC 조회는 속도 제한이 있을 수 있으므로, 여기에는 Solana explorer를 작성하지 않습니다. 엄격한 대사가 필요한 경우, 자체 Solana RPC 또는 플랫폼 측 settlement 기록을 사용하여 거래 signature를 확인하십시오.
+
+## 선택 방법
+
+| 무엇을 하려는가        | 권장 네트워크                         |
+| ------------ | ---------------------------- |
+| 최소 경로를 빠르게 실행     | SKALE `exact` 또는 Base `exact` |
+| 일반 Web3 사용자를 대상으로 함 | Base                         |
+| 채팅 완성 등의 후불 계량을 수행   | Base `upto`                  |
+| Solana 생태계 애플리케이션  | Solana `exact`               |
+| 저비용 EVM 결제 검증 | SKALE `exact`                |
+
+어느 체인을 선택하든, 클라이언트에 가격을 하드코딩하지 마십시오. 가격은 서버가 반환하는 `accepts[].maxAmountRequired`에 의해 결정됩니다.

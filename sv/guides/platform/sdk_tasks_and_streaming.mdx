@@ -1,0 +1,318 @@
+---
+title: "SDK Uppgiftspolling och strömmande svar"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Tjänsterna på Ace Data Cloud delas in i två kategorier baserat på svarsmönster:
+
+| Typ         | Typiska tjänster                                                                  | Anropsmönster                               |
+| ----------- | ------------------------------------------------------------------------------- | ------------------------------------------ |
+| **Synkron generering** | NanoBanana / Flux / Seedream / Chat Completions (icke-strömmande) / Google Sökning | En HTTP, resultatet i svarskroppen          |
+| **Strömmande svar** | Chat Completions (`stream: true`)                                             | SSE, flera ramar som skickas token för token |
+| **Asynkrona uppgifter** | Midjourney / Sora / Veo / Luma / Kling / Hailuo / Suno / Pixverse / Seedance | Skapa först uppgiften för att få `task_id`, sedan poll `/<provider>/tasks` |
+
+Denna artikel fokuserar på de två sista kategorierna: **TaskHandle-polling för asynkrona uppgifter** och **detaljer, fallgropar och språkövergripande skillnader för chat-strömmande svar**.
+
+## I. TaskHandle — En enhetlig abstraktion för asynkrona uppgifter
+
+De tre SDK:erna kapslar in asynkrona uppgifter som `TaskHandle` och erbjuder samma 4 metoder:
+
+| Metod                               | Beteende                                                       |
+| ----------------------------------- | ------------------------------------------------------------- |
+| `get()`                             | Hämtar den senaste statusen (`POST /<provider>/tasks {id, action: "retrieve"}`) |
+| `is_completed()` / `isCompleted()` | Anropar `get()` en gång, kontrollerar om `status` är `succeeded` / `failed` |
+| `wait()`                           | Blockerande polling, tills `succeeded` / `failed` eller `max_wait` timeout |
+| `result` egenskap                   | Den senaste fullständiga responsen från `wait()`; är `null` innan anropet |
+
+### Två sätt att anropa för att skapa uppgifter
+
+Varje asynkront resurs (`images.generate` / `video.generate` / `audio.generate`) har en `wait` parameter:
+
+- `wait=False` (standard): Returnerar omedelbart `TaskHandle`, affärskoden bestämmer själv när den ska poll.
+- `wait=True`: SDK anropar direkt `handle.wait()`, funktionen returnerar svaret efter att det är klart. **Använd endast när du är säker på att mål-API:et alltid kommer att returnera `status: succeeded` fältet** — ett fåtal leverantörer följer inte detta avtal, vilket gör att `wait` fortsätter till `max_wait` innan det kastar `TimeoutError`.
+
+### Enhetsdifferenser (⚠️ Viktigt att läsa)
+
+Enheterna för `poll_interval` och `max_wait` är **olika i de tre språken**, vilket är en vanlig fallgrop vid språkövergång:
+
+| Språk           | Enhet för `poll_interval`         | Enhet för `max_wait` | Standardvärde                             |
+| -------------- | ------------------------------- | ------------------- | ------------------------------------- |
+| **TypeScript** | **Millisekunder**                | **Millisekunder**    | `pollInterval=3000`, `maxWait=600000` |
+| **Python**     | **Sekunder**                     | **Sekunder**         | `poll_interval=3.0`, `max_wait=600.0` |
+| Go             | (TaskHandle har ännu inte exponerats i Go SDK) | —                   | —                                     |
+
+> Att behandla TS:s `{ pollInterval: 3000 }` som sekunder och översätta till Python `poll_interval=3000` kommer att få SDK att vänta 50 minuter innan den pollar andra gången.
+
+### Exempel: Python explicit polling för Midjourney
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+# wait=False får omedelbart handle
+handle = client.images.generate(
+    provider="midjourney",
+    prompt="a cinematic photo of a banana wearing a tuxedo",
+    wait=False,
+)
+print("task_id", handle.id)
+
+t0 = time.time()
+result = handle.wait(poll_interval=3.0, max_wait=180.0)
+print("elapsed_s", round(time.time() - t0, 1))
+print("status", result.get("response", result).get("status"))
+print("images", [it.get("image_url") for it in (result.get("response", result).get("data") or [])])
+```
+
+Hela koden gör följande:
+
+1. `images.generate(..., wait=False)` skickar `prompt` till Midjourney API, får omedelbart `handle`, blockerar inte.
+2. `handle.wait(poll_interval=3.0, max_wait=180.0)` gör en POST till `/midjourney/tasks` var tredje sekund, tills `status` ändras till `succeeded` eller `failed`, eller total tid överstiger 180 sekunder och kastar `TimeoutError`.
+3. När det är klart innehåller `result["response"]["data"]` vanligtvis 4 bilder (Midjourney standard 2x2 grid).
+
+### Exempel: TypeScript explicit polling
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+// wait: false får omedelbart handle
+const handle: any = await client.images.generate({
+  provider: 'midjourney',
+  prompt: 'a cinematic photo of a banana wearing a tuxedo',
+  wait: false,
+});
+console.log('task_id', handle.id);
+
+const t0 = Date.now();
+const result: any = await handle.wait({ pollInterval: 3000, maxWait: 180_000 });
+console.log('elapsed_s', ((Date.now() - t0) / 1000).toFixed(1));
+const response = result.response ?? result;
+console.log('status', response.status);
+console.log('images', (response.data ?? []).map((it: any) => it.image_url));
+```
+
+### Val mellan synkron generering och asynkrona uppgifter
+
+Om din leverantör redan är en synkron bildgenerering (NanoBanana / Flux / Seedream), **skicka inte `wait`**:
+
+```python
+# ✅ Rekommenderat
+res = client.images.generate(provider="nano-banana", prompt="...")
+url = res["data"][0]["image_url"]
+
+# ❌ Negativt exempel: kommer att trigga SDK att poll /nano-banana/tasks, slösa RTT
+res = client.images.generate(provider="nano-banana", prompt="...", wait=True)
+```
+
+Det är enkelt att avgöra: Om mål-API-dokumentationen **inte** har `task_id` + `/tasks`-par, är det synkron generering; i svaret för synkron generering finns det redan ett `data`-fält som innehåller det slutgiltiga resultatet.
+
+### Intern protokoll för TaskHandle
+
+`TaskHandle.get()` anropar:
+
+```http
+POST {API_BASE}/<provider>/tasks
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{"id": "<task_id>", "action": "retrieve"}
+```
+
+Svaret har en enhetlig struktur:
+
+```json
+{
+  "task_id": "...",
+  "trace_id": "...",
+  "response": {
+    "status": "pending | running | succeeded | failed",
+    "data": [...]
+  }
+}
+```
+
+SDK:n är också kompatibel med **äldre svar utan yttre `response`-inpackning** — läser direkt den översta `status`, så byte mellan nya och gamla svar påverkar inte affärskoden.
+
+## II. SSE Strömmande svar (chat.completions)
+
+`chat.completions.create(stream=True)` är för närvarande det enda strömmande gränssnittet i SDK:n (ljud / video ström stöds ännu inte). De tre språkens iterativa stilar är var och en inbyggda:
+
+| Språk         | Iteration                                                                  | Avbrytningsmekanism               |
+| ------------- | ------------------------------------------------------------------------- | ---------------------------------- |
+| TypeScript    | `for await (const chunk of stream)`                                      | `AbortController` skickas till fetch |
+| Python        | `for chunk in client.openai.chat.completions.create(..., stream=True)`  | Hoppa ur loopen (anslutningen stängs automatiskt av SDK) |
+| Go            | `chunks, errs := ...CreateStream(ctx, req)` → `for chunk := range chunks` | Avbryt `context.Context`          |
+
+### TypeScript
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const stream: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Räkna från 1 till 5 separerade med mellanslag. Bara siffrorna.' }],
+  max_tokens: 30,
+  temperature: 0,
+  stream: true
+});
+
+let chunks = 0;
+let collected = '';
+for await (const chunk of stream) {
+  chunks++;
+  const delta = chunk?.choices?.[0]?.delta?.content;
+  if (delta) collected += delta;
+}
+console.log('chunks', chunks);
+console.log('collected', collected);
+```
+
+Verklig körningsresultat:
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Python
+
+```python
+import os
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+chunks = 0
+collected = []
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Räkna från 1 till 5 separerade med mellanslag. Bara siffrorna."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+print("chunks", chunks)
+print("collected", "".join(collected))
+```
+
+Verklig körningsresultat:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+### Go
+
+```go
+chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+    Model:     "gpt-4o-mini",
+    Messages:  []map[string]any{{"role": "user", "content": "Räkna från 1 till 5 separerade med mellanslag. Bara siffrorna."}},
+    MaxTokens: 30,
+})
+cnt := 0
+collected := ""
+for chunk := range chunks {
+    cnt++
+    if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+        if d, ok := ch[0].(map[string]any)["delta"].(map[string]any); ok {
+            if s, ok := d["content"].(string); ok {
+                collected += s
+            }
+        }
+    }
+}
+if e, ok := <-errs; ok && e != nil {
+    log.Println("stream_err", e)
+}
+fmt.Println("chunks", cnt, "collected", collected)
+```
+
+Verklig körningsresultat:
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Struktur av strömmande chunk
+
+Varje chunk är en OpenAI-kompatibel `chat.completion.chunk`:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion.chunk",
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "content": " 3"
+      },
+      "finish_reason": null
+    }
+  ]
+}
+```
+
+- Den första chunk innehåller vanligtvis `delta.role: "assistant"` men `content` är tom.
+- De mellanliggande chunkarna har var och en `delta.content`, som kan sammanfogas direkt.
+- Den sista chunk har `delta` tom, `finish_reason` är `stop` / `length` / `content_filter`.
+
+### Avbrytande under vägen
+
+| Språk         | Avbrytningsmetod                                                                           |
+| ---------- | ------------------------------------------------------------------------------ |
+| TypeScript | Skicka `signal: abortController.signal` i `create()`-anropet, anropa `abortController.abort()` |
+| Python     | `break` för att avsluta `for`-loopen, SDK stänger HTTPx-strömmen i `__exit__`                                |
+| Go         | Använd `cancel()` på `ctx` som skickades vid `NewClient`, `chunks`-kanalen stängs omedelbart                    |
+
+Tidigare avbrutna token som redan har debiterats — token som genererades före avbrott kommer fortfarande att debiteras enligt faktisk förbrukning.
+
+## Tre, tidsgränser och omförsök
+
+De tre SDK:erna delar samma uppsättning omförsöksstrategier:
+
+| Utlösande villkor                       | Beteende                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| HTTP 408 / 409 / 429 / 5xx | Standard omförsök 2 gånger, exponentiell backoff 1s → 2s → 4s                                                      |
+| Nätverksfel (DNS, anslutning nekad, TLS-fel)     | Samma som ovan                                                                              |
+| 401 / 403 / 404 / 422      | Ingen omförsök, kasta direkt motsvarande typ av fel                                                                  |
+| Strömmande (`stream=True`) begäran        | **Ingen omförsök** — första ramen har redan strömmats ut                                                            |
+| Uppenbar `timeout` utlösning            | Kasta `APITimeoutError` (Python) / `TimeoutError` (TS) / `context.DeadlineExceeded` (Go) |
+
+För att inaktivera omförsök: skicka `max_retries=0` / `maxRetries: 0` / `WithMaxRetries(0)` när du konstruerar klienten.
+
+Polling av asynkrona uppgifter (TaskHandle) påverkas inte av `max_retries` — dess loop är affärsnivå snarare än HTTP-nivå, kontrolleras av `max_wait` för total längd.
+
+## Fyra, vanliga fallgropar
+
+1. **Synkron provider ska inte skicka `wait`**: NanoBanana / Flux / Seedream genererar synkront, att tvinga `wait=True` får SDK att pollera en `tasks`-gränssnitt som inte kommer att uppdateras.
+2. **Skillnader i enhet för TaskHandle**: Python är sekunder, TS är millisekunder, se till att konvertera vid överföring mellan språk.
+3. **`wait=True` kan fortfarande ge `TimeoutError`**: Svar måste uppfylla `status in ('succeeded','failed')` för att avsluta loopen; om provider använder andra fältnamn, måste affärskoden själv `handle.get()` analysera.
+4. **Strömmande avbrytande**: Token som genererades före avbrott har redan debiterats.
+5. **Återanvänd klient inom samma process**: SDK har en inbyggd anslutningspool, frekvent `new AceDataCloud()` / `AceDataCloud()` kan göra TLS-handshake till en flaskhals.
+
+## Lär dig mer
+
+- 📘 [TypeScript SDK integrationsguide](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Python SDK integrationsguide](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Go SDK integrationsguide](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 betalningshook](https://platform.acedata.cloud/documents/sdk-x402-payment)
+- 📦 [SDK monorepo källkod](https://github.com/AceDataCloud/SDK)

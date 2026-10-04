@@ -1,0 +1,225 @@
+---
+title: "Resumen del SDK de Ace Data Cloud"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud ofrece SDK oficiales en tres lenguajes: TypeScript / Python / Go, que encapsulan capacidades como chat completions, imágenes, video, música, búsqueda, x402, etc., en métodos de tipo fuerte, eliminando la necesidad de manejar manualmente HTTP, SSE, sondeos de tareas, manejo de errores y retrocesos de reintentos.
+
+Este capítulo está organizado en el orden de acceso real: primero obtén el API Token en la consola, luego selecciona el lenguaje y consulta el capítulo correspondiente, y finalmente revisa el sondeo de tareas, respuestas en streaming y el uso avanzado de pagos en la cadena X402.
+
+## Repositorio y paquetes
+
+- Código fuente del SDK (monorepo): [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- TypeScript: [`@acedatacloud/sdk`](https://www.npmjs.com/package/@acedatacloud/sdk)
+- Python: [`acedatacloud`](https://pypi.org/project/acedatacloud/)
+- Go: [`github.com/AceDataCloud/SDK/go`](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+- Cliente X402 (TypeScript): [`@acedatacloud/x402-client`](https://www.npmjs.com/package/@acedatacloud/x402-client)
+- Cliente X402 (Python): [`acedatacloud-x402`](https://pypi.org/project/acedatacloud-x402/)
+
+## Matriz de capacidades en tres lenguajes
+
+| Capacidad                                                       | TypeScript  | Python                  | Go                    |
+| ------------------------------------------------------------ | ----------- | ----------------------- | --------------------- |
+| `chat.completions.create` (no streaming)                      | ✅           | ✅                       | ✅                     |
+| `chat.completions.create` (streaming SSE)                     | ✅           | ✅                       | ✅                     |
+| `images.generate` (Midjourney / Flux / NanoBanana / Seedream) | ✅           | ✅                       | 🚧 (alpha)             |
+| `videos.generate` (Sora / Veo / Luma / Kling / Hailuo / Wan)  | ✅           | ✅                       | 🚧 (alpha)             |
+| `audios.generate` (Suno / Producer / Fish)                    | ✅           | ✅                       | 🚧 (alpha)             |
+| `search.google` (Serp)                                        | ✅           | ✅                       | 🚧 (alpha)             |
+| Sondeo asíncrono de TaskHandle                                  | ✅ (milisegundos) | ✅ (segundos)            | 🚧                     |
+| Cliente asíncrono                                              | ✅ (Promise) | ✅ (`AsyncAceDataCloud`) | ✅ (`context.Context`) |
+| Reintentos automáticos + retroceso exponencial                  | ✅           | ✅                       | ✅                     |
+| Excepciones tipadas (`AuthenticationError` / `RateLimitError` …) | ✅           | ✅                       | ✅                     |
+| Gancho `paymentHandler` de X402 (pago en la cadena sin token)  | ✅           | ✅                       | ❌ (planificado)       |
+
+> Los recursos multimedia y el sondeo de tareas del SDK de Go están actualmente en fase alpha (versión falsa `v0.0.0-20260505072132-4a3d921f9bb4`), la capacidad estable es `chat.completions`. Para escenarios multimedia, se recomienda elegir TypeScript o Python.
+
+## Cuándo usar SDK / MCP / HTTP nativo / X402
+
+| Escenario                                      | Método recomendado                                                       |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| Servicios backend, CLI, scripts de automatización, marco de agentes | **SDK** (este capítulo)                                                |
+| Llamadas de clientes MCP como Claude Desktop / Cursor / Cline | Servidores MCP                                                        |
+| Verificación única con curl, depuración, entornos embebidos que solo soportan HTTP | HTTP nativo (inicio rápido de cada servicio)                          |
+| No desea crear un API Token, pagar USDC en la cadena | [Guía de integración X402](https://platform.acedata.cloud/documents/x402-integration) |
+
+SDK y X402 no son mutuamente excluyentes: el SDK admite simultáneamente "ruta de token" y "ruta `paymentHandler`", ver [SDK + gancho de pago X402](https://platform.acedata.cloud/documents/sdk-x402-payment).
+
+## Solicitar API Token
+
+Para usar el SDK, primero ve a [Consola de Ace Data Cloud - Lista de aplicaciones](https://platform.acedata.cloud/console/applications) y solicita un API Token:
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Si aún no has iniciado sesión o registrado, serás redirigido automáticamente a la página de inicio de sesión que te invita a registrarte e iniciar sesión, después de iniciar sesión, serás redirigido automáticamente a la página actual.
+
+Al solicitar por primera vez, recibirás un crédito gratuito que te permitirá experimentar de forma gratuita con varios servicios de IA que ofrece Ace Data Cloud.
+
+Copia el Token que obtuviste, que a continuación se denominará `{token}`.
+
+## Variables de entorno unificadas
+
+Los SDK de los tres lenguajes leerán automáticamente la misma variable de entorno `ACEDATACLOUD_API_TOKEN`, se recomienda usar `export` en el shell para que el SDK la recoja automáticamente:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+# Opcional: por defecto https://api.acedata.cloud
+# export ACEDATACLOUD_BASE_URL=https://api.acedata.cloud
+```
+
+También puedes pasarla explícitamente al construir el cliente, los nombres de los parámetros correspondientes en los tres lenguajes son:
+
+- TypeScript: `new AceDataCloud({ apiToken: '{token}' })`
+- Python: `AceDataCloud(api_token="{token}")`
+- Go: `adc.NewClient(adc.WithAPIToken("{token}"))`
+
+> Nota: En el repositorio del proyecto AceDataCloud, se ha convenido en usar `ACEDATACLOUD_API_KEY` (en `.env` / CI), pero estos tres SDK solo reconocen `ACEDATACLOUD_API_TOKEN`. Si en tu entorno solo tienes `ACEDATACLOUD_API_KEY`, por favor, pásalo explícitamente al construir.
+
+## Ejemplos de 30 segundos
+
+Las siguientes tres secciones de código hacen lo mismo: llaman a `gpt-4o-mini` y le piden que responda solo con `ADC_*_OK`. Cada sección incluye **resultados de ejecución reales**, que puedes reproducir con tu propio token.
+
+### TypeScript
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud({ apiToken: process.env.ACEDATACLOUD_API_KEY });
+
+const t0 = Date.now();
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Reply with exactly: ADC_TS_SDK_OK' }],
+  max_tokens: 20,
+  temperature: 0
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('id', res.id);
+console.log('model', res.model);
+console.log('content', res.choices[0].message.content);
+console.log('usage', JSON.stringify(res.usage));
+```
+
+> El SDK actualmente declara la respuesta como `Record<string, unknown>`, en tiempo de ejecución es un objeto JSON normal, que se puede acceder directamente por campo. En proyectos estrictos de TS, si encuentras errores de tipo, puedes usar temporalmente `as any`, o consultar [Sondeo de tareas y respuestas en streaming del SDK](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming) para crear un envoltorio tipado personalizado.
+
+Resultados de la ejecución del programa:
+
+```text
+elapsed_ms 2543
+id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA
+model gpt-4o-mini
+content ADC_TS_SDK_OK
+usage {"prompt_tokens":16,"completion_tokens":6,"total_tokens":22}
+```
+
+### Python
+```python
+import os, time, json
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Responde exactamente: ADC_PY_SDK_OK"}],
+    max_tokens=20,
+    temperature=0,
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("id", res["id"])
+print("model", res["model"])
+print("content", res["choices"][0]["message"]["content"])
+print("usage", json.dumps({k: v for k, v in res["usage"].items()
+                            if k in ("prompt_tokens","completion_tokens","total_tokens")}))
+```
+
+> El SDK de Python actualmente devuelve un `dict`, por lo que se usa `res["id"]` en lugar de `res.id`. Esto es diferente de `openai-python`, así que hay que tener cuidado al migrar.
+
+Resultado de la ejecución del programa:
+
+```text
+elapsed_ms 2963
+id chatcmpl-DldFdnIlhSUXINpupgsUmZL78MnBu
+model gpt-4o-mini
+content ADC_PY_SDK_OK
+usage {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+```
+
+### Go
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_KEY")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    res, err := client.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Responde exactamente: ADC_GO_SDK_OK"}},
+        MaxTokens: 20,
+    })
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("id", res["id"])
+    fmt.Println("model", res["model"])
+    choices := res["choices"].([]any)
+    msg := choices[0].(map[string]any)["message"].(map[string]any)
+    fmt.Println("content", msg["content"])
+    usage := res["usage"].(map[string]any)
+    fmt.Printf("usage prompt=%v completion=%v total=%v\n",
+        usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
+}
+```
+
+> La respuesta del SDK de Go es unificada como `map[string]any`, no hay estructuras de tipo fuerte, se necesita hacer afirmaciones de tipo. Todos los accesores de recursos son cadenas de métodos: `client.OpenAI().Chat().Completions().Create(...)`.
+
+Resultado de la ejecución del programa:
+
+```text
+elapsed_ms 6436
+id chatcmpl-89DHExvFvBc4ciIPfolZYUOy7ivxv
+model gpt-4o-mini
+content ADC_GO_SDK_OK
+usage prompt=16 completion=5 total=21
+```
+
+En las respuestas de los tres lenguajes, `id`, `elapsed_ms`, y `usage` provienen de manera consistente: autenticación a través de PlatformGateway → API compatible con OpenAI → registro de facturación. El campo `content` es la salida real del modelo, usar la identificación fija `ADC_*_OK` es para demostrar que la respuesta no ha sido alterada por el SDK.
+
+## Orden de lectura recomendado
+
+1. [Tutorial de integración del SDK de TypeScript](https://platform.acedata.cloud/documents/sdk-typescript) —— Código que se puede ejecutar después de `npm install`.
+2. [Tutorial de integración del SDK de Python](https://platform.acedata.cloud/documents/sdk-python) —— Tres métodos: sincrónico, asincrónico y en flujo.
+3. [Tutorial de integración del SDK de Go](https://platform.acedata.cloud/documents/sdk-go) —— Estilo de Go con `context.Context` y flujo de canales.
+4. [Polling de tareas del SDK y respuestas en flujo](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming) —— Diferencias en unidades de TaskHandle, detalles de implementación de SSE, retroceso en reintentos.
+5. [SDK + ganchos de pago X402](https://platform.acedata.cloud/documents/sdk-x402-payment) —— Sin token, liquidación en cadena según la llamada.
+
+## Cómo ver el saldo restante
+
+A través de [Consola de Ace Data Cloud - Lista de aplicaciones](https://platform.acedata.cloud/console/applications), se puede ver el saldo restante de la cuenta actual.
+
+A través de [Consola de Ace Data Cloud - Historial de uso](https://platform.acedata.cloud/console/usages) se puede ver todo el historial de uso y detalles de facturación.
+
+## Más información
+
+- 📦 [Código fuente del SDK monorepo](https://github.com/AceDataCloud/SDK)
+- 🔌 [Guía de integración X402](https://platform.acedata.cloud/documents/x402-integration)
+- 🛠 Tutoriales de servidores MCP
+- 📊 [Lista de servicios y precios](https://platform.acedata.cloud/services)

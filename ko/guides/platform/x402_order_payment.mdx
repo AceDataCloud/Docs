@@ -1,0 +1,233 @@
+---
+title: "X402 주문 결제 튜토리얼"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+API 요청에 직접 비용을 지불하는 것 외에, Ace Data Cloud는 X402로 콘솔 주문을 결제하는 것도 지원합니다. 주문 결제와 API 호출의 핵심 프로토콜은 동일합니다: 첫 번째 요청은 402를 반환하고, 클라이언트는 `PAYMENT-SIGNATURE`를 서명한 후 동일한 요청으로 재시도합니다.
+
+차이점은 주문 결제는 계정 토큰이 필요한 플랫폼 API에 속한다는 점입니다; 반면 `x402.acedata.cloud`의 AI API를 직접 호출하는 경우 X402만 사용할 수 있으며 API Token은 필요하지 않습니다.
+
+## 주문 준비
+
+[Ace Data Cloud 콘솔](https://platform.acedata.cloud/console/orders)에 들어가 결제할 주문을 선택하고, 주문 ID를 기록합니다.
+
+아직 주문이 없다면, 요금제 페이지에서 결제 대기 주문을 생성할 수 있습니다. 주문 가격은 페이지에 표시된 내용을 기준으로 하며, X402 402 응답의 `amount`는 최종 서명 기준입니다.
+
+## 계정 토큰 생성
+
+주문 결제 요청에는 계정 토큰이 필요합니다. [플랫폼 Token 페이지](https://platform.acedata.cloud/console/platform-tokens)를 열고, `platform-v1-...` 형식의 token을 생성합니다.
+
+이후 요청에서는 다음을 사용합니다:
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+계정 토큰은 일반 API Token과 다릅니다. 일반 API Token은 API 크레딧을 소비하는 데 사용됩니다; 계정 토큰은 주문 결제와 같은 플랫폼 리소스를 계정을 대표하여 작업하는 데 사용됩니다.
+
+## 402 트리거
+
+먼저 `PAYMENT-SIGNATURE` 없이 한 번 요청을 보냅니다:
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+상태 402가 반환되며, 응답에는 `accepts`가 포함됩니다:
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+주문 결제는 공식 x402 v2를 사용합니다: `x402Version`은 `2`이고, `network`는 CAIP-2 식별자를 사용하며, 금액 필드는 `amount`입니다.
+
+10 Credits 주문을 생성하고 402를 트리거한 프로그램 실행 결과:
+
+> 다음 거래 기록은 이전 정책에 따른 과거 실측 샘플이며, 금액과 거래 해시는 원본 그대로 유지됩니다. 새 X402 주문에는 더 이상 결제 방식 할인이 적용되지 않습니다; 이번 402 응답의 `amount`를 서명 및 결제 기준으로 삼으십시오.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+결과 설명:
+
+- 주문 생성에 성공한 후 상태는 `Pending`이며, 이때 아직 온체인 결제는 없습니다.
+- 첫 번째 `pay/` 요청은 `PAYMENT-SIGNATURE`를 포함하지 않았으므로 HTTP 402를 반환합니다.
+- `accepts`는 Base `exact`와 Solana `exact`를 동시에 제공하며, 이 튜토리얼에서는 이후 Base를 선택합니다.
+- 주문 생성 시 가격은 `1.26`이었으며, 이전 X402 결제 할인 정책 기간에 결제되어 실제 서명 및 정산 금액은 `1.2` USDC이고, `1200000` atomic USDC에 해당합니다.
+
+여기서 `resource`는 서버가 반환하고 서명에 참여하는 필드이므로, 클라이언트는 그 안의 프로토콜, 경로 또는 주문 ID를 직접 수정해서는 안 됩니다.
+
+## 서명 후 재시도
+
+주문 결제는 `@acedatacloud/x402-client` 또는 `acedatacloud-x402`의 저수준 서명 함수를 재사용할 수 있습니다. 아래는 TypeScript 예시입니다:
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+동일한 주문을 Base `exact`로 서명하고 재시도한 후의 프로그램 실행 결과:
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+온체인 확인 결과:
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+결과 설명:
+
+- `status 200`은 플랫폼 주문 결제 인터페이스가 이번 `PAYMENT-SIGNATURE`를 수락했음을 나타냅니다.
+- `has_x_payment_response True`는 응답 헤더에 Base64로 인코딩된 `PAYMENT-RESPONSE` 영수증이 포함되어 있음을 나타냅니다.
+- `settle_header.success=True` 및 `network=base`는 Facilitator가 Base settlement를 완료했음을 나타냅니다.
+- 주문의 최종 상태는 `Finished`이고, `pay_way`는 `X402`이며, `pay_id`에는 온체인 트랜잭션 해시가 기록됩니다.
+- BaseScan의 `Transfer` 이벤트는 결제 주소가 플랫폼 수금 주소로 `1200000` atomic USDC, 즉 `1.2` USDC를 전송했음을 보여 줍니다.
+
+## 성공 응답 및 영수증
+
+주문 결제가 성공한 후 응답 본문은 주문 정보입니다. 플랫폼은 또한 응답 헤더 `PAYMENT-RESPONSE`에 Base64로 인코딩된 settlement response를 포함하며, 디코딩 후 일반적인 필드는 다음과 같습니다:
+
+| 필드            | 설명                           |
+| ------------- | ---------------------------- |
+| `success`     | Facilitator settlement 성공 여부. |
+| `transaction` | 온체인 결제 트랜잭션 해시.                    |
+| `network`     | 결제 네트워크.                        |
+| `payer`       | 결제 지갑 주소.                      |
+| `amount`      | 실제 결제 금액으로, atomic units를 사용합니다.      |
+
+대사가 필요한 경우 주문 ID, 결제 지갑 주소, `transaction` 및 주문 최종 상태를 함께 저장하는 것이 좋습니다.
+
+## 주의 사항
+
+- 주문 결제에는 플랫폼 계정 토큰이 필요하며, X402 지갑 서명만으로 완료할 수 없습니다.
+- `amount`는 USDC atomic units를 사용하며, `1200000`은 `1.2` USDC를 나타냅니다.
+- 수금 주소나 자산 주소를 직접 조합하지 말고, 402 응답의 `accepts`를 기준으로 하세요.
+- 동일한 `PAYMENT-SIGNATURE`가 반복 제출되면 Facilitator는 nonce를 기준으로 재생 공격 보호를 수행합니다.
+
+## 결제 실패 응답
+
+`PAYMENT-SIGNATURE`를 포함하지 않은 첫 번째 HTTP 402는 정상적인 결제 챌린지이며, 결제 실패를 의미하지 않습니다. 서명 후 검증 또는 settlement 실패 시에도 호환성 폴백으로 표준 문자열 `error`가 유지되며, 안정적인 오류 구조는 `extensions.acedatacloud.paymentError`에서 반환됩니다:
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+클라이언트는 우선 `code`에 따라 현지화해야 하며, 알 수 없는 code는 일반적인 결제 실패로 폴백합니다. `charged`는 3상태 필드입니다. 결제 전에 명확히 거부된 경우에만 `false`가 반환됩니다. 필드가 없으면 청구 상태를 알 수 없음을 의미하며, “청구되지 않음”으로 해석해서는 안 됩니다. 현재 주문이 `Failed`에 진입한 후에는 원래 주문으로 재시도할 수 없으므로, 지갑 문제를 수정한 후 새 주문을 생성하세요.
+
+전체 `PAYMENT-SIGNATURE`, 지갑 서명, 권한 부여 payload, Facilitator 원본 진단 또는 RPC 응답을 기록하거나 제출하지 마세요. 고객 서비스 조사에는 주문 ID와 공개 오류 `code`만 필요합니다.

@@ -1,0 +1,132 @@
+---
+title: "AceDataCloud 플랫폼 CDN에 파일 업로드"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+로컬 파일을 AceDataCloud 플랫폼 CDN에 업로드하여 공개적으로 접근 가능한 URL(`https://cdn.acedata.cloud/xxxxxx.png` 형식)을 얻고, 다른 비즈니스 API(예: Midjourney, Suno, Flux)의 `image_url`, `reference_url` 등의 파라미터에서 즉시 참조할 수 있습니다.
+
+적용 시나리오:
+
+- Midjourney `/midjourney/imagine`를 호출하기 전에 먼저 참조 이미지를 CDN에 업로드하여 URL을 가져옵니다.
+- 이전 단계에서 생성된 비디오를 캐시하여 다음 단계의 입력으로 사용합니다.
+- 사용자가 업로드한 소스를 임시 호스팅하여 자체 S3 구축을 피합니다.
+
+> ℹ️ 이 API는 **AceDataCloud 플랫폼 관리 API**에 속하며, 통합 접두사는 `https://platform.acedata.cloud/api/v1/`입니다.
+
+## API 개요
+
+| 항목            | 내용                                             |
+| ------------ | ---------------------------------------------- |
+| 메서드           | `POST`                                         |
+| URL          | `https://platform.acedata.cloud/api/v1/files/` |
+| 인증           | ✅ 계정 토큰 필요                                       |
+| Content-Type | `multipart/form-data`（**JSON이 아님**）             |
+
+## 인증 설명（계정 토큰을 얻는 방법）
+
+요청 헤더:
+
+```http
+Authorization: Bearer ${PLATFORM_TOKEN}
+```
+
+획득 방법: [AceDataCloud 플랫폼](https://platform.acedata.cloud)에 로그인 → [Account Token 콘솔](https://platform.acedata.cloud/console/platform-tokens) → 「생성」 버튼 클릭. 자세한 내용은 [AceDataCloud 플랫폼 계정 토큰 관리](https://platform.acedata.cloud/documents/platform-token)를 참조하세요.
+
+## 요청 본문（multipart/form-data）
+
+| 필드     | 유형   | 필수  | 설명                        |
+| ------ | ---- | --- | ------------------------- |
+| `file` | file | ✅   | 바이너리 파일 스트림. **단일 파일 기본 최대 크기 100 MB** |
+
+## 요청 예시
+
+### cURL
+
+```shell
+curl -X POST 'https://platform.acedata.cloud/api/v1/files/' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}" \
+  -F 'file=@./photo.jpg'
+```
+
+### Python
+
+```python
+import os
+import requests
+
+PLATFORM_TOKEN = os.environ["PLATFORM_TOKEN"]
+
+with open("photo.jpg", "rb") as f:
+    resp = requests.post(
+        "https://platform.acedata.cloud/api/v1/files/",
+        headers={
+            "accept": "application/json",
+            "authorization": f"Bearer {PLATFORM_TOKEN}",
+        },
+        files={"file": ("photo.jpg", f, "image/jpeg")},
+        timeout=60,
+    )
+
+data = resp.json()
+print(f"✅ 업로드 성공: {data['file_url']}")
+# 다른 비즈니스 API에 직접 사용:
+# requests.post("https://api.acedata.cloud/midjourney/imagine",
+#     json={"prompt": "...", "image_urls": [data["file_url"]]}, ...)
+```
+
+### Node.js
+
+```javascript
+const fs = require('fs')
+const FormData = require('form-data')
+
+const form = new FormData()
+form.append('file', fs.createReadStream('./photo.jpg'))
+
+const r = await fetch('https://platform.acedata.cloud/api/v1/files/', {
+  method: 'POST',
+  headers: {
+    authorization: `Bearer ${process.env.PLATFORM_TOKEN}`,
+    ...form.getHeaders(),
+  },
+  body: form,
+})
+const data = await r.json()
+console.log('CDN URL:', data.file_url)
+```
+
+## 응답 예시（HTTP 200）
+
+```json
+{
+  "file_url": "https://cdn.acedata.cloud/qrd7gw.jpg"
+}
+```
+
+`file_url` 필드를 다른 비즈니스 API에 그대로 사용하면 됩니다——현재 CDN URL은 공개적으로 접근할 수 있으며 인증이 필요하지 않습니다. 이를 영구 보관 약속으로 간주하지 마세요.
+
+## 응답 필드 설명
+
+| 필드         | 유형     | 설명         |
+| ---------- | ------ | ---------- |
+| `file_url` | string | CDN 접근 URL |
+
+## 오류 처리
+
+| HTTP | 응답 예시                                         | 의미                 |
+| ---- | -------------------------------------------- | ------------------ |
+| 400  | `{"error":"No file provided"}`               | `file` 필드가 없거나 필드명이 잘못됨 |
+| 401  | DRF 인증 오류 응답                                   | 계정 토큰이 없거나 유효하지 않음       |
+| 413  | `{"error":"File too large","max_bytes":...}` | 파일이 100 MB(기본값)를 초과함    |
+
+## 유용한 팁
+
+- **참조 이미지 업로드**: Midjourney `image_urls`, Flux `image_url`, Veo `reference_url`은 모두 CDN URL을 허용하며, base64는 허용하지 **않습니다**. 먼저 이 API로 URL을 얻는 것이 일반적인 작업입니다.
+- **민감한 데이터를 업로드하지 마세요**: 반환된 URL은 공개적으로 접근할 수 있습니다. 보관 기간은 플랫폼의 현재 저장 정책을 따르며, 장기 보관에는 자체 객체 스토리지를 사용하세요.
+- **대량 업로드**: 동시성을 제어하고 각 업로드에 대해 타임아웃을 설정하세요. 처리량은 파일 크기와 네트워크 환경에 따라 달라집니다.
+
+## 관련 API
+
+- [AceDataCloud 플랫폼 서비스 목록 가져오기](https://platform.acedata.cloud/documents/platform-service-list) — URL 입력을 받는 비즈니스 서비스를 찾습니다
+- [AceDataCloud 플랫폼 API 자격 증명 생성](https://platform.acedata.cloud/documents/platform-credential-create) — 업로드 후 일반적으로 다음 단계는 자격 증명을 생성하여 비즈니스 API를 호출하는 것입니다

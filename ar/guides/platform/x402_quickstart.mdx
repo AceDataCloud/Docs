@@ -1,0 +1,252 @@
+---
+title: "X402 بدء سريع"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+هذا الدليل يوضح العملية الكاملة لـ Ace Data Cloud X402 من خلال طلب API بسيط. الهدف ليس كتابة كود معقد أولاً، بل فهم: لماذا سيعيد الطلب الأول 402، وما هو موجود في `accepts`، وكيف تجعل `PAYMENT-SIGNATURE` نفس طلب API يتحول إلى طلب مدفوع.
+
+## التحضيرات
+
+تحتاج إلى تحضير:
+
+| المشروع   | الوصف                                                      |
+| ---- | ------------------------------------------------------- |
+| المحفظة   | محفظة تدعم الشبكة المستهدفة. تستخدم Base / SKALE محفظة EVM، بينما تستخدم Solana محفظة Solana. |
+| USDC | يجب أن تحتوي المحفظة على ما يكفي من USDC. المبلغ الفعلي يعتمد على `maxAmountRequired` في استجابة 402.    |
+| بيئة التطوير | TypeScript يوصى بـ Node.js 18+؛ Python يوصى بـ Python 3.10+.       |
+| SDK  | يوصى باستخدام SDK الرسمي، ولا يُنصح بكتابة تفاصيل التوقيع يدويًا.                                   |
+
+لا تحتاج X402 لاستدعاء Ace Data Cloud API إلى رمز API. الطلب الأول من SDK لا يحمل `Authorization`، وستعيد البوابة `402 Payment Required` ومتطلبات الدفع؛ بعد التوقيع، سيعيد SDK المحاولة تلقائيًا.
+
+## تثبيت SDK
+
+عنوان المصدر والحزمة:
+
+- مستودع SDK: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- مستودع X402 Client: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm: `@acedatacloud/sdk`، `@acedatacloud/x402-client`
+- PyPI: `acedatacloud`، `acedatacloud-x402`
+
+TypeScript:
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client ethers
+```
+
+Python:
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+إذا كنت ترغب في استخدام Solana، ستحتاج أيضًا إلى تثبيت الاعتماديات المناسبة:
+
+```bash
+npm install @solana/web3.js
+```
+
+اعتماديات Solana في إصدار Python تم تضمينها بالفعل في `acedatacloud-x402`.
+
+تثبيت وفحص الإخراج في بيئة نظيفة مؤقتة:
+
+```text
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+
+acedatacloud 2026.4.26.1
+acedatacloud-x402 2026.5.31.3
+imports_ok True True True True True True
+usage: acedatacloud-x402 [-h] {approve-permit2} ...
+```
+
+تفسير النتائج:
+
+- حزم npm وحزم PyPI هي حزم منشورة حقيقية، وليست أسماء موضوعة في الوثائق.
+- `acedatacloud-x402[cli]` ستقوم بتثبيت CLI، ويمكن استخدام الأمر الفرعي `approve-permit2` لمشاهدات `upto` لتفويض Permit2.
+
+## الطلب الأول سيعيد 402
+
+يمكنك أولاً استخدام `curl` لرؤية ما تعيده الطلبات غير المدفوعة. المثال أدناه لن ينتج عنه خصم، لأنه لا يحمل `PAYMENT-SIGNATURE`:
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/openai/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 1
+  }'
+```
+
+سيحتوي جسم الاستجابة على مصفوفة `accepts`، الهيكل الشائع كما يلي:
+
+```json
+{
+  "x402Version": 2,
+  "resource": {
+    "url": "/openai/chat/completions",
+    "description": "AceDataCloud API call",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "maxAmountRequired": "95215",
+      "amount": "95215",
+      "maxTimeoutSeconds": 3600,
+      "resource": "/openai/chat/completions",
+      "description": "...",
+      "payTo": "0x...",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      }
+    }
+  ],
+  "error": "PAYMENT-SIGNATURE header is required"
+}
+```
+
+سيتم أيضًا وضع نفس محتوى التحدي في شكل base64 في رأس الاستجابة `PAYMENT-REQUIRED`، مما يسهل على العميل قراءة متطلبات الدفع دون تحليل الجسم.
+
+ملخص الإخراج لطلب API غير المدفوع في الإنتاج كما يلي:
+
+```text
+status=402
+x402Version 2
+accepts [
+  ('eip155:8453', 'exact', '95215'),
+  ('eip155:8453', 'upto', '95215'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '95215'),
+  ('eip155:1187947933', 'exact', '95215')
+]
+```
+
+تفسير النتائج:
+
+- الطلب الأول لم يحمل `Authorization` أو `PAYMENT-SIGNATURE`، لذا أعاد HTTP 402، ولن ينتج عنه خصم.
+- `accepts` هو المصدر الوحيد الموثوق للتوقيع في هذا الطلب، ويحتوي على الشبكات الاختيارية، المخطط، الحد الأقصى للمبلغ، عنوان الدفع وعنوان الأصول.
+- `network` هو تعريف CAIP-2، ويجب على العميل مطابقة الشبكة وفقًا لسلسلة CAIP-2.
+- الحد الأقصى لمبلغ طلب الدردشة الأدنى لـ `gpt-4o-mini` هو `95215` وحدة USDC الذرية، أي ما يعادل `0.095215` USDC.
+- يجب قراءة استجابة 402 في كل طلب، ولا يجب ترميز المبلغ النموذجي في كود العمل.
+
+معاني الحقول:
+
+| الحقل                  | الوصف                                                                       |
+| ------------------- | ------------------------------------------------------------------------ |
+| `scheme`            | خطة الدفع. `exact` تعني مبلغ ثابت، `upto` تعني حد التفويض، يتم التسوية حسب الاستخدام الفعلي.                               |
+| `network`           | تعريف CAIP-2 لشبكة الدفع، مثل `eip155:8453`، `eip155:1187947933`، `solana:5eykt4...`。 |
+| `maxAmountRequired` | الحد الأقصى لمبلغ الدفع، الوحدة هي وحدات USDC الذرية، `95215` تعني `0.095215` USDC.                 |
+| `amount`            | المبلغ الذي سيتم تسويته في هذه المرة؛ `exact` يساوي `maxAmountRequired`، و`upto` يتم تعديله حسب الاستخدام الفعلي في مرحلة التسوية.           |
+| `payTo`             | عنوان الدفع.                                                                    |
+| `asset`             | عنوان عقد USDC أو عنوان mint لـ Solana.                                               |
+| `extra`             | معلومات إضافية مثل ID السلسلة، مجال EIP-712، عنوان Permit2 وغيرها.                                |
+
+## إكمال الدفع وإعادة المحاولة باستخدام SDK
+
+إليك مثال TypeScript الأدنى. يحدد `network: 'skale'`، وسيختار المعالج متطلبات الدفع لـ SKALE من استجابة 402 هذه؛ المبلغ الفعلي وعنوان الدفع لا يزالان يعتمدون على `accepts`.
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.SKALE_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`طريقة غير مدعومة: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'skale',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const response = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'رد بدقة: مرحبا' }],
+  max_tokens: 8
+});
+
+console.log(response.choices[0].message.content);
+```
+
+نتيجة تشغيل البرنامج باستخدام SDK من نفس السلسلة:
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+تفسير النتيجة:
+
+- `content ADC_TS_SDK_X402_OK` هو سلسلة ثابتة تعود بها النموذج وفقًا للكلمات الدلالية، مما يدل على أن الدفع قد تم إعادة المحاولة بعد أن دخل الطلب فعليًا إلى واجهة برمجة التطبيقات للنموذج.
+- `payer` هو عنوان محفظة التوقيع المحلية، لم يتم إرسال المفتاح الخاص إلى Ace Data Cloud.
+- أكمل SDK تحليل 402، وتوقيع `PAYMENT-SIGNATURE` وإعادة محاولة الطلب الأصلي؛ لا تزال الشيفرة التجارية مكتوبة بطريقة استدعاء SDK العادية.
+
+حدثت أربع خطوات وراء هذا الكود:
+
+1. أرسل SDK طلب API عادي مرة واحدة، دون `Authorization`.
+2. أعاد Gateway `402 Payment Required` و `accepts`.
+3. اختار `createX402PaymentHandler` متطلبات الدفع لـ `network = 'skale'` ووقع `PAYMENT-SIGNATURE`.
+4. أعاد SDK محاولة بنفس جسم الطلب، بعد أن تحقق Gateway من Facilitator وأجرى التسوية، تم السماح بالوصول إلى واجهة برمجة التطبيقات المستهدفة.
+
+## عرض قدرات Facilitator
+
+لا تعتمد واجهة برمجة التطبيقات X402 على دليل الموارد. يستدعي العميل واجهات برمجة التطبيقات المعروفة مباشرة، ويستخدم `402 Payment Required` و `accepts` التي تم إرجاعها في الوقت الفعلي كمرجع وحيد للسعر والتوقيع.
+
+تقع بيانات قدرة Facilitator في:
+
+```bash
+curl https://facilitator.acedata.cloud/.well-known/x402
+```
+
+تصف فقط `/supported`، `/verify`، `/settle` والشبكات المدفوعة الحالية، ولا تسرد موارد واجهة برمجة التطبيقات.
+
+عنوان Facilitator الإنتاجي لـ Ace Data Cloud هو:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+يمكنك عرض الشبكات والمخططات التي يدعمها:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+ستدرج `kinds` المدعومة من قبل Facilitator الشبكات والمخططات. لا يزال يتم الاعتماد على `accepts` التي تعيدها واجهة برمجة التطبيقات عند الاستدعاء الفعلي.
+
+مخرجات Facilitator `/supported`:
+
+```text
+kinds [
+  ('eip155:8453', 'exact'),
+  ('eip155:8453', 'upto', {'facilitatorAddress': '0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708'}),
+  ('eip155:1187947933', 'exact'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact')
+]
+```
+
+تفسير النتيجة:
+
+- توضح `/supported` أن Facilitator يمتلك قدرات التحقق والتسوية لهذه الشبكات والمخططات.
+- تدعم Base وSKALE وSolana `exact`؛ بينما `upto` متاحة حاليًا فقط على Base.
+- لا يزال يتعين الاعتماد على واجهة برمجة التطبيقات الخاصة بـ 402 `accepts` لتحديد ما إذا كانت واجهة برمجة التطبيقات تسمح بشبكة معينة.

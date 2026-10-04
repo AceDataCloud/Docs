@@ -1,0 +1,132 @@
+---
+title: "رفع الملفات إلى شبكة CDN لمنصة AceDataCloud"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+ارفع الملفات المحلية إلى شبكة CDN لمنصة AceDataCloud للحصول على عنوان URL يمكن الوصول إليه علنًا (بنمط `https://cdn.acedata.cloud/xxxxxx.png`)، ويمكن استخدامه فورًا في معاملات مثل `image_url` و`reference_url` لواجهات أعمال أخرى (مثل Midjourney وSuno وFlux).
+
+سيناريوهات الاستخدام:
+
+- ارفع الصورة المرجعية إلى CDN أولًا للحصول على URL قبل استدعاء Midjourney `/midjourney/imagine`.
+- خزّن الفيديو المُنشأ في الخطوة السابقة لاستخدامه كمدخل للخطوة التالية.
+- استضف مواد المستخدمين المرفوعة مؤقتًا لتجنب إنشاء S3 خاص بك.
+
+> ℹ️ تنتمي هذه الواجهة إلى **واجهة إدارة منصة AceDataCloud API**، والبادئة الموحدة هي `https://platform.acedata.cloud/api/v1/`.
+
+## نظرة عامة على الواجهة
+
+| العنصر            | المحتوى                                             |
+| ------------ | ---------------------------------------------- |
+| الطريقة           | `POST`                                         |
+| URL          | `https://platform.acedata.cloud/api/v1/files/` |
+| المصادقة           | ✅ يتطلب رمز حساب                                       |
+| Content-Type | `multipart/form-data`（**ليس JSON**）             |
+
+## شرح المصادقة (كيفية الحصول على رمز الحساب)
+
+رأس الطلب:
+
+```http
+Authorization: Bearer ${PLATFORM_TOKEN}
+```
+
+طريقة الحصول: سجّل الدخول إلى [منصة AceDataCloud](https://platform.acedata.cloud) → [لوحة تحكم Account Token](https://platform.acedata.cloud/console/platform-tokens) → انقر زر «إنشاء». راجع [إدارة رموز حساب منصة AceDataCloud](https://platform.acedata.cloud/documents/platform-token) للتفاصيل.
+
+## جسم الطلب (`multipart/form-data`)
+
+| الحقل     | النوع   | مطلوب  | الوصف                        |
+| ------ | ---- | --- | ------------------------- |
+| `file` | file | ✅   | تدفق ملف ثنائي. **الحد الأقصى الافتراضي للملف الواحد هو 100 MB** |
+
+## أمثلة الطلبات
+
+### cURL
+
+```shell
+curl -X POST 'https://platform.acedata.cloud/api/v1/files/' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}" \
+  -F 'file=@./photo.jpg'
+```
+
+### Python
+
+```python
+import os
+import requests
+
+PLATFORM_TOKEN = os.environ["PLATFORM_TOKEN"]
+
+with open("photo.jpg", "rb") as f:
+    resp = requests.post(
+        "https://platform.acedata.cloud/api/v1/files/",
+        headers={
+            "accept": "application/json",
+            "authorization": f"Bearer {PLATFORM_TOKEN}",
+        },
+        files={"file": ("photo.jpg", f, "image/jpeg")},
+        timeout=60,
+    )
+
+data = resp.json()
+print(f"✅ 上传成功：{data['file_url']}")
+# 直接用于其他业务接口：
+# requests.post("https://api.acedata.cloud/midjourney/imagine",
+#     json={"prompt": "...", "image_urls": [data["file_url"]]}, ...)
+```
+
+### Node.js
+
+```javascript
+const fs = require('fs')
+const FormData = require('form-data')
+
+const form = new FormData()
+form.append('file', fs.createReadStream('./photo.jpg'))
+
+const r = await fetch('https://platform.acedata.cloud/api/v1/files/', {
+  method: 'POST',
+  headers: {
+    authorization: `Bearer ${process.env.PLATFORM_TOKEN}`,
+    ...form.getHeaders(),
+  },
+  body: form,
+})
+const data = await r.json()
+console.log('CDN URL:', data.file_url)
+```
+
+## مثال الاستجابة (HTTP 200)
+
+```json
+{
+  "file_url": "https://cdn.acedata.cloud/qrd7gw.jpg"
+}
+```
+
+ما عليك سوى استخدام حقل `file_url` مباشرةً في واجهات الأعمال الأخرى — عنوان URL الخاص بـ CDN متاح حاليًا للعامة ولا يتطلب مصادقة؛ لا تعتبره التزامًا بالأرشفة الدائمة.
+
+## شرح حقول الاستجابة
+
+| الحقل         | النوع     | الوصف         |
+| ---------- | ------ | ---------- |
+| `file_url` | string | عنوان URL للوصول إلى CDN |
+
+## معالجة الأخطاء
+
+| HTTP | مثال الاستجابة                                         | المعنى                 |
+| ---- | -------------------------------------------- | ------------------ |
+| 400  | `{"error":"No file provided"}`               | لم يتم إرفاق حقل `file` أو أن اسم الحقل غير صحيح |
+| 401  | استجابة خطأ مصادقة DRF                                   | رمز الحساب مفقود أو غير صالح       |
+| 413  | `{"error":"File too large","max_bytes":...}` | يتجاوز الملف 100 MB (افتراضيًا)    |
+
+## نصائح عملية
+
+- **رفع الصور كصور مرجعية**: تقبل `image_urls` في Midjourney و`image_url` في Flux و`reference_url` في Veo جميعها عنوان URL الخاص بـ CDN، و**لا** تقبل base64. الحصول على URL أولًا عبر هذه الواجهة هو الإجراء المعتاد.
+- **لا ترفع بيانات حساسة**: عنوان URL المُعاد يمكن الوصول إليه علنًا؛ تخضع مدة الحفظ لسياسة التخزين الحالية للمنصة، وللأرشفة طويلة الأمد يُرجى استخدام تخزين الكائنات الخاص بك.
+- **الرفع بكميات كبيرة**: تحكم في التزامن واضبط مهلة زمنية لكل عملية رفع؛ تعتمد الإنتاجية على حجم الملف وبيئة الشبكة.
+
+## الواجهات ذات الصلة
+
+- [الحصول على قائمة خدمات منصة AceDataCloud](https://platform.acedata.cloud/documents/platform-service-list) — العثور على خدمات الأعمال التي تقبل إدخال URL
+- [إنشاء بيانات اعتماد API لمنصة AceDataCloud](https://platform.acedata.cloud/documents/platform-credential-create) — بعد الرفع، تكون الخطوة التالية عادةً هي إنشاء بيانات اعتماد لاستدعاء واجهات الأعمال

@@ -1,0 +1,308 @@
+---
+title: "Validation et dépannage E2E X402"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+X402 implique HTTP, SDK, signatures, Facilitator et transactions on-chain. Lors du dépannage de problèmes de signature ou de règlement, il est recommandé de confirmer couche par couche dans l’ordre « entrée publique -> réponse 402 -> SDK payment handler -> settlement on-chain ». Ce tutoriel explique les méthodes de vérification pour chaque couche et répertorie les erreurs courantes.
+
+## Vérifier l’entrée publique
+
+Déclaration des capacités du Facilitator :
+
+```bash
+curl https://facilitator.acedata.cloud/.well-known/x402
+```
+
+Si `facilitator`, `supportedKinds` et les points de terminaison du protocole sont renvoyés, les métadonnées de capacité sont normales. La découverte des ressources API a été retirée ; appelez directement l’API cible et référez-vous à la réponse 402 en temps réel.
+
+Capacités prises en charge par le Facilitator :
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Si `kinds` est renvoyé, l’entrée du Facilitator fonctionne normalement.
+
+## Vérifier les `accepts` de 402
+
+Envoyez une requête non authentifiée qui ne sera pas facturée :
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/openai/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 1
+  }'
+```
+
+Vérifiez si les `accepts` renvoyés contiennent le réseau que vous souhaitez utiliser. `network` est un identifiant CAIP-2 :
+
+- `eip155:8453` + `exact` (Base)
+- `eip155:8453` + `upto` (Base, mesure postérieure)
+- `eip155:1187947933` + `exact` (SKALE)
+- `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` + `exact` (Solana)
+
+Si le réseau cible est absent, cela indique que cette API ou l’environnement actuel n’a pas configuré le mode d’encaissement X402 correspondant.
+
+## Exécuter les outils avancés de validation X402Client
+
+Le dépôt X402Client fournit des outils avancés de validation, qui peuvent être utilisés pour confirmer la sélection de réponse 402, la génération de signatures, le paid retry et le settlement on-chain. Ils nécessitent un portefeuille approvisionné, un RPC, une clé privée et des dépendances de développement. Pour une intégration métier normale, il est recommandé de privilégier le SDK TypeScript ou Python ; exécutez ces outils uniquement lorsqu’il est nécessaire de localiser des problèmes de signature ou de règlement on-chain.
+
+Adresse du dépôt : [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+
+```bash
+git clone https://github.com/AceDataCloud/X402Client.git
+cd X402Client/typescript
+npm install
+npm install --no-save ethers @solana/spl-token bs58 tsx
+```
+
+Base :
+
+```bash
+export X402B_BASE_PAYER_PRIVATE_KEY=0x...
+TEST_API_PATH='/openai/chat/completions' \
+TEST_BODY='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+npx tsx scripts/test-real-e2e.ts
+```
+
+SKALE :
+
+```bash
+export SKALE_BASE_PRIVATE_KEY=0x...
+TEST_API_PATH='/openai/chat/completions' \
+TEST_BODY='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+npx tsx scripts/test-skale-e2e.ts
+```
+
+Solana :
+
+```bash
+export X402B_SOLANA_PAYER_PRIVATE_KEY=...
+npx tsx scripts/test-solana-e2e.ts
+```
+
+Les outils de validation affichent généralement :
+
+1. La réponse 402 de la première requête.
+2. Le payment requirement sélectionné.
+3. Le résumé du `PAYMENT-SIGNATURE` après signature.
+4. Le statut HTTP et le corps de réponse après nouvelle tentative.
+5. La transaction de settlement on-chain, ou la cause de l’erreur Facilitator en cas d’échec.
+
+N’envoyez pas de clés privées ni de `PAYMENT-SIGNATURE` complets vers le système de logs ou dans les tickets.
+
+Exemple de résultats de validation de l’API publique :
+
+```text
+SKALE exact
+HTTP 402 -> HTTP 200
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+
+Base exact
+HTTP 402 -> HTTP 200
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+
+Solana exact
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run because public RPC lookup hit 429
+
+Base upto
+HTTP 402 -> HTTP 200
+content ADC_BASE_UPTO_OK
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+Explications :
+
+- `exact` de SKALE, `exact` de Base, `exact` de Solana et `upto` de Base ont tous effectué un paid retry de HTTP 402 à HTTP 200.
+- La transaction on-chain de `exact` sur SKALE peut être consultée dans le SKALE explorer, et le montant du règlement est de `0.095215` USDC.
+- La transaction on-chain de `exact` sur Base peut être consultée dans BaseScan, et le montant du règlement est de `95215` atomic USDC.
+- La limite de signature de `upto` sur Base est de `95215` atomic USDC, mais le settlement on-chain réel est de `3` atomic USDC, ce qui indique que la mesure postérieure facture selon l’utilisation réelle.
+- Le chemin Solana a confirmé le paid retry et la sortie du modèle. Le RPC public peut être soumis à une limitation de débit ; lorsqu’un rapprochement on-chain strict est nécessaire, utilisez votre propre RPC Solana ou les enregistrements de règlement côté plateforme pour confirmer la signature de transaction.
+
+## SDK smoke test
+
+Les outils avancés de validation servent à vérifier les signatures et le règlement on-chain. Côté métier, un SDK smoke test doit également être exécuté afin de confirmer que le code d’application peut gérer automatiquement 402 via le payment handler. Seuls les extraits principaux sont présentés ci-dessous ; le code complet doit compléter le portefeuille, le provider et les imports.
+
+TypeScript :
+
+```ts
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'skale',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Reply with exactly ADC_SDK_X402_OK' }],
+  max_tokens: 8
+});
+```
+
+Python :
+
+```python
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="skale",
+        evm_signer=signer,
+    )
+)
+
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly ADC_PY_X402_OK"}],
+    max_tokens=8,
+)
+```
+
+Si le modèle renvoie la chaîne fixe comme demandé, cela indique que le SDK, le payment handler, le Gateway, le Facilitator et l’API cible sont reliés.
+Les deux smoke tests ci-dessus utilisent SKALE `exact`. SKALE ne fournit actuellement que `exact`, qui est réglé sur le montant fixe coté par 402 et ne sera pas réduit en fonction de l'utilisation réelle de tokens. La complétion de chat est un scénario facturé au token ; lors de l'intégration en production, il est recommandé de passer à Base et de transmettre `preferScheme: 'upto'`, afin de régler selon l'utilisation réelle.
+
+Résultat d'exécution du programme de smoke test du SDK :
+
+```text
+TypeScript SDK
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+
+Python SDK
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 4786
+content ADC_PY_SDK_X402_OK
+id chatcmpl-DlcWajqAHOop3iebmO19XRfT5bTPz
+```
+
+Explication des résultats :
+
+- Le SDK TypeScript traite automatiquement 402, la signature et la nouvelle tentative via `createX402PaymentHandler`, et obtient finalement `ADC_TS_SDK_X402_OK`.
+- Le SDK Python réalise la même chaîne via `create_x402_payment_handler`, et obtient finalement `ADC_PY_SDK_X402_OK`.
+- Les deux smoke tests utilisent le payeur SKALE `0xd0479FA9FD8C678303d477433d24C15e3723CC1C`.
+- L'objet retourné par le SDK Python est un `dict` ; dans l'exemple, vous pouvez utiliser `res["choices"][0]["message"]["content"]` pour lire le contenu.
+
+## E2E de paiement de commande
+
+Le paiement de commande utilise l'API de plateforme de `platform.acedata.cloud` et nécessite un jeton de compte de plateforme. La chaîne complète est : créer une commande Pending, déclencher 402 avec `POST /api/v1/orders/{order_id}/pay/`, puis effectuer une nouvelle tentative avec `PAYMENT-SIGNATURE`.
+
+Exemple de résultat de vérification de paiement de commande de faible montant :
+
+> Les enregistrements de transaction suivants sont des échantillons historiques de tests réels sous l'ancienne politique ; les montants et les hachages de transaction sont conservés tels quels. Les nouvelles commandes X402 ne bénéficient plus de remises selon le mode de paiement ; utilisez le `amount` de la réponse 402 actuelle comme base pour la signature et le paiement.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+accepts [('eip155:8453', 'exact', '1200000'), ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000')]
+
+status 200
+order state Finished
+pay_way X402
+pay_id 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+
+Base tx status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Explication des résultats :
+
+- Après la création de la commande, son état est `Pending` et son prix est `1.26`.
+- La première requête `pay/` renvoie HTTP 402 ; `accepts` contient Base `exact` et Solana `exact`, avec un montant de `1200000` atomic USDC pour les deux.
+- Après une nouvelle tentative avec Base `PAYMENT-SIGNATURE`, HTTP 200 est renvoyé, l'état de la commande devient `Finished` et `pay_way` est `X402`.
+- Après décodage de `PAYMENT-RESPONSE`, il affiche `success=True`, `network=base` et fournit le même hachage de transaction.
+- Sur BaseScan, l'état de la transaction est `1`, et le montant du transfert est de `1200000` atomic USDC, soit `1.2` USDC.
+- Le prix de création de `1.26` a été payé pendant la période de l'ancienne politique de réduction pour les paiements X402 ; le montant final signé et réglé est de `1.2` USDC.
+
+Si le paiement de commande ne contient pas `Authorization: Bearer {platform_token}`, ou si la commande n'appartient pas au compte actuel, il échouera au niveau des autorisations de la plateforme ; cela diffère de l'API X402 sans compte appelée directement sur `x402.acedata.cloud`.
+
+## Erreurs courantes
+
+| Phénomène                                           | Axe d'investigation                                                                |
+| -------------------------------------------- | ------------------------------------------------------------------- |
+| La première requête n'est pas 402                                  | Vérifiez si `Authorization` a été inclus par erreur, ou si cette API n'a pas encore de tarification X402.                  |
+| `No payment requirement for network`         | Le réseau cible n'est pas dans `accepts` ; changez de réseau ou vérifiez la configuration de la Gateway.                               |
+| `invalid_402`                                | La réponse 402 n'est pas un JSON valide ; vérifiez le proxy, la passerelle ou la page d'erreur.                                        |
+| `Authorization nonce already processed`      | Le même `PAYMENT-SIGNATURE` a été réutilisé ; signez à nouveau.                                  |
+| `invalid_upto_evm_payload_invalid_signature` | Vérifiez si le chainId de `upto`, le domaine Permit2, l'adresse du facilitator et le compte signataire sont cohérents.         |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | Exécutez `approve-permit2` pour l'USDC de la chaîne cible.                                     |
+| `Payer has insufficient USDC balance`        | Le portefeuille payeur ne possède pas suffisamment d'USDC.                                                       |
+| HTTP 200 mais sans hash de tx                         | Le montant réel de `upto` peut être 0, ou l'enregistrement de settlement est encore en cours d'écriture asynchrone.                             |
+| Solana `Missing transaction payload`         | L'enveloppe `PAYMENT-SIGNATURE` ne contient aucune transaction sérialisée ni signature ; vérifiez le wallet adapter. |
+
+## Liste de contrôle Base `upto`
+
+`upto` n'est actuellement fourni que sur Base (`eip155:8453`). SKALE ne fournit que `exact`. Étant donné que la signature `upto` lie davantage de paramètres EVM typed data, lors de l'intégration, il faut particulièrement vérifier que les champs en temps réel de la réponse 402 correspondent exactement à la signature du client.
+
+```text
+SKALE exact
+HTTP 402 -> HTTP 200
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+
+Base upto
+HTTP 402 -> HTTP 200
+content ADC_BASE_UPTO_OK
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+Si Base `upto` renvoie `invalid_upto_evm_payload_invalid_signature`, vérifiez en priorité :
+
+1. Le `extra.chainId` (doit être `8453`) dans l'entrée `eip155:8453` + `upto` renvoyée par l'API.
+2. Le `extra.facilitatorAddress` renvoyé par l'API.
+3. L'adresse du facilitator Base `upto` renvoyée par `https://facilitator.acedata.cloud/supported`.
+4. Le domaine Permit2, le spender, le contrat USDC et le compte signataire.
+5. Si le portefeuille a déjà approuvé Permit2 pour l'USDC sur Base.
+
+Le digest de signature de `upto` lie simultanément le domaine Permit2, le chain ID, le spender, l'adresse du destinataire, l'adresse du facilitator et validAfter. Si l'un d'eux ne correspond pas, le Facilitator récupérera un mauvais signer, renvoyant ainsi invalid signature. Si tous ces éléments correspondent mais que 402 est toujours renvoyé, vérifiez ensuite l'allowance Permit2 ; lorsqu'il n'est pas autorisé, `PERMIT2_ALLOWANCE_REQUIRED` est renvoyé.
+
+## Enregistrer les informations de vérification
+Une validation complète enregistre au minimum :
+
+- le chemin API et le résumé du corps de la requête ;
+- le network et le scheme sélectionnés ;
+- `maxAmountRequired` ;
+- l’adresse du portefeuille du payeur ;
+- le statut HTTP final ;
+- la sortie du modèle ou l’ID de tâche dans la réponse ;
+- le lien de la transaction de settlement ;
+- l’ID de trace Gateway ou l’ID d’enregistrement d’utilisation de la plateforme.
+
+Ne sauvegardez pas les clés privées, le `PAYMENT-SIGNATURE` complet, la signature EIP-712 complète ou la phrase mnémonique.
+
+## Erreurs de paiement structurées
+
+Les échecs X402 après signature renverront un `code` stable, des paramètres d’interpolation sécurisés, une phase et un indicateur de possibilité de nouvelle tentative dans `extensions.acedatacloud.paymentError`. Privilégiez cette structure pour le diagnostic, ne parsez pas l’`error` anglais de niveau supérieur, et ne demandez pas aux utilisateurs de fournir des signatures de portefeuille ou le texte original des simulations on-chain.
+
+- `charged: false` : la validation a explicitement refusé avant le settlement, aucun débit n’a été initié cette fois-ci.
+- Sans `charged` : le résultat est inconnu ou est déjà entré dans la phase de settlement ; vérifiez d’abord la commande et l’état on-chain, il est interdit de répéter directement le paiement.
+- `settlement_pending` : ne répétez pas le paiement pour le moment ; actualisez d’abord la commande ou contactez le support.
+- Code non reconnu : traitez-le comme `payment_failed` et conservez le code technique public afin que le service client puisse le rechercher.

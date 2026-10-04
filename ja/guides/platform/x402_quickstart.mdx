@@ -1,0 +1,252 @@
+---
+title: "X402 快速开始"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+本教程用一个最小的 API 请求说明 Ace Data Cloud X402 的完整流程。目标不是先写复杂代码，而是先看懂：为什么第一次请求会返回 402、`accepts` 里有什么、`PAYMENT-SIGNATURE` 又是怎样让同一个 API 请求变成已支付请求的。
+
+## 准备工作
+
+你需要准备：
+
+| 项目   | 说明                                                      |
+| ---- | ------------------------------------------------------- |
+| 钱包   | 一个支持目标网络的钱包。Base / SKALE 使用 EVM 钱包，Solana 使用 Solana 钱包。 |
+| USDC | 钱包中需要有足够 USDC。实际金额以 402 响应里的 `maxAmountRequired` 为准。    |
+| 开发环境 | TypeScript 推荐 Node.js 18+；Python 推荐 Python 3.10+。       |
+| SDK  | 推荐使用官方 SDK，不建议手写签名细节。                                   |
+
+X402 调用 Ace Data Cloud API 时不需要 API Token。SDK 第一次请求不带 `Authorization`，Gateway 会返回 `402 Payment Required` 和支付要求；SDK 签名后自动重试。
+
+## 安装 SDK
+
+源码和包地址：
+
+- SDK 仓库：[https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- X402 Client 仓库：[https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm：`@acedatacloud/sdk`、`@acedatacloud/x402-client`
+- PyPI：`acedatacloud`、`acedatacloud-x402`
+
+TypeScript：
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client ethers
+```
+
+Python：
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+如果要使用 Solana，还需要安装对应依赖：
+
+```bash
+npm install @solana/web3.js
+```
+
+Python 版本的 Solana signer 依赖已经包含在 `acedatacloud-x402` 中。
+
+干净临时环境的安装和导入检查输出：
+
+```text
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+
+acedatacloud 2026.4.26.1
+acedatacloud-x402 2026.5.31.3
+imports_ok True True True True True True
+usage: acedatacloud-x402 [-h] {approve-permit2} ...
+```
+
+结果说明：
+
+- npm 包和 PyPI 包都是真实发布包，不是文档里的占位名称。
+- `acedatacloud-x402[cli]` 会安装 CLI，`approve-permit2` 子命令可用于 `upto` 场景的 Permit2 授权。
+
+## 第一次请求会返回 402
+
+你可以先用 `curl` 看看未支付请求返回什么。下面示例不会产生扣费，因为它没有携带 `PAYMENT-SIGNATURE`：
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/openai/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 1
+  }'
+```
+
+返回体会包含 `accepts` 数组，常见结构如下：
+
+```json
+{
+  "x402Version": 2,
+  "resource": {
+    "url": "/openai/chat/completions",
+    "description": "AceDataCloud API call",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "maxAmountRequired": "95215",
+      "amount": "95215",
+      "maxTimeoutSeconds": 3600,
+      "resource": "/openai/chat/completions",
+      "description": "...",
+      "payTo": "0x...",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      }
+    }
+  ],
+  "error": "PAYMENT-SIGNATURE header is required"
+}
+```
+
+同一份挑战内容也会以 base64 形式放在 `PAYMENT-REQUIRED` 响应头中，便于客户端不解析 body 就读取支付要求。
+
+生产 API 未支付请求的程序输出摘要如下：
+
+```text
+status=402
+x402Version 2
+accepts [
+  ('eip155:8453', 'exact', '95215'),
+  ('eip155:8453', 'upto', '95215'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '95215'),
+  ('eip155:1187947933', 'exact', '95215')
+]
+```
+
+结果说明：
+
+- 第一次请求没有携带 `Authorization` 或 `PAYMENT-SIGNATURE`，所以返回 HTTP 402，不会产生扣费。
+- `accepts` 是本次请求唯一可信的签名依据，包含可选网络、scheme、金额上限、收款地址和资产地址。
+- `network` 是 CAIP-2 标识，客户端选网时必须按 CAIP-2 字符串匹配。
+- 这次 `gpt-4o-mini` 最小聊天请求的上限金额是 `95215` atomic USDC，也就是 `0.095215` USDC。
+- 每次请求都应该读取当次 402 响应，不要把示例金额硬编码进业务代码。
+
+字段含义：
+
+| 字段                  | 说明                                                                       |
+| ------------------- | ------------------------------------------------------------------------ |
+| `scheme`            | 支付方案。`exact` 表示固定金额，`upto` 表示授权上限、按实际用量结算。                               |
+| `network`           | 支付网络的 CAIP-2 标识，例如 `eip155:8453`、`eip155:1187947933`、`solana:5eykt4...`。 |
+| `maxAmountRequired` | 最大支付金额，单位是 USDC atomic units，`95215` 表示 `0.095215` USDC。                 |
+| `amount`            | 本次要结算的金额；`exact` 与 `maxAmountRequired` 相同，`upto` 在结算阶段按真实用量改写。           |
+| `payTo`             | 收款地址。                                                                    |
+| `asset`             | USDC 合约地址或 Solana mint 地址。                                               |
+| `extra`             | 签名需要的链 ID、EIP-712 domain、Permit2 地址等扩展信息。                                |
+
+## 用 SDK 完成支付重试
+
+下面是最小 TypeScript 示例。它指定 `network: 'skale'`，handler 会从本次 402 响应中选择 SKALE 的 payment requirement；实际金额和收款地址仍以 `accepts` 为准：
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.SKALE_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`unsupported method: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'skale',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const response = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Reply with exactly: hello' }],
+  max_tokens: 8
+});
+
+console.log(response.choices[0].message.content);
+```
+
+同一链路用 TypeScript SDK 的程序运行结果：
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+結果説明：
+
+- `content ADC_TS_SDK_X402_OK` はモデルが提示された通りに返した固定文字列であり、支払いを再試行した後、リクエストが実際にモデル API に入ったことを示しています。
+- `payer` はローカル署名ウォレットアドレスであり、秘密鍵は Ace Data Cloud に送信されていません。
+- SDK は 402 の解析、`PAYMENT-SIGNATURE` の署名、および元のリクエストの再試行を完了しました；ビジネスコードは依然として通常の SDK 呼び出し方法で記述されています。
+
+このコードの背後で発生した四つのステップ：
+
+1. SDK は `Authorization` を含まない通常の API リクエストを一度送信します。
+2. Gateway は `402 Payment Required` と `accepts` を返します。
+3. `createX402PaymentHandler` は `network = 'skale'` の支払い要件を選択し、`PAYMENT-SIGNATURE` を署名します。
+4. SDK は同じリクエストボディで再試行し、Gateway は Facilitator を呼び出して検証および決済を行い、ターゲット API へのアクセスを許可します。
+
+## Facilitator のサポート能力を確認する
+
+X402 API はリソースディレクトリに依存しません。クライアントは既知の API を直接呼び出し、リアルタイムで返される `402 Payment Required` と `accepts` を唯一の価格と署名の根拠として使用します。
+
+Facilitator の能力声明は以下にあります：
+
+```bash
+curl https://facilitator.acedata.cloud/.well-known/x402
+```
+
+これは `/supported`、`/verify`、`/settle` と現在有効な支払いネットワークを記述しており、API リソースは列挙していません。
+
+Ace Data Cloud の生産 Facilitator アドレスは：
+
+```text
+https://facilitator.acedata.cloud
+```
+
+どのネットワークとスキームがサポートされているかを確認できます：
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+返された `kinds` は Facilitator がサポートするネットワークとスキームを列挙します。実際の呼び出し時には、API が返す `accepts` を基準とします。
+
+Facilitator `/supported` の出力：
+
+```text
+kinds [
+  ('eip155:8453', 'exact'),
+  ('eip155:8453', 'upto', {'facilitatorAddress': '0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708'}),
+  ('eip155:1187947933', 'exact'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact')
+]
+```
+
+結果説明：
+
+- `/supported` は Facilitator がこれらのネットワークとスキームの検証および決済能力を持っていることを示しています。
+- Base、SKALE、Solana はすべて `exact` をサポートしています；`upto` は現在 Base のみで提供されています。
+- 特定の API が特定のネットワークを許可するかどうかは、依然としてその API の 402 `accepts` に基づきます。

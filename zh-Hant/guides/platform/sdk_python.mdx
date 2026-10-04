@@ -1,0 +1,308 @@
+---
+title: "Python SDK 接入教程"
+description: "Platform 整合指南 - Ace Data Cloud"
+---
+
+[`acedatacloud`](https://pypi.org/project/acedatacloud/) 是 Ace Data Cloud 官方 Python SDK，把 `api.acedata.cloud` 上所有服务封装成类型化的 `client.openai.chat.completions.create(...)`、`client.images.generate(...)`、`client.search.google(...)` 等方法，同时提供同步和异步两套客户端。
+
+底层基于 `httpx`，支持 SSE 流式、自动重试、类型化异常和 pydantic 类型校验。
+
+源码与包地址：
+
+- SDK 仓库：[https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- PyPI：[https://pypi.org/project/acedatacloud/](https://pypi.org/project/acedatacloud/)
+
+## 安装
+
+```bash
+pip install acedatacloud
+# 或 uv add / poetry add
+```
+
+如果需要 X402 链上付费（无 API Token 路径），再装一个：
+
+```bash
+pip install acedatacloud-x402
+```
+
+干净 venv 的版本检查输出：
+
+```text
+$ python -c "import importlib.metadata as m; print(m.version('acedatacloud'))"
+2026.4.26.1
+
+$ python -c "from acedatacloud import AceDataCloud, AsyncAceDataCloud; print('ok')"
+ok
+```
+
+结果说明：
+
+- 包版本是 `2026.4.26.1`（CalVer，2026 年 4 月 26 日修订）。
+- `AceDataCloud` 是同步客户端，`AsyncAceDataCloud` 是 asyncio 异步客户端。
+- 本 SDK 不依赖 `pydantic`，响应体统一返回 `dict`。这一点和 `openai-python` 不同，迁移时需要注意。
+
+## 准备 API Token
+
+参考 [SDK 总览 - 申请 API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) 取到 token，然后在 shell 里 `export`：
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+构造客户端时不传 `api_token`，SDK 会自动读取 `ACEDATACLOUD_API_TOKEN` 环境变量。如果你的环境里已经存了 `ACEDATACLOUD_API_KEY`（项目仓库约定），请显式传入：`AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])`。
+
+## 示例 1：chat.completions（同步）
+
+```python
+import os, time, json
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_SDK_OK"}],
+    max_tokens=20,
+    temperature=0,
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("id", res["id"])
+print("model", res["model"])
+print("content", res["choices"][0]["message"]["content"])
+print("usage", json.dumps({k: v for k, v in res["usage"].items()
+                            if k in ("prompt_tokens","completion_tokens","total_tokens")}))
+```
+
+程序运行结果：
+
+```text
+elapsed_ms 2963
+id chatcmpl-DldFdnIlhSUXINpupgsUmZL78MnBu
+model gpt-4o-mini
+content ADC_PY_SDK_OK
+usage {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+```
+
+结果说明：
+
+- `id` 是响应 ID，可以在 [使用历史](https://platform.acedata.cloud/console/usages) 里搜到。
+- `content ADC_PY_SDK_OK` 是模型真实返回的固定标识。
+- `res["usage"]` 返回 `dict`，不是 pydantic model；一次调用大约消耗 24 token。
+
+## 示例 2：chat.completions（SSE 流式）
+
+`stream=True` 时 `create` 返回一个普通生成器，每次 yield 一个解析好的 chunk dict。
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+first_chunk_ms = None
+chunks = 0
+collected = []
+
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Count from 1 to 5, separated by single spaces, no extra text."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    if first_chunk_ms is None:
+        first_chunk_ms = int((time.time() - t0) * 1000)
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+
+print("total_elapsed_ms", int((time.time() - t0) * 1000))
+print("first_chunk_ms", first_chunk_ms)
+print("chunks", chunks)
+print("collected", "".join(collected).strip())
+```
+
+程序运行结果：
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+结果说明：
+
+- 首帧延迟 2104 ms，后续 11 帧只用了 7 ms 就到齐——一旦服务开始流，本地是顺手就能消费。
+- chunk 是普通 dict，按 OpenAI SSE 格式逐层 `.get()` 安全取值即可。
+- 实际生产里推荐边 yield 边推 SSE 给前端，整体首字延迟接近 2 秒。
+
+## 示例 3：AsyncAceDataCloud（异步）
+
+`AsyncAceDataCloud` 的 API 跟同步版完全对称，只是所有 IO 方法返回 coroutine。适合 FastAPI / aiohttp / asyncio 服务。
+
+```python
+import os, asyncio, time
+from acedatacloud import AsyncAceDataCloud
+
+async def main():
+    client = AsyncAceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+    t0 = time.time()
+    res = await client.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_ASYNC_OK"}],
+        max_tokens=20,
+        temperature=0,
+    )
+    print("elapsed_ms", int((time.time() - t0) * 1000))
+    print("id", res["id"])
+    print("content", res["choices"][0]["message"]["content"])
+    await client.close()
+
+asyncio.run(main())
+```
+
+程序运行结果：
+
+```text
+elapsed_ms 2392
+id chatcmpl-DldFwRlrgtYDBpIr0T55aDQI4GlbF
+content ADC_PY_ASYNC_OK
+```
+
+结果说明：
+
+- 异步版本和同步版本走的是同一条 HTTP 路径，只是连接池实现不同（`httpx.AsyncClient`）。
+- 退出时显式 `await client.close()` 把连接池关掉；长生命周期服务里只需要在进程退出前关一次。
+- 单次延迟跟同步差不多，并发场景下异步才显出优势——一个 event loop 可以同时跑几十上百个 inflight 请求。
+
+## 示例 4：images.generate（NanoBanana）
+
+NanoBanana API 是同步生成的图像服务，**不要传 `wait`**——SDK 调用会一直等待服务返回 200。
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.images.generate(
+    provider="nano-banana",
+    model="nano-banana",
+    prompt="一個簡約的黃色香蕉標誌，背景為白色，扁平設計",
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("task_id", res.get("task_id"))
+print("trace_id", res.get("trace_id"))
+data = res.get("data") or []
+if data:
+    print("image_url", data[0].get("image_url"))
+```
+
+程序運行結果：
+
+```text
+elapsed_ms 18977
+task_id 9e71f40f-1579-480d-adf4-07a95450904f
+trace_id 5aa21d7f-af84-48e6-9ce0-9c6c36c8e5d9
+image_url https://platform.cdn.acedata.cloud/nanobanana/884e92df-a497-44e0-9681-35c7a00e0a6c.png
+```
+
+結果說明：
+
+- `image_url` 是 CDN 上的穩定地址，可以直接下載或嵌入網頁。
+- 18.9 秒裡幾乎都是模型推理；本地 SDK 開銷只有幾毫秒。
+- 對於 Midjourney、Sora、Veo、Suno 這種真正異步的任務，需要用 `wait=True` 或手動 `TaskHandle.wait()` 輪詢，詳見 [SDK 任務輪詢與流式響應](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming)。
+
+## 示例 5：類型化錯誤處理
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud import AuthenticationError, RateLimitError, ValidationError
+
+bad = AceDataCloud(api_token="definitely-not-a-real-token")
+
+try:
+    bad.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5,
+    )
+except AuthenticationError as err:
+    print("err_class", type(err).__name__)
+    print("status", err.status_code)
+    print("code", err.code)
+except RateLimitError as err:
+    # 429，SDK 已經自動指數退避重試 2 次仍失敗才會拋
+    print("rate limited:", err.code)
+except ValidationError as err:
+    # 400，例如缺字段、模型名不存在
+    print("bad request:", err.code, err.message)
+```
+
+異常層級跟 TypeScript 一致：`AuthenticationError` (401)、`TokenMismatchError` (token 與服務不匹配)、`InsufficientBalanceError` (餘額不足)、`ResourceDisabledError` (服務被禁用)、`ValidationError` (400)、`RateLimitError` (429)、`ModerationError` (403 內容審核)、`APIError` (兜底)、`TimeoutError`（超時）、`TransportError`（網絡層）。
+
+## 配置選項
+
+```python
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(
+    # 必填之一：顯式 token 或環境變量 ACEDATACLOUD_API_TOKEN
+    api_token="...",
+
+    # 平台 API 根地址，默認 https://api.acedata.cloud
+    base_url="https://api.acedata.cloud",
+
+    # 部分服務（如 dashboard 元數據）走 platform 網域
+    platform_base_url="https://platform.acedata.cloud",
+
+    # 單次請求超時，秒；默認 300.0
+    timeout=300.0,
+
+    # 自動重試次數，默認 2；重試條件：408 / 409 / 429 / 5xx / 網絡錯誤
+    max_retries=2,
+
+    # 自定義請求頭
+    headers={"x-app": "my-service/1.0"},
+)
+```
+
+> Python SDK 的 `timeout` 和 TaskHandle 的 `poll_interval` / `max_wait` 單位都是**秒**，TypeScript SDK 用的是**毫秒**，跨語言遷移時要特別注意。詳見 [SDK 任務輪詢與流式響應](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming)。
+
+> SDK 默認讀取 `ACEDATACLOUD_API_TOKEN` 環境變量；本文為了和 [Claude Code VS Code 教程](https://platform.acedata.cloud/documents/claude-code-vscode-integrations) 等其它教程統一，示例裡用的是 `ACEDATACLOUD_API_KEY`，需要 `api_token=os.environ["ACEDATACLOUD_API_KEY"]` 顯式注入。
+
+## 進階：X402 支付鉤子
+
+```python
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import create_x402_payment_handler
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=my_evm_signer,
+        prefer_scheme="exact",   # 或 "upto"
+    )
+)
+```
+
+完整流程和真實鏈上結果見 [SDK + X402 支付鉤子](https://platform.acedata.cloud/documents/sdk-x402-payment)。
+
+## 如何查看剩餘額度
+
+透過 [Ace Data Cloud 控制台 - 應用列表](https://platform.acedata.cloud/console/applications)，即可查看當前賬戶的剩餘額度。
+
+透過 [Ace Data Cloud 控制台 - 使用歷史](https://platform.acedata.cloud/console/usages) 即可查看所有使用歷史和扣費詳情。
+
+## 了解更多
+
+- 🐍 [`acedatacloud` on PyPI](https://pypi.org/project/acedatacloud/)
+- 🗂 [SDK 源碼](https://github.com/AceDataCloud/SDK/tree/main/python)
+- 📘 [TypeScript SDK 接入教程](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🟦 [Go SDK 接入教程](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 支付鉤子](https://platform.acedata.cloud/documents/sdk-x402-payment)

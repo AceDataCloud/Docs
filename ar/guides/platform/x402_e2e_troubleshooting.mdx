@@ -1,0 +1,308 @@
+---
+title: "التحقق الشامل من X402 واستكشاف الأخطاء وإصلاحها"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+يتضمن X402 بروتوكول HTTP وSDK والتوقيعات وFacilitator والمعاملات على السلسلة. عند استكشاف مشكلات التوقيع أو التسوية وإصلاحها، يُوصى بالتأكد طبقةً بطبقة وفق الترتيب: «المدخل العام -> استجابة 402 -> معالج الدفع في SDK -> التسوية على السلسلة». يشرح هذا الدليل طرق الفحص لكل طبقة، ويسرد الأخطاء الشائعة.
+
+## فحص المدخل العام
+
+إعلان قدرات Facilitator:
+
+```bash
+curl https://facilitator.acedata.cloud/.well-known/x402
+```
+
+إذا أعاد `facilitator` و`supportedKinds` ونقاط نهاية البروتوكول، فهذا يعني أن بيانات تعريف القدرات طبيعية. تم إيقاف اكتشاف موارد API؛ يُرجى استدعاء API الهدف مباشرةً، والاعتماد على استجابة 402 الفورية.
+
+القدرات التي يدعمها Facilitator:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+إذا أعاد `kinds`، فهذا يعني أن مدخل Facilitator يعمل بشكل طبيعي.
+
+## فحص `accepts` في 402
+
+أرسل طلبًا غير موثّق لن يترتب عليه أي خصم:
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/openai/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 1
+  }'
+```
+
+تحقق مما إذا كانت `accepts` المُعادة تتضمن الشبكة التي تريد استخدامها. `network` هو معرّف CAIP-2:
+
+- `eip155:8453` + `exact` (Base)
+- `eip155:8453` + `upto` (Base، القياس اللاحق)
+- `eip155:1187947933` + `exact` (SKALE)
+- `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` + `exact` (Solana)
+
+إذا لم تكن الشبكة المستهدفة موجودة، فهذا يعني أن API هذا أو البيئة الحالية لم يُضبطا بطريقة تحصيل X402 المقابلة.
+
+## تشغيل أدوات التحقق المتقدمة لـ X402Client
+
+يوفر مستودع X402Client أدوات تحقق متقدمة، يمكن استخدامها لتأكيد اختيار استجابة 402، وإنشاء التوقيع، وpaid retry، والتسوية على السلسلة. تتطلب هذه الأدوات محفظة ممولة، وRPC، ومفتاحًا خاصًا، واعتمادات التطوير. يُنصح في تكاملات الأعمال العادية بإعطاء الأولوية لاستخدام TypeScript أو Python SDK؛ ولا تُشغّل هذه الأدوات إلا عند الحاجة إلى تحديد مشكلات التوقيع أو التسوية على السلسلة.
+
+عنوان المستودع: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+
+```bash
+git clone https://github.com/AceDataCloud/X402Client.git
+cd X402Client/typescript
+npm install
+npm install --no-save ethers @solana/spl-token bs58 tsx
+```
+
+Base:
+
+```bash
+export X402B_BASE_PAYER_PRIVATE_KEY=0x...
+TEST_API_PATH='/openai/chat/completions' \
+TEST_BODY='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+npx tsx scripts/test-real-e2e.ts
+```
+
+SKALE:
+
+```bash
+export SKALE_BASE_PRIVATE_KEY=0x...
+TEST_API_PATH='/openai/chat/completions' \
+TEST_BODY='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+npx tsx scripts/test-skale-e2e.ts
+```
+
+Solana:
+
+```bash
+export X402B_SOLANA_PAYER_PRIVATE_KEY=...
+npx tsx scripts/test-solana-e2e.ts
+```
+
+تطبع أدوات التحقق عادةً:
+
+1. استجابة 402 للطلب الأول.
+2. متطلب الدفع المحدد.
+3. ملخص `PAYMENT-SIGNATURE` بعد التوقيع.
+4. حالة HTTP ونص الاستجابة بعد إعادة المحاولة.
+5. معاملة settlement على السلسلة، أو سبب خطأ Facilitator عند الفشل.
+
+لا ترسل المفاتيح الخاصة أو `PAYMENT-SIGNATURE` الكامل إلى نظام السجلات أو التذاكر.
+
+مثال على نتائج التحقق من API العام:
+
+```text
+SKALE exact
+HTTP 402 -> HTTP 200
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+
+Base exact
+HTTP 402 -> HTTP 200
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+
+Solana exact
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run because public RPC lookup hit 429
+
+Base upto
+HTTP 402 -> HTTP 200
+content ADC_BASE_UPTO_OK
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+توضيح:
+
+- أكملت SKALE `exact` وBase `exact` وSolana `exact` وBase `upto` جميعها paid retry من HTTP 402 إلى HTTP 200.
+- يمكن البحث عن المعاملة على السلسلة لـ SKALE `exact` في مستكشف SKALE، ومبلغ التسوية هو `0.095215` USDC.
+- يمكن البحث عن المعاملة على السلسلة لـ Base `exact` في BaseScan، ومبلغ التسوية هو `95215` atomic USDC.
+- الحد الأعلى للتوقيع في Base `upto` هو `95215` atomic USDC، لكن settlement الفعلي على السلسلة هو `3` atomic USDC، مما يوضح أن القياس اللاحق يخصم وفق الاستخدام الفعلي.
+- أكد مسار Solana paid retry ومخرجات النموذج. قد يخضع RPC العام لتقييد المعدل؛ عند الحاجة إلى مطابقة صارمة على السلسلة، يُرجى استخدام Solana RPC خاص بك أو سجلات التسوية من جانب المنصة لتأكيد توقيع المعاملة.
+
+## اختبار SDK smoke test
+
+تُستخدم أدوات التحقق المتقدمة لفحص التوقيعات والتسوية على السلسلة. يجب على جانب الأعمال أيضًا تنفيذ SDK smoke test للتأكد من أن كود التطبيق يمكنه معالجة 402 تلقائيًا عبر معالج الدفع. لا تعرض الأمثلة التالية سوى المقاطع الأساسية؛ ويجب استكمال الكود الكامل بالمحفظة وprovider وimport.
+
+TypeScript:
+
+```ts
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'skale',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Reply with exactly ADC_SDK_X402_OK' }],
+  max_tokens: 8
+});
+```
+
+Python:
+
+```python
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="skale",
+        evm_signer=signer,
+    )
+)
+
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly ADC_PY_X402_OK"}],
+    max_tokens=8,
+)
+```
+
+إذا أعاد النموذج السلسلة الثابتة المطلوبة، فهذا يعني أن SDK ومعالج الدفع وGateway وFacilitator وAPI الهدف متصلة معًا.
+يستخدم اختبارا smoke أعلاه مخطط SKALE `exact`. توفر SKALE حاليًا `exact` فقط، والذي تتم تسويته بالمبلغ الثابت المسعّر في 402، ولن ينخفض مع الاستخدام الفعلي للـ token. تندرج إكمالات الدردشة ضمن السيناريوهات التي تُقاس بالـ token، ويُوصى بالتبديل إلى Base وتمرير `preferScheme: 'upto'` عند التكامل الرسمي، للتسوية وفق الاستخدام الفعلي.
+
+نتيجة تشغيل برنامج اختبار SDK smoke:
+
+```text
+TypeScript SDK
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+
+Python SDK
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 4786
+content ADC_PY_SDK_X402_OK
+id chatcmpl-DlcWajqAHOop3iebmO19XRfT5bTPz
+```
+
+توضيح النتائج:
+
+- يعالج TypeScript SDK تلقائيًا 402 والتوقيع وإعادة المحاولة عبر `createX402PaymentHandler`، ويحصل في النهاية على `ADC_TS_SDK_X402_OK`.
+- يُكمل Python SDK المسار نفسه عبر `create_x402_payment_handler`، ويحصل في النهاية على `ADC_PY_SDK_X402_OK`.
+- يستخدم اختبارا smoke كلاهما دافع SKALE `0xd0479FA9FD8C678303d477433d24C15e3723CC1C`.
+- كائن الإرجاع في Python SDK هو `dict`، ويمكن في المثال استخدام `res["choices"][0]["message"]["content"]` لقراءة المحتوى.
+
+## الدفع E2E للطلب
+
+يستخدم دفع الطلب واجهة برمجة التطبيقات الخاصة بالمنصة في `platform.acedata.cloud`، ويتطلب رمز حساب المنصة. المسار الكامل هو: إنشاء طلب Pending، ثم تشغيل 402 عبر `POST /api/v1/orders/{order_id}/pay/`، ثم إعادة المحاولة مع `PAYMENT-SIGNATURE`.
+
+مثال على نتائج التحقق من دفع طلب صغير:
+
+> سجلات المعاملات التالية هي عينات اختبار تاريخية فعلية ضمن السياسة القديمة، وقد تم الاحتفاظ بالمبالغ وهاشات المعاملات كما هي. لم تعد طلبات X402 الجديدة تتضمن خصومات لطريقة الدفع؛ يرجى الاعتماد على `amount` في استجابة 402 الحالية للتوقيع والدفع.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+accepts [('eip155:8453', 'exact', '1200000'), ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000')]
+
+status 200
+order state Finished
+pay_way X402
+pay_id 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+
+Base tx status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+توضيح النتائج:
+
+- بعد إنشاء الطلب، تكون حالة الطلب `Pending`، والسعر هو `1.26`.
+- يعيد أول طلب `pay/` HTTP 402، وتوجد Base `exact` وSolana `exact` ضمن `accepts`، والمبلغ في كليهما هو `1200000` atomic USDC.
+- بعد إعادة المحاولة مع Base `PAYMENT-SIGNATURE`، يعيد الطلب HTTP 200، وتتغير حالة الطلب إلى `Finished`، ويكون `pay_way` هو `X402`.
+- بعد فك ترميز `PAYMENT-RESPONSE`، يظهر `success=True` و`network=base`، ويعطي هاش المعاملة نفسه.
+- حالة المعاملة على BaseScan هي `1`، ومبلغ التحويل هو `1200000` atomic USDC، أي `1.2` USDC.
+- تم دفع سعر الإنشاء `1.26` خلال فترة سياسة خصم الدفع القديمة لـ X402، وكان مبلغ التوقيع والتسوية النهائي `1.2` USDC.
+
+إذا لم يتضمن دفع الطلب `Authorization: Bearer {platform_token}`، أو لم يكن الطلب تابعًا للحساب الحالي، فسيفشل في طبقة صلاحيات المنصة؛ وهذا يختلف عن واجهة X402 API دون حساب عند استدعاء `x402.acedata.cloud` مباشرة.
+
+## الأخطاء الشائعة
+
+| الظاهرة                                           | اتجاه التحقق                                                                |
+| -------------------------------------------- | ------------------------------------------------------------------- |
+| الطلب الأول ليس 402                                  | تحقق مما إذا كان `Authorization` مرفقًا بالخطأ، أو مما إذا كانت واجهة API هذه لا تزال لا تحتوي على تسعير X402.                  |
+| `No payment requirement for network`         | الشبكة المستهدفة ليست ضمن `accepts`، غيّر الشبكة أو تحقق من إعدادات Gateway.                               |
+| `invalid_402`                                | استجابة 402 ليست JSON صالحًا، تحقق من الوكيل أو البوابة أو صفحة الخطأ.                                        |
+| `Authorization nonce already processed`      | تمت إعادة استخدام `PAYMENT-SIGNATURE` نفسه، وقّع من جديد.                                  |
+| `invalid_upto_evm_payload_invalid_signature` | تحقق من chainId الخاصة بـ `upto`، وPermit2 domain، وعنوان facilitator، وما إذا كان حساب التوقيع متسقًا.         |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | نفّذ `approve-permit2` لـ USDC على السلسلة المستهدفة.                                     |
+| `Payer has insufficient USDC balance`        | USDC في محفظة الدفع غير كافٍ.                                                       |
+| HTTP 200 لكن لا يوجد tx hash                         | قد يكون المبلغ الفعلي لـ `upto` هو 0، أو قد يظل سجل settlement قيد الكتابة غير المتزامنة.                             |
+| Solana `Missing transaction payload`         | لا يحتوي envelope الخاص بـ `PAYMENT-SIGNATURE` على معاملة متسلسلة أو signature، تحقق من wallet adapter. |
+
+## قائمة التحقق لـ Base `upto`
+
+يتوفر `upto` حاليًا على Base فقط (`eip155:8453`). توفر SKALE `exact` فقط. نظرًا لأن توقيع `upto` يرتبط بمزيد من معاملات EVM typed data، يجب التأكد بشكل خاص عند التكامل من التطابق التام بين الحقول الفورية في استجابة 402 وتوقيع العميل.
+
+```text
+SKALE exact
+HTTP 402 -> HTTP 200
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+
+Base upto
+HTTP 402 -> HTTP 200
+content ADC_BASE_UPTO_OK
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+إذا أعاد Base `upto` القيمة `invalid_upto_evm_payload_invalid_signature`، فتحقق أولًا من:
+
+1. `extra.chainId` في عنصر `eip155:8453` + `upto` الذي تعيده API (يجب أن يكون `8453`).
+2. `extra.facilitatorAddress` الذي تعيده API.
+3. عنوان facilitator الخاص بـ Base `upto` الذي يعيده `https://facilitator.acedata.cloud/supported`.
+4. Permit2 domain، وspender، وعقد USDC، وحساب التوقيع.
+5. ما إذا كانت المحفظة قد نفذت بالفعل approve لـ Permit2 على Base USDC.
+
+يرتبط digest توقيع `upto` في الوقت نفسه بـ Permit2 domain، وchain ID، وspender، وعنوان المستلم، وعنوان facilitator، وvalidAfter. إذا لم يتطابق أي منها، فسيستعيد Facilitator signer خاطئًا، وبالتالي يعيد invalid signature. إذا كانت هذه كلها متسقة لكنه لا يزال يعيد 402، فتحقق في الخطوة التالية من Permit2 allowance؛ وعند عدم وجود تفويض يعيد `PERMIT2_ALLOWANCE_REQUIRED`.
+
+## حفظ معلومات التحقق
+يجب أن تحفظ عملية تحقق كاملة واحدة على الأقل:
+
+- مسار API وملخص جسم الطلب؛
+- `network` و`scheme` المختاران؛
+- `maxAmountRequired`؛
+- عنوان محفظة الدافع؛
+- حالة HTTP النهائية؛
+- مخرجات النموذج أو معرّف المهمة في الاستجابة؛
+- رابط معاملة التسوية؛
+- معرّف تتبع Gateway أو معرّف سجل استخدام المنصة.
+
+لا تحفظ المفاتيح الخاصة أو `PAYMENT-SIGNATURE` الكامل أو توقيع EIP-712 الكامل أو العبارة الاستذكارية.
+
+## أخطاء الدفع المنظمة
+
+ستُرجع حالات فشل X402 الموقعة `code` ثابتًا، ومعلمات إدراج آمنة، ومرحلة، وعلامة قابلية إعادة المحاولة في `extensions.acedatacloud.paymentError`. أعطِ الأولوية لاستخدام هذه البنية لاستكشاف الأخطاء، ولا تحلل `error` الإنجليزي ذي المستوى الأعلى، ولا تطلب من المستخدم تقديم توقيع المحفظة أو النص الأصلي للمحاكاة على السلسلة.
+
+- `charged: false`：تم رفض التحقق بوضوح قبل التسوية، ولم يتم بدء أي خصم هذه المرة.
+- عدم احتواء `charged`：النتيجة غير معروفة أو أنها دخلت بالفعل مرحلة التسوية، تحقق أولًا من الطلب وحالة السلسلة، ويُحظر تكرار الدفع مباشرة.
+- `settlement_pending`：لا تكرر الدفع في الوقت الحالي، حدّث الطلب أولًا أو اتصل بالدعم.
+- `code` غير معروف：تعامل معه باعتباره `payment_failed`، واحتفظ بالرمز التقني العام ليتمكن دعم العملاء من البحث عنه.

@@ -1,0 +1,233 @@
+---
+title: "دليل دفع الطلبات عبر X402"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+بالإضافة إلى الدفع مباشرةً وفق طلبات API، تدعم Ace Data Cloud أيضًا دفع طلبات وحدة تحكم X402. البروتوكول الأساسي لدفع الطلبات واستدعاءات API متماثل: يعيد الطلب الأول 402، ويوقّع العميل `PAYMENT-SIGNATURE`، ثم يعيد المحاولة بالطلب نفسه.
+
+الفرق هو أن دفع الطلبات ينتمي إلى منصة API ويتطلب رمز حساب؛ بينما يمكن لـ AI API الذي يستدعي `x402.acedata.cloud` مباشرةً استخدام X402 فقط، دون الحاجة إلى API Token.
+
+## تجهيز الطلب
+
+ادخل إلى [وحدة تحكم Ace Data Cloud](https://platform.acedata.cloud/console/orders)، واختر الطلب المطلوب دفعه، وسجّل معرّف الطلب.
+
+إذا لم يكن لديك طلب بعد، يمكنك إنشاء طلب بانتظار الدفع في صفحة الباقات. يعتمد سعر الطلب على ما هو معروض في الصفحة، ويمثل `amount` في استجابة X402 402 الأساس النهائي للتوقيع.
+
+## إنشاء رمز الحساب
+
+يتطلب طلب دفع الطلب رمز حساب. افتح [صفحة Platform Token](https://platform.acedata.cloud/console/platform-tokens)، وأنشئ token بتنسيق `platform-v1-...`.
+
+تستخدم الطلبات اللاحقة:
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+يختلف رمز الحساب عن API Token العادي. يُستخدم API Token العادي لاستهلاك حصة API؛ بينما يُستخدم رمز الحساب لتمثيل حسابك في تشغيل موارد المنصة، مثل دفع الطلبات.
+
+## تشغيل 402
+
+أرسل أولًا طلبًا دون `PAYMENT-SIGNATURE`:
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+تكون حالة الإرجاع 402، وتتضمن الاستجابة `accepts`:
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+يستخدم دفع الطلبات بروتوكول x402 v2 الرسمي: تكون قيمة `x402Version` هي `2`، ويستخدم `network` معرّف CAIP-2، وحقل المبلغ هو `amount`.
+
+نتيجة تشغيل البرنامج لإنشاء طلب 10 Credits وتشغيل 402:
+
+> سجلات المعاملات التالية عينات تاريخية تم اختبارها فعليًا بموجب السياسة القديمة، مع الاحتفاظ بالمبالغ وتجزئات المعاملات كما هي. لم تعد طلبات X402 الجديدة تتضمن خصومات لطريقة الدفع؛ يرجى اعتماد `amount` في استجابة 402 هذه كأساس للتوقيع والدفع.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+توضيح النتائج:
+
+- بعد إنشاء الطلب بنجاح، تكون حالته `Pending`، ولا يوجد دفع على السلسلة في هذه المرحلة.
+- لم يتضمن طلب `pay/` الأول `PAYMENT-SIGNATURE`، لذا أعاد HTTP 402.
+- يوفر `accepts` كلًا من Base `exact` وSolana `exact`، ويختار هذا الدليل Base لاحقًا.
+- كان سعر الطلب عند إنشائه `1.26`، وخلال سياسة خصم الدفع القديمة عبر X402، كان مبلغ التوقيع والتسوية الفعلي هو `1.2` USDC، الموافق لـ `1200000` atomic USDC.
+
+لاحظ أن `resource` هنا حقل يعيده الخادم ويشارك في التوقيع، ويجب على العميل عدم إعادة كتابة البروتوكول أو المسار أو معرّف الطلب الموجود فيه بنفسه.
+
+## التوقيع وإعادة المحاولة
+
+يمكن لدفع الطلبات إعادة استخدام دوال التوقيع منخفضة المستوى في `@acedatacloud/x402-client` أو `acedatacloud-x402`. فيما يلي مثال TypeScript:
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+نتيجة تشغيل البرنامج بعد توقيع الطلب نفسه باستخدام Base `exact` وإعادة المحاولة:
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+نتيجة التأكيد على السلسلة:
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+توضيح النتيجة:
+
+- يشير `status 200` إلى أن واجهة دفع الطلبات في المنصة قبلت `PAYMENT-SIGNATURE` هذه.
+- يشير `has_x_payment_response True` إلى أن رأس الاستجابة يتضمن إيصال `PAYMENT-RESPONSE` مُرمّزًا بـ Base64.
+- يشير `settle_header.success=True` و`network=base` إلى أن الـ Facilitator أكمل تسوية Base.
+- الحالة النهائية للطلب هي `Finished`، و`pay_way` هو `X402`، و`pay_id` يحتوي على تجزئة معاملة السلسلة.
+- يُظهر حدث `Transfer` على BaseScan أن عنوان الدفع حوّل `1200000` USDC atomic إلى عنوان استلام المنصة، أي `1.2` USDC.
+
+## الاستجابة الناجحة والإيصال
+
+بعد نجاح دفع الطلب، يكون جسم الاستجابة هو معلومات الطلب. كما تحمل المنصة في رأس الاستجابة `PAYMENT-RESPONSE` استجابة تسوية مُرمّزة بـ Base64، وتشمل الحقول الشائعة بعد فك الترميز:
+
+| الحقل            | الوصف                           |
+| ------------- | ---------------------------- |
+| `success`     | ما إذا كانت تسوية الـ Facilitator ناجحة. |
+| `transaction` | تجزئة معاملة التسوية على السلسلة.                    |
+| `network`     | شبكة الدفع.                        |
+| `payer`       | عنوان محفظة الدافع.                      |
+| `amount`      | مبلغ التسوية الفعلي، باستخدام الوحدات atomic.      |
+
+إذا كنت بحاجة إلى المطابقة، يُنصح بحفظ معرّف الطلب وعنوان محفظة الدافع و`transaction` والحالة النهائية للطلب في الوقت نفسه.
+
+## ملاحظات
+
+- يتطلب دفع الطلب رمز حساب المنصة، ولا يمكن إتمامه بالاعتماد على توقيع محفظة X402 فقط.
+- يستخدم `amount` وحدات USDC atomic، ويمثل `1200000` قيمة `1.2` USDC.
+- لا تُنشئ عنوان الاستلام أو عنوان الأصل بنفسك، واعتمد على `accepts` في استجابة 402.
+- إذا تم إرسال `PAYMENT-SIGNATURE` نفسها بشكل متكرر، فسيطبق الـ Facilitator حماية من إعادة التشغيل وفقًا لـ nonce.
+
+## استجابة فشل الدفع
+
+إن أول HTTP 402 دون تضمين `PAYMENT-SIGNATURE` هو تحدي دفع طبيعي، ولا يعني فشل الدفع. لا يزال فشل التحقق أو التسوية بعد التوقيع يحتفظ بالسلسلة القياسية `error` كآلية توافق احتياطية، ويعيد بنية خطأ مستقرة في `extensions.acedatacloud.paymentError`:
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+ينبغي للعميل إعطاء الأولوية للترجمة المحلية وفقًا لـ `code`، والرجوع إلى فشل الدفع العام عند وجود code غير معروف. `charged` حقل ثلاثي الحالات: لا يعيد `false` إلا عند الرفض الصريح قبل التسوية؛ ويعني غياب الحقل أن حالة الخصم غير معروفة، ولا يمكن تفسيره على أنه «لم يتم الخصم». بعد دخول الطلب الحالي إلى `Failed`، لا يمكن إعادة محاولة الطلب الأصلي؛ يُرجى إنشاء طلب جديد بعد إصلاح مشكلة المحفظة.
+
+لا تسجل أو ترسل `PAYMENT-SIGNATURE` الكامل أو توقيع المحفظة أو payload التفويض أو تشخيصات الـ Facilitator الأولية أو استجابات RPC. لا يحتاج فحص دعم العملاء إلا إلى معرّف الطلب و`code` الخطأ العام.

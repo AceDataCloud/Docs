@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` och `upto` avgiftsmodeller"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 använder för närvarande två typer av modeller: `exact` och `upto`. De löser olika avgiftsproblem.
+
+## `exact`
+
+`exact` innebär att priset kan fastställas innan begäran når mål-API:et. Det belopp som klienten signerar är det slutgiltiga beloppet som dras.
+
+Lämplig för:
+
+- Fast pris för bildgenerering;
+- Fast pris för videouppgiftsskapande;
+- Fast pris för sök- eller verktygs-API;
+- Beställningsbetalning.
+
+EVM `exact` använder USDC EIP-3009 `TransferWithAuthorization`:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+Facilitator verifierar signaturen och beloppet i `/verify`-steget och skickar denna auktorisering till kedjan i `/settle`-steget.
+
+## `upto`
+
+`upto` innebär att klienten auktoriserar en maximal gräns, Ace Data Cloud fakturerar baserat på faktisk användning efter att begäran har slutförts, och det faktiska beloppet som dras får inte överstiga gränsen.
+
+Lämplig för:
+
+- Chattkomplettering: det slutgiltiga priset beror på prompt tokens och completion tokens;
+- Strömmande svar: den verkliga längden på utdata är känd först efter att den avslutats;
+- Framtida efterhandsmätning API.
+
+`upto` använder Permit2 `PermitWitnessTransferFrom`. Klienten signerar inte en fast överföring, utan en auktorisering med vittne:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount` är gränsen, och det är inte nödvändigtvis det slutgiltiga beloppet som dras. Gateway kommer i `/record`-steget att omvandla den faktiska användningen till `amount` och skicka den till Facilitator. Facilitator tillåter endast avräkning av `amount &lt;= permitted.amount`.
+
+Bas `upto` programresultat:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+Förklaring:
+
+- Den auktoriserade gränsen som returneras i 402 är `95215` atomic USDC, klienten signerar enligt denna gräns.
+- Efter att modellen har svarat faktureras endast `3` atomic USDC, och kedjetransaktionen kan ses på BaseScan.
+- Detta resultat visar den avgörande skillnaden med `upto`: det signerade beloppet är en gräns, och kedjeavräkningen kan vara mindre än gränsen.
+- Om den faktiska användningen överstiger gränsen bör Facilitator avvisa avräkningen, och klienten behöver auktorisera med en högre gräns.
+
+`upto` erbjuds för närvarande endast på Base. SKALE erbjuder endast `exact`, om du behöver efterhandsmätning, vänligen använd Base.
+
+## Varför behövs Permit2 godkännande
+
+`upto` dras slutligen av x402 proxy genom Permit2 från betalningsplånboken. Innan första användningen behöver betalningsplånboken ge Permit2 en gång en ERC-20 tillåtelse.
+
+Python CLI:
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+Programväg:
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+När auktoriseringen är klar måste varje begäran fortfarande signera ett nytt `upto`-kuvert, eftersom nonce, deadline, vittne och beloppsgränser är olika.
+
+## Nollbeloppsavräkning
+
+`upto` stöder situationer där det faktiska beloppet är 0. Till exempel om mål-API:et inte lyckas generera mätbar användning kan Gateway skicka `amount = "0"`. Facilitator kommer att returnera framgång, men kommer inte att utföra en kedjetransaktion.
+
+Detta kan förhindra problemet med "begäran misslyckades men kedjeavgift dras ändå".
+
+## Valrekommendationer
+
+| Scenario                   | Rekommendation                |
+| ------------------------- | ----------------------------- |
+| Fast pris API             | Använd `exact`, logiken är enkel. |
+| Beställningsbetalning      | Använd `exact`.               |
+| Chattkomplettering, avgift per token | Använd Base `upto`.         |
+| Har ännu inte gjort Permit2 godkännande | Kör först med `exact`, sedan byt till `upto`. |
+| Behöver efterhandsmätning på SKALE | För närvarande inte stöd, SKALE erbjuder endast `exact`. |
+
+Om du är osäker på vilket alternativ du ska välja, använd först SDK:s standardbeteende; SDK kommer att välja den betalningskrav som matchar nätverket som servern returnerar.
+
+## Base `upto` kontrollista
+
+Vid anslutning eller felsökning, vänligen bekräfta att följande parametrar kommer från samma 402-svar och håll dem konsekventa vid klientens signering:
+
+| Parameter                     | Kontrollpunkt                                      |
+| ---------------------------- | ------------------------------------------------- |
+| `network`                    | Måste vara `eip155:8453`.                         |
+| `scheme`                     | Måste vara `upto`.                                |
+| `extra.chainId`              | Base kedje-ID är `8453`.                          |
+| `asset`                      | Använd Base USDC-kontraktadress från 402-svaret. |
+| `extra.facilitatorAddress`   | Måste delta i vittnet och överensstämma med Facilitator `/supported`. |
+| Permit2 tillåtelse          | Betalningsplånboken måste först auktorisera Permit2 för Base USDC. |
+
+Vanliga fel och hanteringsmetoder:
+
+| Fel                                             | Hanteringsmetod                                                                      |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `invalid_upto_evm_payload_invalid_signature`  | Kontrollera kedje-ID, facilitatoradress, Permit2-domän, spenderare, signaturkonto och vittne för att säkerställa att de överensstämmer med 402-svaret. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                   | Utför Permit2 godkännande för målkedjans USDC och skicka begäran igen.                     |
+| `amount exceeds permitted amount`              | Den faktiska användningen överstiger det signerade beloppet, behöver signera med en högre gräns. |

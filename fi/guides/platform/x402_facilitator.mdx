@@ -1,0 +1,215 @@
+---
+title: "X402 Facilitator Integraatio"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Facilitator on X402-linkin palvelinpuolen selvityskomponentti. Asiakas vastaa allekirjoituksesta, Gateway tai sinun palvelin vastaa Facilitatorin `/verify` ja `/settle` kutsumisesta.
+
+Ace Data Cloudin tuotannon Facilitator-osoite on:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+Lähdekoodivarasto: [https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire -sopimus
+
+Ace Data Cloudin X402-linkki käyttää täysin virallista x402 v2:ta, eikä se enää hyväksy v1:n `X-Payment` pyyntöpäätä. Liittyessä on huomioitava kolme asiaa:
+
+- Pyyntöpäätteen on oltava `PAYMENT-SIGNATURE`, jonka arvo on base64-koodattu JSON envelope.
+- envelope:n ylimmän tason on oltava `x402Version: 2`, ja `accepted`-objektissa on ilmoitettava valittu `scheme` ja `network`.
+- `network` käyttää CAIP-2 -tunnistetta (esim. `eip155:8453`), eikä lyhenteitä kuten `base` saa käyttää.
+
+envelope-rakenne:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+402-vastaus sisältää JSON-kehon lisäksi myös `PAYMENT-REQUIRED` -vastauspään, jonka arvo on sama haasteen sisältö base64-koodattuna, jotta asiakas voi lukea maksuvaatimuksen ilman kehon purkamista.
+
+## Ydinrajapinta
+
+### `GET /supported`
+
+Tarkista tuetut verkot ja scheme:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Palautusesimerkki:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": ["3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"]
+  }
+}
+```
+
+Tuloksen selitys:
+
+- `network` käyttää CAIP-2 -tunnistetta, ei lyhenteitä kuten `base`, `skale`.
+- `/supported` osoittaa, että Facilitatorilla on vastaavat vahvistus- ja selvityskyvyt.
+- Base, SKALE ja Solana tukevat `exact`; `upto` on tällä hetkellä saatavilla vain Base:lla.
+- `signers` on Facilitatorin osoitteet, joita käytetään selvityskauppojen lähettämiseen.
+- Tietyn API:n sallimat vaihtoehdot määräytyvät edelleen kyseisen API:n 402 `accepts` mukaan.
+
+### `POST /verify`
+
+Vahvista, täyttääkö asiakkaan lähettämä `PAYMENT-SIGNATURE` tietyn maksuvaatimuksen.
+
+Pyyntökeho:
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+v2:n `paymentRequirements` kenttä sisältää `scheme`, `network`, `asset`, `amount`, `payTo`, `maxTimeoutSeconds` ja `extra`, ja määräkenttä on `amount`. API 402 -vastauksen `accepts[]` palauttaa myös ylimääräisen `maxAmountRequired` asiakkaan luettavaksi, mutta se ei kuulu Facilitatorin pyyntökehoon.
+
+Onnistunut vastaus:
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+Tuotantotilausten maksun `PAYMENT-RESPONSE` -vastauspää dekoodattuna sisältää selvityksen tuloksen. Base-tilauksen maksun ohjelman suoritus:
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Tuloksen selitys:
+
+- `success=True` tarkoittaa, että Facilitatorin selvitys onnistui.
+- `transaction` on lohkoketjun transaktiotunnus, ja tilauksen `pay_id` on myös kirjoitettu samaan arvoon.
+- explorerista voi nähdä `1200000` atomic USDC:n Base USDC -siirron.
+- `errorReason=None` tarkoittaa, että tällä kertaa selvityksessä ei ollut liiketoimintaongelmia.
+
+Vahvistus epäonnistuu yleensä myös HTTP 200, mutta `isValid` on `false`. Liiketoimintapuolen tulisi lukea `invalidReason`, eikä vain katsoa HTTP-tilakoodia.
+
+### `POST /settle`
+
+Siirrä jo vahvistettu valtuutus lohkoketjuun.
+
+Pyyntökeho on periaatteessa sama kuin `/verify`. `upto`-erotus on: `paymentRequirements.amount` muutetaan selvitysvaiheessa todelliseksi selvitysmääräksi; allekirjoitusraja tallennetaan Facilitatorin vahvistusvaiheessa, ja selvitysvaiheessa tarkistetaan, että todellinen määrä ei ylitä tätä rajaa.
+
+Onnistunut vastaus:
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+Jos `upto` todellinen määrä on 0, `transaction` voi olla tyhjää merkkijonoa, mikä tarkoittaa, että lohkoketjusiirtoa ei tarvita.
+
+## Ace Data Cloud Gatewayn käyttö Facilitatorin kanssa
+
+Ace Data Cloud API Gatewayn linkki on seuraava:
+
+1. Asiakas tekee ensimmäisen API-pyynnön ilman `Authorization` ja `PAYMENT-SIGNATURE`.
+2. Gateway laskee pyynnön arvioidun hinnan, palauttaa 402 ja `accepts`.
+3. Asiakas allekirjoittaa ja yrittää uudelleen `PAYMENT-SIGNATURE` kanssa.
+4. Gateway purkaa `PAYMENT-SIGNATURE`:n ja valitsee vastaavan maksuvaatimuksen.
+5. Gateway kutsuu Facilitatorin `/verify`.
+6. `/verify` onnistuneesti jälkeen Gateway päästää pyynnön kohde-API:in.
+7. Kohde-API:n palautuksen jälkeen Gateway kutsuu `/record` vaiheessa Facilitatorin `/settle`.
+8. Gateway kirjoittaa lohkoketjusiirron tunnuksen käyttöhistorian metadataan.
+`exact` vaiheessa 7 laskentatunnuksen summa; `upto` vaiheessa 7 kirjoita `amount` todellisen käytön mukaan, sitten laske todellinen summa.
+
+## Oman API:n liittäminen
+
+Jos haluat, että oma API tukee X402, voit toteuttaa sen tämän rakenteen mukaan:
+
+1. Valmistele jokaiselle maksuliittymälle `paymentRequirements`, joka sisältää verkon, summan, vastaanotto-osoitteen, omaisuusosoitteen ja allekirjoitusalueen.
+2. Jos pyyntö ei sisällä `PAYMENT-SIGNATURE`, palauta HTTP 402 ja `accepts`.
+3. Jos pyyntö sisältää `PAYMENT-SIGNATURE`, Base64-dekoodaa saadaksesi `paymentPayload`.
+4. Kutsu Facilitatoria `/verify`.
+5. Vahvistuksen onnistumisen jälkeen suorita liiketoimintalogiikka.
+6. Liiketoiminnan onnistumisen jälkeen kutsu Facilitatoria `/settle`.
+7. Tallenna `payer`, `transaction`, `amount`, `network` tiliöintiä varten.
+
+Palvelimen on käytettävä itse generoituja `paymentRequirements` kutsuessaan `/verify` ja `/settle`, älä luota asiakaspäätteen palauttamaan summaan, vastaanotto-osoitteeseen tai omaisuusosoitteeseen.
+
+## Toistonsuojaus
+
+Facilitator tallentaa nonce-arvon. Samoja nonce-arvoja ei voi vahvistaa ja laskea uudelleen.
+
+Tämä tarkoittaa:
+
+- Asiakaspäätteen tulisi allekirjoittaa uusi envelope jokaisessa pyynnössä;
+- Jos `/settle` on jo lähettänyt transaktion mutta ei ole vielä vahvistettu, voit yrittää uudelleen `/settle` samalla nonce-arvolla idempotenttia tiliöintiä varten;
+- Älä vältä samaa `PAYMENT-SIGNATURE` välimuistissa useisiin API-kutsuihin.
+
+## Yleiset virheet
+
+| Virhe                                           | Yleiset syyt                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `Authorization nonce already processed`      | Sama `PAYMENT-SIGNATURE` on käytetty uudelleen.                                    |
+| `Authorization destination mismatch`         | Asiakaspäätteen allekirjoituksessa oleva `to` ei vastaa maksuvaatimuksen `payTo`:ta.                |
+| `invalid_upto_evm_payload_invalid_signature` | `upto`-tyyppisen datan chainId, facilitator, Permit2-alue tai allekirjoitusosoite eivät vastaa. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | Lompakolla ei ole vielä riittävää USDC-lupaa Permit2:lle.                        |
+| `Payer has insufficient USDC balance`        | Maksulompakon USDC on riittämätön.                                                    |
+| `Solana signer private key not configured`   | Facilitator tarvitsee allekirjoittaa maksajana, mutta palvelimelta puuttuu Solana allekirjoittajan konfigurointi.           |

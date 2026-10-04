@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` と `upto` 課金プラン"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 は現在、`exact` と `upto` の2種類のスキームを使用しています。これらは異なる課金の問題を解決します。
+
+## `exact`
+
+`exact` は、リクエストがターゲット API に到達する前に価格を確定できることを示します。クライアントが署名した金額が最終的な引き落とし金額です。
+
+適しているもの：
+
+- 固定価格の画像生成；
+- 固定価格のビデオタスク作成；
+- 固定価格の検索またはツール API；
+- 注文の支払い。
+
+EVM `exact` は USDC EIP-3009 `TransferWithAuthorization` を使用します：
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+ファシリテーターは `/verify` ステージで署名と金額を検証し、`/settle` ステージでこの承認をチェーン上に提出します。
+
+## `upto`
+
+`upto` は、クライアントが最大上限を承認することを示し、Ace Data Cloud はリクエストが完了した後に実際の使用量に基づいて決済を行い、実際の引き落としは上限を超えることはありません。
+
+適しているもの：
+
+- チャット補完：最終価格はプロンプトトークンと補完トークンに依存；
+- ストリーミング応答：実際の出力の長さが終了した後にのみわかる；
+- 将来の後置計量 API。
+
+`upto` は Permit2 `PermitWitnessTransferFrom` を使用します。クライアントが署名するのは固定の転送ではなく、ウィットネスを伴う上限の承認です：
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount` は上限であり、最終的な引き落としとは限りません。ゲートウェイは `/record` ステージで実際の使用量を `amount` に変換してファシリテーターに渡します。ファシリテーターは `amount &lt;= permitted.amount` の決済のみを許可します。
+
+Base `upto` のプログラム実行結果：
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+説明：
+
+- 402 で返された承認上限は `95215` atomic USDC であり、クライアントはこの上限で署名します。
+- モデルの実際の応答後、結算は `3` atomic USDC のみであり、チェーン上の取引は BaseScan で確認できます。
+- この結果は `upto` の重要な違いを示しています：署名金額は上限であり、チェーン上の決済は上限未満であることができます。
+- 実際の使用量が上限を超えた場合、ファシリテーターは決済を拒否し、クライアントはより高い上限で再度承認する必要があります。
+
+`upto` は現在 Base でのみ提供されています。SKALE は `exact` のみを提供しており、後置計量が必要な場合は Base を使用してください。
+
+## なぜ Permit2 承認が必要か
+
+`upto` は最終的に x402 プロキシを介して Permit2 から支払いウォレットから USDC を引き出します。初めて使用する前に、支払いウォレットは Permit2 に対して一度 ERC-20 アローワンスを与える必要があります。
+
+Python CLI：
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+プログラム方式：
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+承認が完了した後、各リクエストでは新しい `upto` エンベロープに署名する必要があります。なぜなら、nonce、deadline、witness、金額上限が異なるからです。
+
+## ゼロ金額決済
+
+`upto` は実際の金額が 0 である場合をサポートします。例えば、ターゲット API が成功裏に課金可能な量を生成しなかった場合、ゲートウェイは `amount = "0"` を渡すことができます。ファシリテーターは成功を返しますが、チェーン上の取引は発生しません。
+
+これにより、「リクエストが成功しなかったが、依然としてチェーン上の費用が引き落とされる」という問題を回避できます。
+
+## 選択の提案
+
+| シーン                   | 提案                       |
+| -------------------- | ------------------------ |
+| 固定価格 API             | `exact` を使用し、論理が簡単。         |
+| 注文支払い                 | `exact` を使用。              |
+| チャット補完、トークン単位の課金      | Base `upto` を使用。          |
+| まだ Permit2 承認を行っていない | 先に `exact` で通してから `upto` に切り替える。 |
+| SKALE で後置計量が必要      | 現在サポートされていない、SKALE は `exact` のみを提供。  |
+
+どれを選ぶべきか不明な場合は、まず SDK のデフォルト動作を使用してください；SDK はサーバーが返す一致するネットワークの支払い要件を選択します。
+
+## Base `upto` チェックリスト
+
+接続またはトラブルシューティング時には、以下のパラメータが同じ 402 応答から来ていることを確認し、クライアント署名時に一貫性を保ってください：
+
+| パラメータ                         | チェックポイント                                          |
+| -------------------------- | -------------------------------------------- |
+| `network`                  | 必ず `eip155:8453` であること。                           |
+| `scheme`                   | 必ず `upto` であること。                                  |
+| `extra.chainId`            | Base チェーン ID は `8453` であること。                      |
+| `asset`                    | 402 応答に含まれる Base USDC コントラクトアドレスを使用。                  |
+| `extra.facilitatorAddress` | 必ずウィットネスに参加し、ファシリテーター `/supported` と一致すること。 |
+| Permit2 allowance          | 支払いウォレットは先に Base USDC に対して Permit2 を承認する必要がある。               |
+
+一般的なエラーと対処法：
+
+| エラー                                           | 対処法                                                                          |
+| -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `invalid_upto_evm_payload_invalid_signature` | チェーン ID、ファシリテーターアドレス、Permit2 ドメイン、spender、署名アカウント、ウィットネスが 402 応答と一致しているか確認。 |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | ターゲットチェーン USDC に対して Permit2 承認を実行した後、再度リクエストを行う。                                         |
+| `amount exceeds permitted amount`            | 実際の使用量が署名上限を超えているため、より高い上限で再度署名する必要がある。                                                       |

@@ -1,0 +1,253 @@
+---
+title: "X402 Nopea aloitus"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Tässä oppaassa kuvataan Ace Data Cloud X402:n täydellinen prosessi minimaalisen API-pyynnön avulla. Tavoitteena ei ole ensin kirjoittaa monimutkaista koodia, vaan ymmärtää: miksi ensimmäinen pyyntö palauttaa 402, mitä `accepts`-kentässä on ja miten `PAYMENT-SIGNATURE` muuttaa saman API-pyynnön maksetuksi pyynnöksi.
+
+## Valmistelut
+
+Sinun tulee valmistella:
+
+| Projekti | Selitys                                                      |
+| ---- | ------------------------------------------------------- |
+| Lompakko | Lompakko, joka tukee kohdeverkkoa. Base / SKALE käyttää EVM-lompakkoa, Solana käyttää Solana-lompakkoa. |
+| USDC | Lompakossa tulee olla riittävästi USDC:tä. Todellinen summa määräytyy 402-vastauksen `maxAmountRequired` mukaan.    |
+| Kehitysympäristö | TypeScript suosittelee Node.js 18+; Python suosittelee Python 3.10+.       |
+| SDK | Suositellaan käyttämään virallista SDK:ta, ei suositella kirjoittamaan allekirjoitusyksityiskohtia käsin.                                   |
+
+X402:n kutsuminen Ace Data Cloud API:lle ei vaadi API-tokenia. SDK:n ensimmäinen pyyntö ei sisällä `Authorization`-kenttää, Gateway palauttaa `402 Payment Required` ja maksupyyntö; SDK allekirjoittaa automaattisesti ja yrittää uudelleen.
+
+## Asenna SDK
+
+Lähdekoodi ja pakettiosoitteet:
+
+- SDK-repositorio: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- X402 Client -repositorio: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm: `@acedatacloud/sdk`, `@acedatacloud/x402-client`
+- PyPI: `acedatacloud`, `acedatacloud-x402`
+
+TypeScript:
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client ethers
+```
+
+Python:
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+Jos haluat käyttää Solanaa, sinun on myös asennettava vastaavat riippuvuudet:
+
+```bash
+npm install @solana/web3.js
+```
+
+Python-version Solana-allekirjoittaja riippuvuudet on jo sisällytetty `acedatacloud-x402`:een.
+
+Puhtaan väliaikaisen ympäristön asennus ja tuontitarkistuksen tuloste:
+
+```text
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+
+acedatacloud 2026.4.26.1
+acedatacloud-x402 2026.5.31.3
+imports_ok True True True True True True
+usage: acedatacloud-x402 [-h] {approve-permit2} ...
+```
+
+Tuloksen selitys:
+
+- npm-paketit ja PyPI-paketit ovat todellisia julkaistuja paketteja, eivät dokumentissa olevia paikkamerkkinimiä.
+- `acedatacloud-x402[cli]` asentaa CLI:n, `approve-permit2` alikomento on käytettävissä `upto`-tilanteen Permit2-valtuutukseen.
+
+## Ensimmäinen pyyntö palauttaa 402
+
+Voit ensin käyttää `curl`-komentoa nähdäksesi, mitä maksamaton pyyntö palauttaa. Alla oleva esimerkki ei aiheuta veloitusta, koska se ei sisällä `PAYMENT-SIGNATURE`:a:
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/openai/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 1
+  }'
+```
+
+Palautus sisältää `accepts`-taulukon, yleinen rakenne on seuraava:
+
+```json
+{
+  "x402Version": 2,
+  "resource": {
+    "url": "/openai/chat/completions",
+    "description": "AceDataCloud API call",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "maxAmountRequired": "95215",
+      "amount": "95215",
+      "maxTimeoutSeconds": 3600,
+      "resource": "/openai/chat/completions",
+      "description": "...",
+      "payTo": "0x...",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      }
+    }
+  ],
+  "error": "PAYMENT-SIGNATURE header is required"
+}
+```
+
+Sama haasteen sisältö on myös base64-muodossa `PAYMENT-REQUIRED`-vastauspäätteessä, jotta asiakas voi lukea maksupyyntöä ilman, että kehoa tarvitsee purkaa.
+
+Tuotanto-API:n maksamattoman pyynnön ohjelman tulosteen yhteenveto on seuraava:
+
+```text
+status=402
+x402Version 2
+accepts [
+  ('eip155:8453', 'exact', '95215'),
+  ('eip155:8453', 'upto', '95215'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '95215'),
+  ('eip155:1187947933', 'exact', '95215')
+]
+```
+
+Tuloksen selitys:
+
+- Ensimmäisessä pyynnössä ei ollut `Authorization`- tai `PAYMENT-SIGNATURE`-kenttiä, joten se palautti HTTP 402, eikä veloitusta tapahtunut.
+- `accepts` on tämän pyynnön ainoa luotettava allekirjoitusperuste, joka sisältää valinnaiset verkot, scheme, maksimi summa, vastaanottosoite ja omaisuusosoite.
+- `network` on CAIP-2-tunnus, asiakkaan on valittava verkko CAIP-2-merkkijonon mukaisesti.
+- Tämän `gpt-4o-mini`-minimichat-pyynnön yläraja on `95215` atomic USDC, eli `0.095215` USDC.
+- Jokaisen pyynnön tulisi lukea tämän kerran 402-vastaus, älä kovakoodaa esimerkkisummia liiketoimintakoodiin.
+
+Kenttien merkitys:
+
+| Kenttä                | Selitys                                                                       |
+| ------------------- | ------------------------------------------------------------------------ |
+| `scheme`            | Maksusuunnitelma. `exact` tarkoittaa kiinteää summaa, `upto` tarkoittaa valtuutuksen ylärajaa, maksu perustuu todelliseen käyttöön.                               |
+| `network`           | Maksuverkkojen CAIP-2-tunnus, kuten `eip155:8453`, `eip155:1187947933`, `solana:5eykt4...`. |
+| `maxAmountRequired` | Suurin maksusumma, yksikkönä USDC atomic units, `95215` tarkoittaa `0.095215` USDC.                 |
+| `amount`            | Tällä kertaa maksettava summa; `exact` on sama kuin `maxAmountRequired`, `upto` muokataan todellisen käytön mukaan maksuvaiheessa.           |
+| `payTo`             | Vastaanottosoite.                                                                    |
+| `asset`             | USDC:n sopimusosoite tai Solana-mint-osoite.                                               |
+| `extra`             | Allekirjoitukseen tarvittavat ketjun ID, EIP-712 domain, Permit2-osoite jne. laajennustiedot.                                |
+
+## Käytä SDK:ta maksun uudelleenyritykseen
+
+Alla on minimaalinen TypeScript-esimerkki. Se määrittää `network: 'skale'`, handler valitsee tämän 402-vastauksen SKALE:n maksupyyntövaatimuksen; todellinen summa ja vastaanottosoite määräytyvät edelleen `accepts`-kentän mukaan:
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.SKALE_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`tuettua menetelmää ei ole: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'skale',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const response = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Vastaa tarkalleen: hello' }],
+  max_tokens: 8
+});
+
+console.log(response.choices[0].message.content);
+```
+
+同一链路用 TypeScript SDK 的程序运行结果：
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+结果说明：
+
+- `content ADC_TS_SDK_X402_OK` on malli, joka palauttaa kiinteän merkkijonon ohjeiden mukaan, mikä osoittaa, että maksun uudelleenyrityksen jälkeen pyyntö meni oikeasti mallin API:iin.
+- `payer` on paikallinen allekirjoitettu lompakko-osoite, yksityisavain ei ole lähetetty Ace Data Cloudille.
+- SDK suoritti 402:n purkamisen, `PAYMENT-SIGNATURE`-allekirjoituksen ja alkuperäisen pyynnön uudelleenyrityksen; liiketoimintakoodi on edelleen kirjoitettu tavallisen SDK-kutsutavan mukaan.
+
+Tässä koodissa tapahtui neljä vaihetta:
+
+1. SDK lähettää tavallisen API-pyynnön ilman `Authorization`-kenttää.
+2. Gateway palauttaa `402 Payment Required` ja `accepts`.
+3. `createX402PaymentHandler` valitsee `network = 'skale'` maksuv要求n ja allekirjoittaa `PAYMENT-SIGNATURE`-allekirjoituksen.
+4. SDK yrittää samaa pyyntöä uudelleen, Gateway kutsuu Facilitatorin vahvistamaan ja selvittämään, ennen kuin se päästää läpi kohde-API:in.
+
+## Tarkista Facilitatorin tukikyvyt
+
+X402 API ei perustu resurssiluetteloon. Asiakas kutsuu suoraan tunnettua API:a ja käyttää kyseisen pyynnön reaaliaikaisesti palautettua
+`402 Payment Required` ja `accepts` ainoana hintana ja allekirjoitusperusteena.
+
+Facilitatorin kyvykkyysilmoitus sijaitsee:
+
+```bash
+curl https://facilitator.acedata.cloud/.well-known/x402
+```
+
+Se kuvaa vain `/supported`-, `/verify`-, `/settle`- ja tällä hetkellä käytössä olevat maksun verkot, eikä luettele API-resursseja.
+
+Ace Data Cloudin tuotanto-Facilitatorin osoite on:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+Voit tarkistaa, mitä verkkoja ja kaavoja se tukee:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Palautettu `kinds` luettelee Facilitatorin tukemat verkot ja kaavat. Todellisessa kutsussa noudatetaan edelleen API:n palauttamaa `accepts`-arvoa.
+
+Facilitatorin `/supported`-tulos:
+
+```text
+kinds [
+  ('eip155:8453', 'exact'),
+  ('eip155:8453', 'upto', {'facilitatorAddress': '0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708'}),
+  ('eip155:1187947933', 'exact'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact')
+]
+```
+
+Tuloksen selitys:
+
+- `/supported` osoittaa, että Facilitatorilla on vahvistus- ja selvityskyky näille verkoille ja kaavoille.
+- Base, SKALE ja Solana tukevat `exact`; `upto` on tällä hetkellä saatavilla vain Base:lla.
+- Onko tietty API sallittu tietyssä verkossa, määräytyy edelleen kyseisen API:n 402 `accepts`-arvon mukaan.

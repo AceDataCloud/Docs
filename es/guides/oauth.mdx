@@ -1,0 +1,236 @@
+---
+title: "Integrate \"Sign in with Ace Data Cloud\" (OAuth 2.0)"
+---
+
+Enable your own product to support "Sign in with Ace Data Cloud", and after user authorization, **act on behalf of the user** to read and write their Ace Data Cloud resources (profile, API Token, subscriptions, usage, orders, etc.). The underlying mechanism is the standard **OAuth 2.0 Authorization Code flow (Authorization Code) + PKCE**, implemented exactly the same way as GitHub / Google sign-in—any OAuth client library you already use can be used directly.
+
+> **Suitable scenarios**: You are building a third-party application / Agent / MCP client / automation workflow, and want users to sign in with one click using their Ace Data Cloud account and access their resources on the platform as needed, without requiring users to manually copy and paste an API Key.
+
+## Terminology & Endpoint Quick Reference
+
+All endpoints are under `https://auth.acedata.cloud`, and the latest addresses can be obtained at any time through the discovery endpoint (Discovery):
+
+```bash
+curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
+```
+
+| Purpose                 | Endpoint                                                |
+| ------------------ | ------------------------------------------------- |
+| Discovery document (Discovery)    | `GET /.well-known/oauth-authorization-server`     |
+| User authorization page (browser redirect)       | `GET https://auth.acedata.cloud/oauth2/authorize` |
+| Token endpoint (exchange / refresh token) | `POST https://auth.acedata.cloud/oauth2/token`    |
+| Revoke token               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
+| User information (UserInfo)     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
+| Application registration management (self-service)         | `https://auth.acedata.cloud/user/oauth-apps`      |
+
+Supported capabilities: `response_type=code`, `grant_types=authorization_code, refresh_token`, `code_challenge_methods=S256, plain`, client authentication methods `client_secret_post` (confidential clients) / `none` (PKCE public clients).
+
+## Permission Scopes (Scope)
+
+Request according to the principle of "least privilege"; users will see every permission you request on the authorization page.
+
+**Identity-related (OIDC compatible)**
+
+| Scope     | Meaning      | Fields returned by `/users/me`                                           |
+| --------- | ------- | ---------------------------------------------------------- |
+| `openid`  | Unique user identifier  | `id`                                                       |
+| `profile` | Basic profile    | `username`, `nickname`, `avatar`, `is_verified`, `date_joined` |
+| `email`   | Email address      | `email`                                                    |
+| `phone`   | Phone number (sensitive) | `phone`, `region`                                           |
+
+**Platform resources**
+
+| Scope                                      | Meaning                     |
+| ------------------------------------------ | ---------------------- |
+| `applications:read` / `applications:write` | Read / modify the user's service subscriptions and quotas       |
+| `credentials:read` / `credentials:write`   | Read / create and revoke the user's API Token |
+| `usage:read`                               | Read the user's call history               |
+| `orders:read` / `orders:write`             | Read orders / place orders and initiate payment          |
+
+**Aggregate scopes (automatically expanded)**
+
+| Scope            | Expands to                                                                     |
+| ---------------- | ----------------------------------------------------------------------- |
+| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
+| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
+| `platform`       | `platform:read` + `platform:write`                                      |
+
+**Special**
+
+| Scope            | Meaning                                                 |
+| ---------------- | -------------------------------------------------- |
+| `offline_access` | Issue a **Refresh Token** (if not requested, only an Access Token is issued; reauthorization is required after expiration) |
+
+> Typical combinations: third-party "one-click sign-in" = `openid profile`; MCP / IDE clients that need to automatically configure Keys = `openid profile credentials:read credentials:write`; full management console = `openid profile email platform offline_access`.
+
+## Step 1: Register an OAuth Application
+
+Open [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) → "Create Application", and fill in:
+
+1. **Application name / description / Logo**: These will be displayed on the user's authorization consent page.
+2. **Client Type**:
+   - **Confidential**——You have a backend and can securely store the `client_secret` (Web services, backend services).
+   - **Public**——Pure frontend / desktop / CLI / mobile applications, **cannot** store secrets and must use **PKCE**.
+3. **Redirect URIs**: The address users are redirected back to after authorization is completed; it **must exactly match the `redirect_uri` you pass when initiating authorization**, and multiple can be entered.
+4. **Scopes**: Select the scopes you need from the previous section.
+
+After saving, you will receive a **`client_id`**; confidential clients will also have the **`client_secret`** displayed **only once**—save it immediately, as it cannot be viewed again after closing (you can regenerate it through "Rotate Secret" on the details page; the old secret becomes invalid immediately).
+
+> Each account can create up to **20** OAuth applications.
+
+## Step 2: Redirect the User to the Authorization Page
+
+In your application, redirect the user's browser to the authorization page with query parameters:
+
+```
+https://auth.acedata.cloud/oauth2/authorize
+  ?response_type=code
+  &client_id=<你的 client_id>
+  &redirect_uri=<你注册的回调地址>
+  &scope=openid%20profile%20credentials:read
+  &state=<随机防 CSRF 串>
+  &code_challenge=<PKCE 挑战值>          # 公开客户端必填
+  &code_challenge_method=S256            # 公开客户端必填
+```
+
+- `state`: Generate a random string yourself. It is returned unchanged during the callback and is used to prevent CSRF; **be sure to validate it**.
+- **PKCE (required for public clients, also recommended for confidential clients)**: First generate a random `code_verifier`, then calculate
+  `code_challenge = BASE64URL( SHA256( code_verifier ) )`, place `code_challenge` in the authorization URL,
+  and keep `code_verifier` for yourself to use in Step 4.
+
+After the user logs in and clicks "Accept", the browser will be redirected back to:
+
+```
+<redirect_uri>?code=<授权码>&state=<原样返回的 state>
+```
+
+If the user declines: `<redirect_uri>?error=access_denied&error_description=...&state=...`.
+
+> The authorization code is valid for **10 minutes** and **can only be used once**.
+
+## Step 3: Exchange the Authorization Code for a Token
+
+On your **backend** (confidential client) or client (PKCE public client), call the token endpoint using `code`.
+
+**Confidential client (with client_secret):**
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<上一步拿到的 code> \
+  -d client_id=<你的 client_id> \
+  -d client_secret=<你的 client_secret> \
+  -d redirect_uri=<和第 2 步完全一致的回调地址>
+```
+
+**Public client (PKCE, without client_secret):**
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<code> \
+  -d client_id=<tu client_id> \
+  -d code_verifier=<code_verifier generado en el paso 2> \
+  -d redirect_uri=<dirección de devolución de llamada>
+```
+
+Respuesta exitosa (`refresh_token` solo aparece si se solicitó `offline_access`):
+
+```json
+{
+  "access_token": "<JWT>",
+  "token_type": "Bearer",
+  "expires_in": 1296000,
+  "scope": "openid profile credentials:read",
+  "refresh_token": "<JWT, solo con offline_access>"
+}
+```
+
+`access_token` es un JWT, que contiene la declaración `scope`; su período de validez es de **15 días** (segundos de `expires_in`). El período de validez del Refresh Token es de **30 días**.
+
+## Paso 4: llamar a la interfaz con Access Token
+
+Simplemente coloca el token en el encabezado `Authorization: Bearer`.
+
+**Leer información del usuario (UserInfo, los campos se filtran según el scope autorizado):**
+
+```bash
+curl https://auth.acedata.cloud/api/v1/users/me \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Llamar a la interfaz de recursos de la plataforma** (`platform.acedata.cloud`, autenticada según el scope). Por ejemplo, si se ha obtenido `credentials:read`:
+
+```bash
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<id devuelto por UserInfo>" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+El backend de la plataforma validará la declaración `scope` en el JWT: el token solo puede acceder a los recursos autorizados por el usuario. Si se accede a un recurso no autorizado, devolverá `403`.
+
+## Renovar el token
+
+Después de que el Access Token expire, usa el Refresh Token para intercambiarlo por un nuevo par de tokens (se requiere haber solicitado `offline_access` inicialmente):
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=refresh_token \
+  -d refresh_token=<tu refresh_token>
+```
+
+La estructura de respuesta es la misma que en el paso 3; el scope se conservará **sin cambios** de la autorización original. Después de renovar, el Refresh Token anterior deja de ser válido (rotación), guarda el nuevo.
+
+## Revocar el token
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/revoke \
+  -d token=<access_token o refresh_token>
+```
+
+## Caso real: así es como están conectados nuestros propios servidores MCP
+
+Los más de 15 servidores MCP de Ace Data Cloud (NanoBanana, Midjourney, Suno, Seedance, Kling…) usan exactamente este flujo para la conexión «Sign in with Ace Data Cloud» que aparece en Claude Desktop / Cursor: todos están registrados como aplicaciones OAuth de tipo **público (PKCE)**, solicitan scopes relacionados con `credentials`, y después de que el usuario autoriza, el servidor MCP puede llamar a `api.acedata.cloud` en nombre del usuario, sin que el usuario tenga que pegar manualmente una API Key. Tu integración es exactamente igual que la de ellos.
+
+## Errores comunes
+
+Las respuestas de error se unifican como `{ "error": "<code>", "error_description": "<descripción legible para humanos>" }`:
+
+| error                    | Significado / solución de problemas                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `invalid_request`        | Falta un parámetro o es inválido (por ejemplo, no se envió `code` / `client_id`)            |
+| `invalid_client`         | `client_id` no existe, la aplicación está deshabilitada o `client_secret` es incorrecto     |
+| `invalid_grant`          | El código de autorización no existe / ha expirado (>10 minutos) / ya fue usado / la validación PKCE falló / `redirect_uri` no coincide con el de la autorización |
+| `access_denied`          | El usuario hizo clic en «Rechazar» en la página de autorización                            |
+| `unsupported_grant_type` | `grant_type` no es `authorization_code` ni `refresh_token`                                 |
+
+## Referencia rápida de límites
+
+| Elemento                 | Valor                                                           |
+| ------------------------ | --------------------------------------------------------------- |
+| Número máximo de aplicaciones OAuth por cuenta | 20                                              |
+| Período de validez del código de autorización | 10 minutos, de un solo uso                        |
+| Período de validez del Access Token | 15 días                                           |
+| Período de validez del Refresh Token | 30 días (rotación)                              |
+| `redirect_uri`           | Debe coincidir exactamente con el valor registrado               |
+| `client_secret`          | Solo se muestra una vez al crear / rotar; el servidor lo almacena como hash SHA-256 |
+
+## Integrar aplicaciones OAuth de terceros en la página de inicio de Studio
+
+En «Configuración → Inicio → Componentes del sitio web» de Studio se puede habilitar OAuth y configurar el `client_id` y la dirección de devolución de llamada registrada de la aplicación de terceros.
+El sitio web y la devolución de llamada deben usar HTTPS, tener el mismo origen (protocolo, dominio y puerto), y usar un origen diferente al de Studio.
+No se debe incluir `client_secret` en la configuración; la clave de la aplicación solo puede almacenarse en el backend de terceros.
+
+Los permisos solicitados por el componente son `profile:read credentials:read`. Cada visitante debe dar su consentimiento por separado; que el administrador del sitio configure el componente no representa la autorización de los visitantes.
+La página de terceros genera un `state` aleatorio y un verificador PKCE, y envía un challenge S256 a Studio. Studio aloja la página oficial de autorización en el área del componente,
+y después de que el usuario consiente, el tercero recibe un código de autorización de un solo uso, llama al endpoint de token para intercambiarlo por un OAuth access token y luego accede a
+`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=<ID de usuario>` para leer la API Key existente.
+El ID de usuario procede del `id` devuelto en el paso anterior por `GET https://auth.acedata.cloud/api/v1/users/me`; la interfaz de lista de credenciales no acepta `user_id=me`.
+Studio no transmite su propio token de inicio de sesión a terceros ni lee e inyecta directamente la Key del usuario.
+
+Los clientes públicos deben usar **S256 PKCE**. Al intercambiar el token, se debe proporcionar un `redirect_uri` exactamente igual al de la solicitud de autorización.
+El código de autorización solo puede canjearse una vez. Antes de la autorización se comprobará si la dirección de devolución de llamada está registrada.
+
+La página de terceros necesita implementar el protocolo de mensajes; cualquier página web existente no puede integrarse automáticamente solo rellenando una URL.
+Consulta el ejemplo completo en la [Guía de integración del componente OAuth de Studio](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
+
+**Autorizar la lectura de la API Key equivale a permitir que terceros guarden y utilicen esa Key. Cancelar la autorización OAuth no invalida la Key que terceros ya hayan copiado;
+el usuario debe revocar o rotar la Key por separado.**

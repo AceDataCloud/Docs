@@ -1,0 +1,290 @@
+---
+title: "Go SDK 接入教程"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+[`github.com/AceDataCloud/SDK/go`](https://pkg.go.dev/github.com/AceDataCloud/SDK/go) 是 Ace Data Cloud 官方 Go SDK，把 `api.acedata.cloud` 上的 chat completions / images / video / music / search 封装成 `client.OpenAI().Chat().Completions().Create(...)` 风格的方法链，自带 SSE 流式（基于 channel）、自动重试退避和类型化错误。
+
+风格上对齐 `context.Context` + functional options，适合放进任何 Go 后端服务或 CLI。
+
+源码与文档：
+
+- SDK 仓库：[https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- Go 模块：[https://pkg.go.dev/github.com/AceDataCloud/SDK/go](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+
+## 安装
+
+```bash
+go get github.com/AceDataCloud/SDK/go
+```
+
+干净 Go 模块的版本检查输出：
+
+```text
+$ go list -m github.com/AceDataCloud/SDK/go
+github.com/AceDataCloud/SDK/go v0.0.0-20260505072132-4a3d921f9bb4
+```
+
+结果说明：
+
+- 当前没有打 semver 标签，`go get` 拉到的是 commit 伪版本 `v0.0.0-<timestamp>-<sha>`；这个版本会被锁进 `go.sum`，团队成员拉同一份代码可以拿到完全一致的依赖。
+- Go SDK 目前以 `chat.completions`（同步 + 流式）为主路径稳定，多媒体资源（`images` / `video` / `audio`）和 `TaskHandle` 轮询处于 alpha 阶段。需要这些能力的场景请优先选 [TypeScript SDK](https://platform.acedata.cloud/documents/sdk-typescript) 或 [Python SDK](https://platform.acedata.cloud/documents/sdk-python)。
+
+## 准备 API Token
+
+参考 [SDK 总览 - 申请 API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) 取到 token，然后在 shell 里 `export`：
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+构造客户端时通过 `WithAPIToken(...)` option 显式注入；Go SDK 不会自动读取环境变量，需要业务代码 `os.Getenv` 一下，这样在多账号或自测场景里更可控。
+
+## 示例 1：chat.completions（非流式）
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    res, err := client.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Reply with exactly: ADC_GO_SDK_OK"}},
+        MaxTokens: 20,
+    })
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("id", res["id"])
+    fmt.Println("model", res["model"])
+    choices := res["choices"].([]any)
+    msg := choices[0].(map[string]any)["message"].(map[string]any)
+    fmt.Println("content", msg["content"])
+    usage := res["usage"].(map[string]any)
+    fmt.Printf("usage prompt=%v completion=%v total=%v\n",
+        usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
+}
+```
+
+程序运行结果：
+
+```text
+elapsed_ms 6436
+id chatcmpl-89DHExvFvBc4ciIPfolZYUOy7ivxv
+model gpt-4o-mini
+content ADC_GO_SDK_OK
+usage prompt=16 completion=5 total=21
+```
+
+结果说明：
+
+- `id` 是 OpenAI 兼容响应 ID，可以在控制台 [使用历史](https://platform.acedata.cloud/console/usages) 里搜到。
+- `content ADC_GO_SDK_OK` 是模型真实输出，证明 SDK 没有篡改响应。
+- 6.4 秒里大部分是首次 TLS 握手 + 模型生成，复用 client 实例之后延迟和 TS / Python 一致（约 2~3 秒）。
+- 响应统一是 `map[string]any`，需要自己做类型断言；这是 Go SDK 当前的设计取舍——不引入泛型 struct 是为了让多模型路由不强依赖单一响应 schema。
+
+## 示例 2：chat.completions（SSE 流式）
+
+`CreateStream` 返回两个 channel：`&lt;-chan map[string]any` 是逐帧解析好的 SSE chunk，`&lt;-chan error` 在流结束（正常或出错）后才会有可读元素。
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Count from 1 to 5 separated by spaces. Just the numbers."}},
+        MaxTokens: 30,
+    })
+
+    first := int64(-1)
+    cnt := 0
+    collected := ""
+    for chunk := range chunks {
+        if first < 0 {
+            first = time.Since(t0).Milliseconds()
+        }
+        cnt++
+        if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+            if c0, ok := ch[0].(map[string]any); ok {
+                if d, ok := c0["delta"].(map[string]any); ok {
+                    if s, ok := d["content"].(string); ok {
+                        collected += s
+                    }
+                }
+            }
+        }
+    }
+    if e, ok := <-errs; ok && e != nil {
+        fmt.Println("stream_err", e)
+    }
+    fmt.Println("total_elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("first_chunk_ms", first)
+    fmt.Println("chunks", cnt)
+    fmt.Println("collected", collected)
+}
+```
+
+程序运行结果：
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+结果说明：
+
+- 首帧 1633 ms，13 个 chunk 全部到齐用了 1816 ms——后 12 帧只用了 183 ms。
+- `range chunks` 自然会在流结束时退出循环；`errs` channel 始终最多 yield 一个元素，配 `ok` 判断即可拿到错误。
+- 这套 channel 风格的好处是可以直接 `select` 配合 `context.Context` 超时／取消，不需要额外封装。
+
+## 示例 3：类型化错误处理
+
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    bad, _ := adc.NewClient(adc.WithAPIToken("definitely-not-a-real-token"))
+    _, err := bad.OpenAI().Chat().Completions().Create(context.Background(), adc.ChatCompletionRequest{
+        Model:    "gpt-4o-mini",
+        Messages: []map[string]any{{"role": "user", "content": "hi"}},
+        MaxTokens: 5,
+    })
+    if err != nil {
+        var apiErr *adc.APIError
+        if errors.As(err, &apiErr) {
+            fmt.Println("status:", apiErr.StatusCode)
+            fmt.Println("code:", apiErr.Code)
+            fmt.Println("message:", apiErr.Message)
+        } else {
+            fmt.Println("other err:", err)
+        }
+    }
+}
+```
+
+`adc.APIError` 同时覆盖 401 / 403 / 404 / 422 / 429 / 5xx，业务代码用 `errors.As` 取到结构化字段即可。HTTP 状态码、服务端 `code` 和 `message` 都保留原样。网络层错误（DNS 失败、连接被拒等）走 `context.DeadlineExceeded`、`net.OpError` 等标准 Go 错误，不会被吞掉。
+
+## 配置选项（functional options）
+
+```go
+client, err := adc.NewClient(
+    // 必填：API token；建议从环境变量读
+    adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")),
+
+    // 平台 API 根地址，默认 https://api.acedata.cloud
+    adc.WithBaseURL("https://api.acedata.cloud"),
+
+    // 单次请求超时，默认 5 分钟
+    adc.WithTimeout(60*time.Second),
+
+    // 自动重试次数，默认 2
+    adc.WithMaxRetries(2),
+
+    // 自定义请求头
+    adc.WithHeader("x-app", "my-service/1.0"),
+)
+```
+
+`NewClient` 返回 `(*Client, error)`：当 token 为空 **且** 没有传 `WithPaymentHandler`（X402）时会立即报错，便于在服务启动期就发现配置缺失。
+
+## 进阶：复用 Client
+
+Go SDK 内部用一个 `*http.Client` + `http.Transport`，自带连接池和 HTTP/2 复用。**推荐在进程生命周期内只建一个 `*adc.Client`**，然后跨 goroutine 共享——所有方法都是并发安全的。
+
+```go
+// pkg/acelearn/client.go
+var sharedClient *adc.Client
+
+func init() {
+    var err error
+    sharedClient, err = adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+
+func Chat(ctx context.Context, model, prompt string) (string, error) {
+    res, err := sharedClient.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:    model,
+        Messages: []map[string]any{{"role": "user", "content": prompt}},
+    })
+    if err != nil {
+        return "", err
+    }
+    return res["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string), nil
+}
+```
+
+## 局限和路线图
+
+当前稳定 / 推荐生产使用：
+
+- ✅ `client.OpenAI().Chat().Completions().Create` 同步非流式
+- ✅ `client.OpenAI().Chat().Completions().CreateStream` SSE 流式
+- ✅ `errors.As` + `APIError` 错误处理
+- ✅ 自动重试 + 指数退避
+
+仍处于 alpha：
+
+- 🚧 `client.Images()` / `client.Video()` / `client.Audio()` — 接口在演进中，建议先用 HTTP 直接调
+- 🚧 `TaskHandle` 异步轮询 — 还没暴露到 Go SDK 表层
+- 🚧 `WithPaymentHandler`（X402 链上付费）— 计划中，目前 X402 只支持 [TypeScript](https://platform.acedata.cloud/documents/x402-typescript-sdk) 和 [Python](https://platform.acedata.cloud/documents/x402-python-sdk)
+
+## 如何查看剩余额度
+
+通过 [Ace Data Cloud 控制台 - 应用列表](https://platform.acedata.cloud/console/applications)，即可查看当前账户的剩余额度。
+
+通过 [Ace Data Cloud 控制台 - 使用历史](https://platform.acedata.cloud/console/usages) 即可查看所有使用历史和扣费详情。
+
+## 了解更多
+
+- 🟦 [`github.com/AceDataCloud/SDK/go` on pkg.go.dev](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+- 🗂 [SDK 源码](https://github.com/AceDataCloud/SDK/tree/main/go)
+- 📘 [TypeScript SDK 接入教程](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Python SDK 接入教程](https://platform.acedata.cloud/documents/sdk-python)
+- 🔌 [SDK + X402 支付钩子](https://platform.acedata.cloud/documents/sdk-x402-payment)

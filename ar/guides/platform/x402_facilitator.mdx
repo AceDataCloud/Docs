@@ -1,0 +1,215 @@
+---
+title: "X402 Facilitator 集成"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Facilitator هو مكون التسوية على الخادم في سلسلة X402. يتحمل العميل مسؤولية التوقيع، بينما يتحمل Gateway أو خادمك مسؤولية استدعاء Facilitator لـ `/verify` و `/settle`.
+
+عنوان Facilitator الإنتاجي لـ Ace Data Cloud هو:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+مستودع الشيفرة المصدرية: [https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire 约定
+
+سلسلة X402 لـ Ace Data Cloud تستخدم بالكامل الإصدار الرسمي x402 v2، ولم تعد تقبل رأس الطلب `X-Payment` من الإصدار v1. يجب الانتباه إلى ثلاث نقاط عند الاتصال:
+
+- رأس الطلب هو `PAYMENT-SIGNATURE`، والقيمة هي JSON envelope مشفرة بـ base64.
+- يجب أن يكون المستوى الأعلى من envelope هو `x402Version: 2`، ويجب استخدام كائن `accepted` للإعلان عن `scheme` و `network` المختارين.
+- يجب استخدام CAIP-2 لتحديد `network` (مثل `eip155:8453`)، ولا يمكن كتابة اختصارات مثل `base`.
+
+هيكل envelope:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+استجابة 402، بالإضافة إلى جسم JSON، ستحتوي أيضًا على رأس استجابة `PAYMENT-REQUIRED`، والقيمة هي تشفير base64 لنفس محتوى التحدي، مما يسهل على العميل قراءة متطلبات الدفع دون تحليل الجسم.
+
+## 核心接口
+
+### `GET /supported`
+
+عرض الشبكات و scheme المدعومة:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+مثال على الاستجابة:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": ["3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"]
+  }
+}
+```
+
+تفسير النتائج:
+
+- يجب استخدام CAIP-2 لتحديد `network`، وليس اختصارات مثل `base` أو `skale`.
+- `/supported` تشير إلى أن Facilitator يمتلك القدرة على التحقق والتسوية المقابلة.
+- Base و SKALE و Solana جميعها تدعم `exact`؛ بينما `upto` متاحة حاليًا فقط على Base.
+- `signers` هي العناوين التي يستخدمها Facilitator لتقديم معاملات التسوية.
+- ما إذا كان API معين يسمح بهذه الخيارات يعتمد على `accepts` الخاص بـ API 402.
+
+### `POST /verify`
+
+التحقق مما إذا كان `PAYMENT-SIGNATURE` المرسل من العميل يلبي متطلبات الدفع.
+
+جسم الطلب:
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+حقل `paymentRequirements` في الإصدار 2 هو `scheme` و `network` و `asset` و `amount` و `payTo` و `maxTimeoutSeconds` و `extra`، وحقل المبلغ هو `amount`. ستعيد استجابة API 402 أيضًا `maxAmountRequired` في `accepts[]` لتمكين العميل من قراءة الحد الأقصى، لكنه لا ينتمي إلى حقول جسم طلب Facilitator.
+
+استجابة ناجحة:
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+استجابة `PAYMENT-RESPONSE` لطلب الدفع للطلب الإنتاجي بعد فك تشفيرها تحتوي على نتيجة التسوية. نتيجة تشغيل طلب الدفع على Base:
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+تفسير النتائج:
+
+- `success=True` تشير إلى أن تسوية Facilitator كانت ناجحة.
+- `transaction` هو تجزئة المعاملة على السلسلة، وتم كتابة `pay_id` للطلب بنفس القيمة.
+- يمكن رؤية تحويل `1200000` atomic USDC على Base USDC في explorer.
+- `errorReason=None` تشير إلى أن هذه التسوية لم ترجع أي خطأ تجاري.
+
+عادةً ما تعود التحقق الفاشل أيضًا برمز HTTP 200، لكن `isValid` يكون `false`. يجب على الجانب التجاري قراءة `invalidReason`، وليس فقط النظر إلى رمز الحالة HTTP.
+
+### `POST /settle`
+
+تسوية التفويض الذي تم التحقق منه على السلسلة.
+
+جسم الطلب مشابه بشكل أساسي لـ `/verify`. الفرق في `upto` هو: يتم تعديل `paymentRequirements.amount` إلى المبلغ الفعلي عند التسوية؛ يتم تسجيل حد التوقيع من قبل Facilitator في مرحلة التحقق، وعند التسوية يتم التحقق من أن المبلغ الفعلي لا يتجاوز هذا الحد.
+
+استجابة ناجحة:
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+إذا كان المبلغ الفعلي لـ `upto` هو 0، قد يكون `transaction` سلسلة فارغة، مما يعني أنه لا حاجة لإجراء معاملة على السلسلة.
+
+## كيفية استخدام Ace Data Cloud Gateway لـ Facilitator
+
+سلسلة API لـ Ace Data Cloud Gateway هي كما يلي:
+
+1. يقوم العميل بطلب API للمرة الأولى، دون تضمين `Authorization` و `PAYMENT-SIGNATURE`.
+2. يقوم Gateway بحساب السعر التقديري للطلب، ويعيد 402 و `accepts`.
+3. بعد توقيع العميل، يعيد المحاولة مع `PAYMENT-SIGNATURE`.
+4. يقوم Gateway بفك تشفير `PAYMENT-SIGNATURE`، ويختار متطلبات الدفع المطابقة.
+5. يقوم Gateway باستدعاء Facilitator لـ `/verify`.
+6. بعد نجاح `/verify`، يقوم Gateway بإطلاق الطلب إلى API المستهدف.
+7. بعد استجابة API المستهدفة، يقوم Gateway في مرحلة `/record` باستدعاء Facilitator لـ `/settle`.
+8. يقوم Gateway بكتابة تجزئة المعاملة على السلسلة في بيانات الاستخدام.
+`exact` في الخطوة 7 تسوية مبلغ التوقيع؛ `upto` في الخطوة 7 بناءً على الاستخدام الفعلي كتابة `amount`، ثم تسوية المبلغ الفعلي.
+
+## كيفية دمج API الخاصة بك
+
+إذا كنت تريد أن تدعم API الخاصة بك X402، يمكنك تنفيذ ذلك وفقًا لهذا الهيكل:
+
+1. إعداد `paymentRequirements` لكل واجهة دفع، تتضمن الشبكة، المبلغ، عنوان الاستلام، عنوان الأصول ونطاق التوقيع.
+2. إذا لم يكن الطلب يحتوي على `PAYMENT-SIGNATURE`، ارجع HTTP 402 و `accepts`.
+3. إذا كان الطلب يحتوي على `PAYMENT-SIGNATURE`، قم بفك تشفير Base64 للحصول على `paymentPayload`.
+4. استدعاء Facilitator `/verify`.
+5. بعد التحقق بنجاح، نفذ منطق العمل.
+6. بعد نجاح العمل، استدعاء Facilitator `/settle`.
+7. حفظ `payer`، `transaction`، `amount`، `network` من أجل التسوية.
+
+يجب على الخادم استخدام `paymentRequirements` التي تم إنشاؤها بنفسه لاستدعاء `/verify` و `/settle`، ولا تثق في المبلغ، عنوان الاستلام أو عنوان الأصول الذي تم إرجاعه من العميل.
+
+## حماية من إعادة التشغيل
+
+سيسجل Facilitator nonce. لا يمكن التحقق من التفويضات أو تسويتها بنفس nonce.
+
+هذا يعني:
+
+- يجب على العميل توقيع envelope جديدة في كل طلب؛
+- إذا تم تقديم `/settle` ولكن لم يتم تأكيده بعد، يمكن إعادة محاولة `/settle` بنفس nonce للقيام بتسوية idempotent؛
+- لا تقم بتخزين نفس `PAYMENT-SIGNATURE` لاستخدامه في عدة استدعاءات API.
+
+## الأخطاء الشائعة
+
+| الخطأ                                           | الأسباب الشائعة                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `Authorization nonce already processed`      | تم استخدام نفس `PAYMENT-SIGNATURE` مرتين.                                    |
+| `Authorization destination mismatch`         | `to` في توقيع العميل لا يتطابق مع `payTo` في متطلبات الدفع.                |
+| `invalid_upto_evm_payload_invalid_signature` | `upto` typed data chainId، facilitator، نطاق Permit2 أو عنوان التوقيع غير متطابقة. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | المحفظة لم توافق بعد على منح USDC كافٍ لـ Permit2.                        |
+| `Payer has insufficient USDC balance`        | رصيد USDC في محفظة الدفع غير كافٍ.                                                    |
+| `Solana signer private key not configured`   | يحتاج Facilitator إلى التوقيع كدافع للرسوم، لكن الخادم يفتقر إلى إعداد توقيع Solana.           |

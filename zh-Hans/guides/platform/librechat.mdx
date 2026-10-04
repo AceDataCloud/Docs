@@ -1,0 +1,119 @@
+---
+title: "在 LibreChat 中使用 Ace Data Cloud"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+[LibreChat](https://www.librechat.ai/) 是高度可配置的开源 AI 客户端，可用 `librechat.yaml` 描述服务商、模型与路由规则。它支持自定义 OpenAI 兼容端点，因此可以接入 Ace Data Cloud。本文介绍配置流程。
+
+## 申请流程
+
+要在 LibreChat 中接入 Ace Data Cloud，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications)，获取您的 API Token，留作备用。
+
+![获取 Ace Data Cloud API Key](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+如果你尚未登录或注册，会自动跳转到登录页面邀请您来注册和登录，登录注册之后会自动返回当前页面。
+
+在首次申请时会有免费额度赠送，可以免费体验 Ace Data Cloud 的模型服务。
+
+## 部署 LibreChat
+
+LibreChat 通过 Docker Compose 部署，先准备目录并下载官方配置：
+
+```bash
+mkdir -p ~/librechat && cd ~/librechat
+curl -O https://raw.githubusercontent.com/danny-avila/LibreChat/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/danny-avila/LibreChat/main/.env.example
+mv .env.example .env
+```
+
+在 `.env` 中用 `openssl rand -hex 32` 生成 `JWT_SECRET`、`JWT_REFRESH_SECRET`、`CREDS_KEY`、`CREDS_IV` 等安全密钥，并按需设置 `ALLOW_REGISTRATION`。
+
+## 配置 Ace Data Cloud
+
+创建 `librechat.yaml`，把 Ace Data Cloud 作为自定义 OpenAI 兼容端点（完整字段说明见官方 [Custom Endpoints 文档](https://www.librechat.ai/docs/quick_start/custom_endpoints)，把 `{token}` 替换为你的 Token）：
+
+```yaml
+version: 1.0.5
+cache: true
+
+endpoints:
+  custom:
+    - name: "Ace Data Cloud"
+      apiKey: "{token}"
+      baseURL: "https://api.acedata.cloud/v1"
+      models:
+        default:
+          - "MODEL_ID"
+        fetch: true
+      titleConvo: true
+      titleModel: "MODEL_ID"
+      modelDisplayLabel: "Ace Data Cloud"
+```
+
+在 `docker-compose.yml` 的 `api` 服务下把该文件挂进容器，然后 `docker compose up -d` 启动：
+
+```yaml
+    volumes:
+      - type: bind
+        source: ./librechat.yaml
+        target: /app/librechat.yaml
+```
+
+注意 `baseURL` 的路径规则：
+
+| baseURL | 实际请求 | 结果 |
+| --- | --- | --- |
+| `https://api.acedata.cloud/v1` | `https://api.acedata.cloud/v1/chat/completions` | 正确 |
+| `https://api.acedata.cloud/openai` | `https://api.acedata.cloud/openai/chat/completions` | 也可用 |
+| `https://api.acedata.cloud/openai/v1` | `https://api.acedata.cloud/openai/v1/chat/completions` | 404（`/openai` 下没有 `/v1`） |
+| `https://api.acedata.cloud` | `https://api.acedata.cloud/chat/completions` | 404（缺 `/v1`） |
+
+## 选择模型
+
+模型目录会持续更新。优先使用客户端自动加载的模型列表；需要手动填写时，先请求 `GET https://api.acedata.cloud/v1/models` 获取当前模型 ID，再按客户端支持的上下文、图片和工具调用能力选择。
+
+## 验证对接
+
+如果不确定问题出在 LibreChat 还是网络，可以先用 curl 直接验证端点（把 `{token}` 替换为你的 Token）：
+
+```bash
+curl -X POST 'https://api.acedata.cloud/v1/chat/completions' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+返回 OpenAI 兼容的 `chat.completion` 对象即说明 Token 与端点都已就绪；若返回 `HTTP 403 used_up` 则表示 Token 有效但余额不足，到 [控制台](https://platform.acedata.cloud/console/applications) 充值即可。
+
+## 进阶：yaml 配置技巧
+
+`librechat.yaml` 支持多个 endpoint 分组，可以用 `apiKey: "user_provided"` 让每个用户填写自己的 Key；`titleModel` 指定生成对话标题的模型；`dropParams` 可以统一删除目标 API 不支持的参数。详见 [librechat.yaml 配置详解](https://www.librechat.ai/docs/configuration/librechat_yaml)。
+
+## 常见问题
+
+### 启动后看不到 Ace Data Cloud 端点
+
+通常是 yaml 没挂进容器或缩进错误。检查 `docker-compose.yml` 的 volumes，并校验 yaml 缩进。
+
+### 提示 404
+
+`baseURL` 写成了 `.../openai/v1` 或漏了 `/v1`。改成 `https://api.acedata.cloud/v1`。
+
+### 模型下拉为空
+
+`fetch: true` 但 `/v1/models` 失败时，改为 `fetch: false` 并手动列出 `default`。
+
+### 改 yaml 后不生效
+
+需重启容器：`docker compose restart api`。
+
+## 了解更多
+
+- [LibreChat 官网](https://www.librechat.ai/) ｜ [LibreChat GitHub](https://github.com/danny-avila/LibreChat) ｜ [librechat.yaml 配置详解](https://www.librechat.ai/docs/configuration/librechat_yaml)
+- [LibreChat 自定义端点（Custom Endpoints）官方文档](https://www.librechat.ai/docs/quick_start/custom_endpoints)
+- [Ace Data Cloud OpenAI Chat Completions API 文档](https://platform.acedata.cloud/documents/openai-chat-completions)
+- [Ace Data Cloud 服务列表](https://platform.acedata.cloud/documents)
+- [Ace Data Cloud 控制台](https://platform.acedata.cloud/console)

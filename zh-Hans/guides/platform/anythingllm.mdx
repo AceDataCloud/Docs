@@ -1,0 +1,103 @@
+---
+title: "在 AnythingLLM 中使用 Ace Data Cloud"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+[AnythingLLM](https://anythingllm.com/) 是一款定位「文档 → 私有 ChatGPT」的开源客户端，核心概念是 **Workspace**——每个 Workspace 是一组文档、一组用户与一组 Agent 工具，独立隔离。它专为文档对话设计，提供桌面 App 与 Docker 双形态。在 **LLM Provider**中，它内置了 [OpenAI (Generic)](https://docs.anythingllm.com/setup/llm-configuration/cloud/openai-generic) 这一项，可填写自定义 Base URL，因此能直接把对话模型指向 Ace Data Cloud。本文介绍配置流程。
+
+## 申请流程
+
+要在 AnythingLLM 中接入 Ace Data Cloud，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications)，获取您的 API Token，留作备用。
+
+![获取 Ace Data Cloud API Key](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+如果你尚未登录或注册，会自动跳转到登录页面邀请您来注册和登录，登录注册之后会自动返回当前页面。
+
+在首次申请时会有免费额度赠送，可以免费体验 Ace Data Cloud 的模型服务。
+
+## 下载 AnythingLLM
+
+个人使用可下载 [桌面版](https://anythingllm.com/download)，向量库（LanceDB）跑在本地，搜文档完全离线、仅调模型时联网；团队多用户场景用 [Docker 部署](https://docs.anythingllm.com/installation-docker/overview)。
+
+## 配置对话模型
+
+启动 AnythingLLM，进入 **Settings → LLM Preference**，Provider 选择 **OpenAI (Generic)**（不要选普通的 OpenAI，那个固定指向 `api.openai.com`，没有自定义 Base URL）。官方文档参见 [OpenAI (Generic) LLM Provider](https://docs.anythingllm.com/setup/llm-configuration/cloud/openai-generic)。
+
+| 字段 | 值 | 说明 |
+| --- | --- | --- |
+| Base URL | `https://api.acedata.cloud/v1` | **必须以 `/v1` 结尾** |
+| API Key | 你的 Ace Data Cloud Token | 控制台复制的 Token |
+| Selected Model | 当前模型 ID | 优先使用从 `/models` 自动加载的列表；未返回时按上文方法查询后手动填写 |
+| Model context window | 按所选模型填写 | 从当前模型目录读取上下文上限，不要照抄其他模型的数值 |
+
+![AnythingLLM Generic OpenAI 配置界面](https://cdn.acedata.cloud/a155f5476de7.png)
+
+> 模型能力与上下文上限以当前模型目录为准。
+
+注意 Base URL 的路径规则：
+
+| Base URL | 实际请求 | 结果 |
+| --- | --- | --- |
+| `https://api.acedata.cloud/v1` | `https://api.acedata.cloud/v1/chat/completions` | 正确 |
+| `https://api.acedata.cloud/openai` | `https://api.acedata.cloud/openai/chat/completions` | 也可用 |
+| `https://api.acedata.cloud/openai/v1` | `https://api.acedata.cloud/openai/v1/chat/completions` | 404（`/openai` 下没有 `/v1`） |
+| `https://api.acedata.cloud` | `https://api.acedata.cloud/chat/completions` | 404（缺 `/v1`） |
+
+## 配置 Embedding 模型
+
+AnythingLLM 的核心是 RAG，需要一个嵌入模型把文档向量化。它的 **Embedding Preference** 与 LLM Preference 是相互独立的两套配置——参见 [Embedder 配置总览](https://docs.anythingllm.com/setup/embedder-configuration/overview)。其内置的 **AnythingLLM Embedder（Built-in / Native）** 直接在本地运行，开箱即用、零配置，是默认且推荐的选择：
+
+进入 **Settings → Embedding Preference**，Provider 保持默认的 **AnythingLLM Embedder** 即可，无需填写任何密钥。它会在本地完成文档向量化，原文与向量都存在本地 LanceDB，不上云。
+
+> AnythingLLM 的 Embedder 候选项（云端：OpenAI / Azure OpenAI / Cohere；本地：Built-in、LM Studio、[LocalAI](https://docs.anythingllm.com/setup/embedder-configuration/local/localai)、Ollama）均按各自固定形态接入。其中云端 OpenAI 嵌入固定指向 `api.openai.com`、不支持自定义 Base URL；若希望走自定义端点，可使用 **Generic OpenAI** Embedder（同样带 Base URL 字段，可指向 Ace Data Cloud 的 `text-embedding-3-large`）或本地 **LocalAI** Embedder。本文对话模型走 Ace Data Cloud，嵌入则使用 AnythingLLM 自带的本地 Embedder，二者互不影响。
+
+## 选择模型
+
+模型目录会持续更新。优先使用客户端自动加载的模型列表；需要手动填写时，先请求 `GET https://api.acedata.cloud/v1/models` 获取当前模型 ID，再按客户端支持的上下文、图片和工具调用能力选择。
+
+## 验证对接
+
+如果不确定问题出在 AnythingLLM 还是网络，可以先用 curl 直接验证端点（把 `{token}` 替换为你的 Token）：
+
+```bash
+curl -X POST 'https://api.acedata.cloud/v1/chat/completions' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+返回 OpenAI 兼容的 `chat.completion` 对象即说明 Token 与端点都已就绪；若返回 `HTTP 403 used_up` 则表示 Token 有效但余额不足，到 [控制台](https://platform.acedata.cloud/console/applications) 充值即可。
+
+## 进阶：Workspace 与文档对话
+
+新建 Workspace 后上传 PDF / Word / Markdown 等文档，AnythingLLM 会按段落切分、用本地 Embedder 生成向量并存入本地 LanceDB。对话时它会先检索相关片段，再把片段与你的问题一起交给对话模型（即 Ace Data Cloud）回答，并在回答下方标注引用来源。每个 Workspace 顶部可切换 **Query**（只基于文档回答）与 **Chat**（混合通用知识）模式，严肃场景建议用 Query 模式避免幻觉。Docker 部署时可用 `GENERIC_OPEN_AI_BASE_PATH`、`GENERIC_OPEN_AI_API_KEY`、`GENERIC_OPEN_AI_MODEL_PREF` 等环境变量预设同样的对话模型接入，并开启多用户模式。
+
+## 常见问题
+
+### 提示 404 / connection fail
+
+通常是 Base URL 写成了 `.../openai/v1` 或漏了 `/v1`。改成 `https://api.acedata.cloud/v1`。
+
+### 上传文档后无法对话
+
+请确认 **Settings → Embedding Preference** 里选了可用的 Embedder（默认的 AnythingLLM Embedder 即可本地运行，无需额外配置），并重新上传文档以生成向量。
+
+### 提示 401 Unauthorized
+
+请确认 API Key 中粘贴的是 Ace Data Cloud 的 Token（不含 `Bearer` 前缀、无多余空格），且所属应用的余额充足。
+
+### 本地文档会上传到云端吗
+
+不会。文档原文存在本地 LanceDB，只有检索命中的片段与你的问题会发给模型。
+
+## 了解更多
+
+- [AnythingLLM 官网](https://anythingllm.com/) ｜ [AnythingLLM GitHub](https://github.com/Mintplex-Labs/anything-llm) ｜ [Docker 部署文档](https://docs.anythingllm.com/installation-docker/overview)
+- [AnythingLLM OpenAI (Generic) LLM Provider 文档](https://docs.anythingllm.com/setup/llm-configuration/cloud/openai-generic)
+- [AnythingLLM Embedder 配置总览](https://docs.anythingllm.com/setup/embedder-configuration/overview)
+- [Ace Data Cloud OpenAI Chat Completions API 文档](https://platform.acedata.cloud/documents/openai-chat-completions)
+- [Ace Data Cloud 服务列表](https://platform.acedata.cloud/documents)
+- [Ace Data Cloud 控制台](https://platform.acedata.cloud/console)

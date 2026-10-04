@@ -1,0 +1,311 @@
+---
+title: "X402 E2E 验证与故障排查"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+X402 涉及 HTTP、SDK、签名、Facilitator 和链上交易。排查签名或结算问题时，建议按“公开入口 -> 402 响应 -> SDK payment handler -> 链上 settlement”的顺序逐层确认。本教程说明各层的检查方式，并列出常见错误。
+
+## 检查公开入口
+
+Facilitator 能力声明：
+
+```bash
+curl https://facilitator.acedata.cloud/.well-known/x402
+```
+
+如果返回 `facilitator`、`supportedKinds` 和协议端点，说明能力元数据正常。API 资源发现已退役；请直接调用目标 API，并以实时 402 响应为准。
+
+Facilitator 支持能力：
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+如果返回 `kinds`，说明 Facilitator 入口正常。
+
+## 检查 402 `accepts`
+
+发送一个不会扣费的无认证请求：
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/openai/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [{"role": "user", "content": "hi"}],
+    "max_tokens": 1
+  }'
+```
+
+检查返回的 `accepts` 中是否包含你要使用的网络。`network` 是 CAIP-2 标识：
+
+- `eip155:8453` + `exact`（Base）
+- `eip155:8453` + `upto`（Base，后置计量）
+- `eip155:1187947933` + `exact`（SKALE）
+- `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` + `exact`（Solana）
+
+如果没有目标网络，说明该 API 或当前环境没有配置对应 X402 收款方式。
+
+## 运行 X402Client 高级验证工具
+
+X402Client 仓库提供高级验证工具，可用于确认 402 响应选择、签名生成、paid retry 和链上 settlement。它们需要 funded wallet、RPC、私钥和开发依赖。普通业务接入建议优先使用 TypeScript 或 Python SDK；只有在需要定位签名或链上结算问题时，再运行这些工具。
+
+仓库地址：[https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+
+```bash
+git clone https://github.com/AceDataCloud/X402Client.git
+cd X402Client/typescript
+npm install
+npm install --no-save ethers @solana/spl-token bs58 tsx
+```
+
+Base：
+
+```bash
+export X402B_BASE_PAYER_PRIVATE_KEY=0x...
+TEST_API_PATH='/openai/chat/completions' \
+TEST_BODY='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+npx tsx scripts/test-real-e2e.ts
+```
+
+SKALE：
+
+```bash
+export SKALE_BASE_PRIVATE_KEY=0x...
+TEST_API_PATH='/openai/chat/completions' \
+TEST_BODY='{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+npx tsx scripts/test-skale-e2e.ts
+```
+
+Solana：
+
+```bash
+export X402B_SOLANA_PAYER_PRIVATE_KEY=...
+npx tsx scripts/test-solana-e2e.ts
+```
+
+验证工具通常会打印：
+
+1. 第一次请求的 402 响应。
+2. 选中的 payment requirement。
+3. 签名后的 `PAYMENT-SIGNATURE` 摘要。
+4. 重试后的 HTTP 状态和响应体。
+5. 链上 settlement transaction，或失败时的 Facilitator 错误原因。
+
+不要把私钥或完整 `PAYMENT-SIGNATURE` 发到日志系统或工单里。
+
+公开 API 验证结果示例：
+
+```text
+SKALE exact
+HTTP 402 -> HTTP 200
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+
+Base exact
+HTTP 402 -> HTTP 200
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+
+Solana exact
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run because public RPC lookup hit 429
+
+Base upto
+HTTP 402 -> HTTP 200
+content ADC_BASE_UPTO_OK
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+说明：
+
+- SKALE `exact`、Base `exact`、Solana `exact` 和 Base `upto` 都完成了 HTTP 402 到 HTTP 200 的 paid retry。
+- SKALE `exact` 的链上交易已在 SKALE explorer 可查，结算金额是 `0.095215` USDC。
+- Base `exact` 的链上交易已在 BaseScan 可查，结算金额是 `95215` atomic USDC。
+- Base `upto` 的签名上限是 `95215` atomic USDC，但实际链上 settlement 是 `3` atomic USDC，说明后置计量按真实用量扣款。
+- Solana 路径已确认 paid retry 和模型输出。公开 RPC 可能限流；需要严格链上对账时，请使用自有 Solana RPC 或平台侧结算记录确认交易签名。
+
+## SDK smoke test
+
+高级验证工具用于检查签名和链上结算。业务侧还应执行 SDK smoke test，确认应用代码能够通过 payment handler 自动处理 402。下面只展示核心片段，完整代码需要补齐钱包、provider 和 import。
+
+TypeScript：
+
+```ts
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'skale',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Reply with exactly ADC_SDK_X402_OK' }],
+  max_tokens: 8
+});
+```
+
+Python：
+
+```python
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="skale",
+        evm_signer=signer,
+    )
+)
+
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly ADC_PY_X402_OK"}],
+    max_tokens=8,
+)
+```
+
+如果模型按要求返回固定字符串，说明 SDK、payment handler、Gateway、Facilitator 和目标 API 串起来了。
+
+上面两段 smoke test 走的是 SKALE `exact`。SKALE 目前只提供 `exact`，按 402 报价的固定金额结算，不会随真实 token 用量下调。聊天补全属于按 token 计量的场景，正式接入时建议改用 Base 并传 `preferScheme: 'upto'`，按真实用量结算。
+
+SDK smoke test 的程序运行结果：
+
+```text
+TypeScript SDK
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+
+Python SDK
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 4786
+content ADC_PY_SDK_X402_OK
+id chatcmpl-DlcWajqAHOop3iebmO19XRfT5bTPz
+```
+
+结果说明：
+
+- TypeScript SDK 通过 `createX402PaymentHandler` 自动处理 402、签名和重试，最终拿到 `ADC_TS_SDK_X402_OK`。
+- Python SDK 通过 `create_x402_payment_handler` 完成同样链路，最终拿到 `ADC_PY_SDK_X402_OK`。
+- 两个 smoke test 都使用 SKALE payer `0xd0479FA9FD8C678303d477433d24C15e3723CC1C`。
+- Python SDK 返回对象是 `dict`，示例中可使用 `res["choices"][0]["message"]["content"]` 读取内容。
+
+## 订单支付 E2E
+
+订单支付使用 `platform.acedata.cloud` 的平台 API，需要平台账户令牌。完整链路是：创建 Pending 订单，`POST /api/v1/orders/{order_id}/pay/` 触发 402，然后带 `PAYMENT-SIGNATURE` 重试。
+
+小额订单支付验证结果示例：
+
+
+> 以下交易记录为旧政策下的历史实测样本，金额和交易哈希保留原样。新 X402 订单不再享支付方式折扣；请以本次 402 响应的 `amount` 为签名和付款依据。
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+accepts [('eip155:8453', 'exact', '1200000'), ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000')]
+
+status 200
+order state Finished
+pay_way X402
+pay_id 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+
+Base tx status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+结果说明：
+
+- 创建订单后，订单状态是 `Pending`，价格是 `1.26`。
+- 第一次 `pay/` 请求返回 HTTP 402，`accepts` 中有 Base `exact` 和 Solana `exact`，金额都是 `1200000` atomic USDC。
+- 带 Base `PAYMENT-SIGNATURE` 重试后返回 HTTP 200，订单状态变为 `Finished`，`pay_way` 是 `X402`。
+- `PAYMENT-RESPONSE` 解码后显示 `success=True`、`network=base`，并给出同一个交易哈希。
+- BaseScan 上交易状态是 `1`，转账金额是 `1200000` atomic USDC，也就是 `1.2` USDC。
+- 创建价 `1.26` 在旧 X402 支付优惠政策期间支付，最终签名与结算金额为 `1.2` USDC。
+
+订单支付如果没有 `Authorization: Bearer {platform_token}`，或者订单不属于当前账户，会在平台权限层失败；这和直接调用 `x402.acedata.cloud` 的无账户 X402 API 不同。
+
+## 常见错误
+
+| 现象 | 排查方向 |
+| --- | --- |
+| 第一次请求不是 402 | 检查是否误带了 `Authorization`，或该 API 是否还没有 X402 pricing。 |
+| `No payment requirement for network` | 目标网络不在 `accepts` 中，换网络或检查 Gateway 配置。 |
+| `invalid_402` | 402 响应不是合法 JSON，检查代理、网关或错误页。 |
+| `Authorization nonce already processed` | 重复使用了同一个 `PAYMENT-SIGNATURE`，重新签名。 |
+| `invalid_upto_evm_payload_invalid_signature` | 检查 `upto` 的 chainId、Permit2 domain、facilitator 地址、签名账户是否一致。 |
+| `PERMIT2_ALLOWANCE_REQUIRED` | 对目标链 USDC 执行 `approve-permit2`。 |
+| `Payer has insufficient USDC balance` | 付款钱包 USDC 不足。 |
+| HTTP 200 但没有 tx hash | `upto` 实际金额可能为 0，或 settlement 记录还在异步写入。 |
+| Solana `Missing transaction payload` | `PAYMENT-SIGNATURE` envelope 中没有序列化交易或 signature，检查 wallet adapter。 |
+
+## Base `upto` 检查清单
+
+`upto` 目前只在 Base 上提供（`eip155:8453`）。SKALE 只提供 `exact`。由于 `upto` 签名会绑定更多 EVM typed data 参数，接入时应特别确认 402 响应中的实时字段与客户端签名完全一致。
+
+```text
+SKALE exact
+HTTP 402 -> HTTP 200
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+
+Base upto
+HTTP 402 -> HTTP 200
+content ADC_BASE_UPTO_OK
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+如果 Base `upto` 返回 `invalid_upto_evm_payload_invalid_signature`，优先检查：
+
+1. API 返回的 `eip155:8453` + `upto` 条目里的 `extra.chainId`（应为 `8453`）。
+2. API 返回的 `extra.facilitatorAddress`。
+3. `https://facilitator.acedata.cloud/supported` 返回的 Base `upto` facilitator 地址。
+4. Permit2 domain、spender、USDC 合约和签名账户。
+5. 钱包是否已经对 Base USDC approve Permit2。
+
+`upto` 的签名 digest 同时绑定 Permit2 domain、chain ID、spender、收款地址、facilitator 地址和 validAfter。任意一项不一致，Facilitator 都会恢复出错误 signer，从而返回 invalid signature。若这些都一致但仍返回 402，下一步检查 Permit2 allowance；未授权时返回 `PERMIT2_ALLOWANCE_REQUIRED`。
+
+## 保存验证信息
+
+一次完整验证至少保存：
+
+- API path 和请求体摘要；
+- 选中的 network 和 scheme；
+- `maxAmountRequired`；
+- payer 钱包地址；
+- HTTP 最终状态；
+- 响应中的模型输出或任务 ID；
+- settlement transaction 链接；
+- Gateway trace ID 或平台使用记录 ID。
+
+不要保存私钥、完整 `PAYMENT-SIGNATURE`、完整 EIP-712 signature 或助记词。
+
+## 结构化支付错误
+
+签名后的 X402 失败会在 `extensions.acedatacloud.paymentError` 返回稳定 `code`、安全插值参数、阶段和可重试标志。优先使用该结构排查，不要解析顶层英文 `error`，也不要要求用户提供钱包签名或链上模拟原文。
+
+- `charged: false`：验证在结算前明确拒绝，本次没有发起扣款。
+- 不含 `charged`：结果未知或已进入结算阶段，先查订单和链上状态，禁止直接重复支付。
+- `settlement_pending`：暂勿重复支付，先刷新订单或联系支持。
+- 未识别 code：按 `payment_failed` 处理，并保留公开技术代码供客服检索。

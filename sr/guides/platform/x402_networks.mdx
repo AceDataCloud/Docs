@@ -1,0 +1,190 @@
+---
+title: "X402 mreže i načini plaćanja"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 trenutno se zasniva na USDC poravnanju i podržava dve vrste lanaca: EVM i Solana. Načini potpisivanja, adrese sredstava, gas ponašanje i primenljivi scenariji razlikuju se između različitih mreža, pa je potrebno prvo izabrati mrežu pre integracije.
+
+## Identifikacija mreže koristi CAIP-2
+
+`accepts[].network` u x402 v2 je CAIP-2 identifikator, a ne skraćeni naziv kao što su `base` ili `skale`. Klijent mora porediti mreže prema CAIP-2 stringu:
+
+| Mreža             | CAIP-2 identifikator                       |
+| -------------- | ----------------------------------------- |
+| Base           | `eip155:8453`                             |
+| SKALE Base     | `eip155:1187947933`                       |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` |
+
+## Matrica podrške
+
+| Mreža     | scheme  | Sredstvo                  | Način potpisivanja                         | Primenljivi scenariji                        |
+| ------ | ------- | ------------------- | ------------------------------------ | --------------------------- |
+| Base   | `exact` | Base USDC           | EIP-3009 `TransferWithAuthorization` | Podrazumevano preporučeno, podrška novčanika i likvidnosti je zrela.            |
+| Base   | `upto`  | Base USDC + Permit2 | Permit2 `PermitWitnessTransferFrom`  | API-ji sa naknadnim merenjem, poput četa i modela.             |
+| SKALE  | `exact` | SKALE bridged USDC  | EIP-3009 `TransferWithAuthorization` | Nizak gas trošak, pogodno za EVM verifikaciju plaćanja i pozive niskog troška. |
+| Solana | `exact` | Solana USDC         | SPL `TransferChecked`                | Scenariji Solana novčanika, Agenata ili aplikacija na lancu.    |
+
+`upto` je trenutno dostupan samo na Base-u. Stvarno dostupne stavke zavise od `accepts` koje vraća API. Takođe možete proveriti Facilitator:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Povratna vrednost Facilitator `/supported`:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ]
+}
+```
+
+Objašnjenje rezultata:
+
+- `exact` za Base, SKALE i Solana predstavlja putanju plaćanja fiksnog iznosa.
+- Samo Base pruža `upto` putanju naknadnog merenja, koja zavisi od Permit2 approve.
+- `extra.facilitatorAddress` u stavci `upto` je adresa koju klijent mora upisati u witness prilikom potpisivanja i mora biti ista kao vrednost koju vraća server.
+
+## Base
+
+Base koristi zvanični USDC ugovor:
+
+```text
+0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+```
+
+U `exact` šemi, klijent potpisuje EIP-712 `TransferWithAuthorization`. Sadržaj potpisa uključuje:
+
+- `from`: adresu novčanika platioca
+- `to`: adresu primaoca Ace Data Cloud-a
+- `value`: iznos ovog plaćanja
+- `validAfter` / `validBefore`: vremenski prozor važenja potpisa
+- `nonce`: nasumični nonce od 32 bajta
+
+Nakon verifikacije potpisa, Facilitator će na lancu pozvati USDC `transferWithAuthorization` kako bi dovršio prenos.
+
+Base je najpreporučenija mreža za produkcionu integraciju, posebno pogodna za `upto` naknadno merenje, jer su Permit2, USDC i ekosistem novčanika zreliji.
+
+Primer rezultata Base `exact` verifikacije:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+```
+
+Objašnjenje rezultata:
+
+- API paid retry vraća sadržaj modela `ADC_BASE_E2E_OK`.
+- Transakcija na lancu je dostupna za pregled na BaseScan-u, a broj bloka je `46726299`.
+- `95215` atomic USDC odgovara iznosu od `0.095215` USDC, što je stvarni iznos poravnanja za ovaj API poziv.
+
+Rezultat izvršavanja programa za plaćanje porudžbine putem Base `exact`:
+
+```text
+order 78481793-304e-47f7-bc0c-8231aec9cc1e
+state Finished
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Objašnjenje rezultata:
+
+- Konačni status porudžbine na platformi je `Finished`.
+- `pay_id` porudžbine upisuje isti Base heš transakcije.
+- `1200000` atomic USDC odgovara iznosu od `1.2` USDC, što je istorijski stvarno plaćeni iznos za ovu porudžbinu od 10 Credits prema staroj politici; nove porudžbine više ne uživaju dodatni popust za X402 način plaćanja, a konkretan iznos potpisa zavisi od odgovora 402 u ovom pozivu.
+
+## SKALE
+
+SKALE koristi bridged USDC, a način potpisivanja je sličan Base-u, takođe EIP-3009. Pogodan je za EVM scenarije plaćanja sa niskim gas troškovima; stvarni poziv i dalje zavisi od `accepts` koje vraća API.
+
+Tipični SKALE 402 `accepts` će sadržati:
+
+```json
+{
+  "network": "eip155:1187947933",
+  "scheme": "exact",
+  "extra": {
+    "name": "Bridged USDC (SKALE Bridge)",
+    "version": "2",
+    "chainId": 1187947933,
+    "verifyingContract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+  }
+}
+```
+
+SKALE trenutno pruža samo `exact`. Ako vam je potrebno naknadno merenje, koristite Base `upto`.
+
+Primer rezultata SKALE `exact` verifikacije:
+
+```text
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+```
+
+Objašnjenje rezultata:
+- API paid retry vraća sadržaj modela `ADC_SKALE_E2E_OK`。
+- Transakcija je proverljiva u SKALE explorer-u, broj bloka je `1969317`。
+- Iznos poravnanja za ovu `exact` uplatu je `0.095215` USDC。
+
+## Solana
+
+Solana koristi SPL USDC `TransferChecked`。Klijent će konstruisati transakciju prenosa, potpisati je i poslati, a zatim staviti potpis transakcije ili serijalizovanu transakciju u `PAYMENT-SIGNATURE` envelope。
+
+Karakteristike Solana-e：
+
+- koristi Solana wallet adapter ili base58 secret key；
+- sredstvo je Solana USDC mint；
+- trenutno podržava samo `exact`；
+- Facilitator će proveriti mint, destination, authority i amount transfer instrukcije。
+
+Ako se koristi režim wallet fee payer, novčanik će direktno poslati transakciju, a Facilitator je odgovoran za potvrđivanje transakcije i vraćanje rezultata poravnanja。
+
+Primer rezultata Solana `exact` verifikacije：
+
+```text
+payer AY2RmGm2zPxB1uKvvF4dKyYdr2VySyL3wcD1MKJZoLRd
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run
+```
+
+Objašnjenje rezultata：
+
+- paid retry je već vratio HTTP 200, a model je ispisao `ADC_SOLANA_E2E_OK`。
+- Pri upitu javnog RPC-a za on-chain signature može doći do ograničenja broja zahteva。
+- Pošto javni RPC upiti mogu biti ograničeni, ovde se ne navodi Solana explorer。Kada je potrebno strogo usklađivanje, koristite sopstveni Solana RPC ili zapise o poravnanju na strani platforme da potvrdite potpis transakcije。
+
+## Kako izabrati
+
+| Šta želite da uradite | Preporučena mreža |
+| ------------ | ---------------------------- |
+| Brzo pokretanje minimalnog toka | SKALE `exact` ili Base `exact` |
+| Za obične Web3 korisnike | Base |
+| Za naknadno merenje, kao što je dopunjavanje četa | Base `upto` |
+| Aplikacije Solana ekosistema | Solana `exact` |
+| EVM verifikacija plaćanja niskog troška | SKALE `exact` |
+
+Bez obzira na to koji lanac izaberete, nemojte hardkodirati cenu u klijentu。Cenu određuje serverski vraćena vrednost `accepts[].maxAmountRequired`。

@@ -1,0 +1,215 @@
+---
+title: "X402 Facilitator 集成"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Facilitator είναι το συστατικό διακανονισμού του διαύλου X402. Ο πελάτης είναι υπεύθυνος για την υπογραφή, το Gateway ή ο διακομιστής σας είναι υπεύθυνος για την κλήση των `/verify` και `/settle` του Facilitator.
+
+Η διεύθυνση παραγωγής του Facilitator της Ace Data Cloud είναι:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+Αποθετήριο πηγαίου κώδικα: [https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire 约定
+
+Ο διαύλος X402 της Ace Data Cloud χρησιμοποιεί πλήρως την επίσημη x402 v2 και δεν δέχεται πλέον το `X-Payment` header v1. Κατά την ένταξη, πρέπει να προσέξετε τρία σημεία:
+
+- Το header είναι `PAYMENT-SIGNATURE`, η τιμή είναι base64 κωδικοποιημένο JSON envelope.
+- Το κορυφαίο επίπεδο του envelope πρέπει να είναι `x402Version: 2` και να δηλώνει το επιλεγμένο `scheme` και `network` με το αντικείμενο `accepted`.
+- Το `network` χρησιμοποιεί την αναγνώριση CAIP-2 (π.χ. `eip155:8453`), δεν μπορεί να γραφτεί με συντομεύσεις όπως `base`.
+
+Δομή envelope:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+Η απάντηση 402 εκτός από το JSON body θα περιλαμβάνει επίσης ένα header `PAYMENT-REQUIRED`, η τιμή είναι base64 κωδικοποιημένο το ίδιο περιεχόμενο πρόκλησης, διευκολύνοντας τον πελάτη να διαβάσει τις απαιτήσεις πληρωμής χωρίς να αναλύσει το body.
+
+## Κύριες διεπαφές
+
+### `GET /supported`
+
+Δείτε τα υποστηριζόμενα δίκτυα και schemes:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Παράδειγμα απάντησης:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": ["3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"]
+  }
+}
+```
+
+Επεξήγηση αποτελεσμάτων:
+
+- Το `network` χρησιμοποιεί την αναγνώριση CAIP-2, δεν είναι συντομεύσεις όπως `base`, `skale`.
+- Το `/supported` δηλώνει ότι ο Facilitator διαθέτει τις αντίστοιχες δυνατότητες επαλήθευσης και διακανονισμού.
+- Το Base, SKALE και Solana υποστηρίζουν το `exact`; το `upto` παρέχεται προς το παρόν μόνο στο Base.
+- Το `signers` είναι οι διευθύνσεις που χρησιμοποιεί ο Facilitator για την υποβολή συναλλαγών διακανονισμού.
+- Εάν μια συγκεκριμένη API επιτρέπει αυτές τις επιλογές, εξακολουθεί να ισχύει το `accepts` της API 402.
+
+### `POST /verify`
+
+Επαληθεύει αν η `PAYMENT-SIGNATURE` που παρέχεται από τον πελάτη πληροί μια συγκεκριμένη απαίτηση πληρωμής.
+
+Σώμα αιτήματος:
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+Το πεδίο `paymentRequirements` v2 περιλαμβάνει τα `scheme`, `network`, `asset`, `amount`, `payTo`, `maxTimeoutSeconds` και `extra`, το ποσό είναι το `amount`. Η απάντηση API 402 θα επιστρέψει επιπλέον το `maxAmountRequired` για να διαβάσει ο πελάτης το ανώτατο όριο, αλλά δεν ανήκει στα πεδία του σώματος αιτήματος του Facilitator.
+
+Επιτυχής απάντηση:
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+Η απάντηση του `PAYMENT-RESPONSE` για την πληρωμή παραγγελίας περιλαμβάνει το αποτέλεσμα του διακανονισμού. Το αποτέλεσμα της εκτέλεσης της παραγγελίας Base:
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Επεξήγηση αποτελεσμάτων:
+
+- `success=True` δηλώνει ότι ο διακανονισμός του Facilitator ήταν επιτυχής.
+- Το `transaction` είναι το hash της συναλλαγής στο blockchain, το `pay_id` της παραγγελίας καταγράφεται επίσης στην ίδια τιμή.
+- Στον explorer μπορεί να δει κανείς τη μεταφορά `1200000` atomic USDC του Base USDC.
+- `errorReason=None` δηλώνει ότι αυτή η φορά δεν υπήρξε επιχειρηματικό σφάλμα κατά τον διακανονισμό.
+
+Η αποτυχία επαλήθευσης συνήθως επιστρέφει επίσης HTTP 200, αλλά το `isValid` είναι `false`. Η επιχειρηματική πλευρά θα πρέπει να διαβάσει το `invalidReason`, και όχι μόνο να κοιτάξει τον κωδικό κατάστασης HTTP.
+
+### `POST /settle`
+
+Διακανονίζει την εξουσιοδότηση που έχει ήδη επαληθευτεί στο blockchain.
+
+Το σώμα αιτήματος είναι βασικά παρόμοιο με το `/verify`. Η διαφορά του `upto` είναι: το `paymentRequirements.amount` κατά τη διάρκεια του διακανονισμού αλλάζει στην πραγματική ποσότητα διακανονισμού; το ανώτατο όριο υπογραφής καταγράφεται από τον Facilitator στη φάση επαλήθευσης, κατά τη διάρκεια του διακανονισμού ελέγχεται ότι η πραγματική ποσότητα δεν υπερβαίνει αυτό το ανώτατο όριο.
+
+Επιτυχής απάντηση:
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+Εάν το πραγματικό ποσό του `upto` είναι 0, το `transaction` μπορεί να είναι κενή συμβολοσειρά, δηλώνοντας ότι δεν απαιτείται συναλλαγή στο blockchain.
+
+## Πώς να χρησιμοποιήσετε τον Facilitator με την Ace Data Cloud Gateway
+
+Η ροή του API Gateway της Ace Data Cloud είναι η εξής:
+
+1. Ο πελάτης ζητά για πρώτη φορά το API, χωρίς `Authorization` και `PAYMENT-SIGNATURE`.
+2. Το Gateway υπολογίζει την εκτιμώμενη τιμή του αιτήματος, επιστρέφει 402 και `accepts`.
+3. Ο πελάτης υπογράφει και επαναλαμβάνει με `PAYMENT-SIGNATURE`.
+4. Το Gateway αποκωδικοποιεί το `PAYMENT-SIGNATURE`, επιλέγει την αντίστοιχη απαίτηση πληρωμής.
+5. Το Gateway καλεί τον Facilitator `/verify`.
+6. Μετά την επιτυχία του `/verify`, το Gateway επιτρέπει το αίτημα στο στόχο API.
+7. Μετά την επιστροφή του στόχου API, το Gateway καλεί τον Facilitator `/settle` στη φάση `/record`.
+8. Το Gateway καταγράφει το hash της συναλλαγής στο blockchain στα μεταδεδομένα χρήσης.
+`exact` στην βήμα 7 υπολογισμός ποσού υπογραφής; `upto` στην βήμα 7 σύμφωνα με την πραγματική χρήση γράφει το `amount`, και στη συνέχεια υπολογίζει το πραγματικό ποσό.
+
+## Πώς να ενσωματώσετε το API σας
+
+Αν θέλετε να υποστηρίξει το API σας το X402, μπορείτε να το υλοποιήσετε με αυτή τη δομή:
+
+1. Ετοιμάστε `paymentRequirements` για κάθε πληρωμή, που περιλαμβάνει δίκτυο, ποσό, διεύθυνση πληρωμής, διεύθυνση περιουσιακού στοιχείου και domain υπογραφής.
+2. Αν το αίτημα δεν έχει `PAYMENT-SIGNATURE`, επιστρέψτε HTTP 402 και `accepts`.
+3. Αν το αίτημα έχει `PAYMENT-SIGNATURE`, αποκωδικοποιήστε το Base64 για να αποκτήσετε το `paymentPayload`.
+4. Καλέστε τον Facilitator `/verify`.
+5. Μετά την επιτυχία της επαλήθευσης, εκτελέστε τη λογική της επιχείρησης.
+6. Μετά την επιτυχία της επιχείρησης, καλέστε τον Facilitator `/settle`.
+7. Αποθηκεύστε `payer`, `transaction`, `amount`, `network` για να διευκολύνετε την αντιστοίχιση.
+
+Ο διακομιστής πρέπει να χρησιμοποιεί τα δικά του παραγόμενα `paymentRequirements` για να καλέσει `/verify` και `/settle`, μην εμπιστεύεστε τα ποσά, τις διευθύνσεις πληρωμής ή τις διευθύνσεις περιουσιακών στοιχείων που επιστρέφει ο πελάτης.
+
+## Προστασία από επαναλήψεις
+
+Ο Facilitator θα καταγράψει το nonce. Η εξουσιοδότηση με το ίδιο nonce δεν μπορεί να επαληθευτεί και να διευθετηθεί ξανά.
+
+Αυτό σημαίνει:
+
+- Ο πελάτης θα πρέπει να υπογράφει ένα νέο envelope κάθε φορά που κάνει αίτημα.
+- Αν το `/settle` έχει υποβληθεί αλλά δεν έχει επιβεβαιωθεί προσωρινά, μπορείτε να δοκιμάσετε ξανά το `/settle` με το ίδιο nonce για να κάνετε idempotent αντιστοίχιση.
+- Μην αποθηκεύετε το ίδιο `PAYMENT-SIGNATURE` και το χρησιμοποιείτε για πολλαπλές κλήσεις API.
+
+## Συχνά σφάλματα
+
+| Σφάλμα                                           | Συχνές αιτίες                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `Authorization nonce already processed`      | Χρησιμοποιήθηκε ξανά το ίδιο `PAYMENT-SIGNATURE`.                                    |
+| `Authorization destination mismatch`         | Το `to` στην υπογραφή του πελάτη δεν ταιριάζει με το `payTo` της απαιτήσεως πληρωμής.                |
+| `invalid_upto_evm_payload_invalid_signature` | Το chainId, facilitator, Permit2 domain ή η διεύθυνση υπογραφής του `upto` typed data δεν ταιριάζουν. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | Το πορτοφόλι δεν έχει εγκρίνει επαρκή USDC allowance για το Permit2.                        |
+| `Payer has insufficient USDC balance`        | Το πορτοφόλι πληρωμής δεν έχει αρκετό USDC.                                                    |
+| `Solana signer private key not configured`   | Ο Facilitator χρειάζεται να υπογράψει ως fee payer, αλλά ο διακομιστής λείπει η ρύθμιση του Solana signer.           |

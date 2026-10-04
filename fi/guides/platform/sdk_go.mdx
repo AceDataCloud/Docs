@@ -1,0 +1,289 @@
+---
+title: "Go SDK - Integrointio-opas"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`github.com/AceDataCloud/SDK/go`](https://pkg.go.dev/github.com/AceDataCloud/SDK/go) on Ace Data Cloudin virallinen Go SDK, joka kapseloi `api.acedata.cloud` -sivustolla olevat chat completions / images / video / music / search -toiminnot `client.OpenAI().Chat().Completions().Create(...)` -tyyliseksi menetelmäketjuksi, ja se sisältää SSE-virtaustoiminnon (kanavapohjainen), automaattisen uudelleenyrityksen ja virheiden tyypityksen.
+
+Tyyliltään se on linjassa `context.Context` + funktionaalisten vaihtoehtojen kanssa, ja se sopii mihin tahansa Go-taustapalveluun tai CLI:hin.
+
+Lähdekoodi ja dokumentaatio:
+
+- SDK-varasto: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- Go-moduuli: [https://pkg.go.dev/github.com/AceDataCloud/SDK/go](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+
+## Asennus
+
+```bash
+go get github.com/AceDataCloud/SDK/go
+```
+
+Puhdas Go-moduulin version tarkistus:
+
+```text
+$ go list -m github.com/AceDataCloud/SDK/go
+github.com/AceDataCloud/SDK/go v0.0.0-20260505072132-4a3d921f9bb4
+```
+
+Tuloksen selitys:
+
+- Tällä hetkellä ei ole semver-tunnistetta, `go get` lataa commitin valeversion `v0.0.0-<timestamp>-<sha>`; tämä versio lukitaan `go.sum`-tiedostoon, ja tiimin jäsenet voivat ladata saman koodin ja saada täysin yhtenäiset riippuvuudet.
+- Go SDK on tällä hetkellä pääasiassa vakaa `chat.completions` (synkroninen + virtaava), monimediaresurssit (`images` / `video` / `audio`) ja `TaskHandle` -pollaus ovat alpha-vaiheessa. Tarvittaessa näitä ominaisuuksia kannattaa ensisijaisesti valita [TypeScript SDK](https://platform.acedata.cloud/documents/sdk-typescript) tai [Python SDK](https://platform.acedata.cloud/documents/sdk-python).
+
+## Valmistele API Token
+
+Viittaus [SDK Yleiskatsaus - Hae API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) saadaksesi tokenin, ja sitten `export` shellissä:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+Rakentaessasi asiakasta voit injektoida sen `WithAPIToken(...)` -vaihtoehdolla; Go SDK ei lue ympäristömuuttujia automaattisesti, joten liiketoimintakoodin on käytettävä `os.Getenv`-kutsua, mikä tekee siitä hallittavampaa usean tilin tai itse testauksen skenaarioissa.
+
+## Esimerkki 1: chat.completions (ei-virtaava)
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    res, err := client.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Reply with exactly: ADC_GO_SDK_OK"}},
+        MaxTokens: 20,
+    })
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("id", res["id"])
+    fmt.Println("model", res["model"])
+    choices := res["choices"].([]any)
+    msg := choices[0].(map[string]any)["message"].(map[string]any)
+    fmt.Println("content", msg["content"])
+    usage := res["usage"].(map[string]any)
+    fmt.Printf("usage prompt=%v completion=%v total=%v\n",
+        usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
+}
+```
+
+Ohjelman suoritus tulos:
+
+```text
+elapsed_ms 6436
+id chatcmpl-89DHExvFvBc4ciIPfolZYUOy7ivxv
+model gpt-4o-mini
+content ADC_GO_SDK_OK
+usage prompt=16 completion=5 total=21
+```
+
+Tuloksen selitys:
+
+- `id` on OpenAI-yhteensopiva vastaus-ID, jonka voi löytää ohjauspaneelin [käyttöhistoriasta](https://platform.acedata.cloud/console/usages).
+- `content ADC_GO_SDK_OK` on mallin todellinen tuotos, mikä todistaa, että SDK ei ole muokannut vastausta.
+- 6.4 sekunnista suurin osa on ensimmäinen TLS-käsi + mallin generointi, ja asiakasinstituution uudelleenkäytön jälkeen viive on sama kuin TS / Python (noin 2~3 sekuntia).
+- Vastaus on aina `map[string]any`, joten tyypin väittämistä on tehtävä itse; tämä on Go SDK:n nykyinen suunnitteluratkaisu - generisten rakenteiden käyttämättä jättäminen mahdollistaa monimallireitityksen ilman vahvaa riippuvuutta yksittäisestä vastausskeemasta.
+
+## Esimerkki 2: chat.completions (SSE-virtaava)
+
+`CreateStream` palauttaa kaksi kanavaa: `&lt;-chan map[string]any` on kehystetty SSE chunk, ja `&lt;-chan error` sisältää luettavia elementtejä vain virran päättyessä (normaalisti tai virheellisesti).
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Count from 1 to 5 separated by spaces. Just the numbers."}},
+        MaxTokens: 30,
+    })
+
+    first := int64(-1)
+    cnt := 0
+    collected := ""
+    for chunk := range chunks {
+        if first < 0 {
+            first = time.Since(t0).Milliseconds()
+        }
+        cnt++
+        if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+            if c0, ok := ch[0].(map[string]any); ok {
+                if d, ok := c0["delta"].(map[string]any); ok {
+                    if s, ok := d["content"].(string); ok {
+                        collected += s
+                    }
+                }
+            }
+        }
+    }
+    if e, ok := <-errs; ok && e != nil {
+        fmt.Println("stream_err", e)
+    }
+    fmt.Println("total_elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("first_chunk_ms", first)
+    fmt.Println("chunks", cnt)
+    fmt.Println("collected", collected)
+}
+```
+
+Ohjelman suoritus tulos:
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+Tuloksen selitys:
+
+- Ensimmäinen kehys 1633 ms, ja 13 chunkin saaminen kesti yhteensä 1816 ms - jälkimmäiset 12 kehystä kesti vain 183 ms.
+- `range chunks` lopettaa silmukan luonnollisesti virran päättyessä; `errs`-kanava tuottaa enintään yhden elementin, ja `ok`-tarkistus riittää virheen saamiseksi.
+- Tämä kanavatyylin etu on, että voit suoraan `select`-toiminnolla yhdistää `context.Context`-aikakatkaisuun / peruutukseen ilman ylimääräistä kapselointia.
+
+## Esimerkki 3: Tyypitetty virheiden käsittely
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    huono, _ := adc.NewClient(adc.WithAPIToken("definitely-not-a-real-token"))
+    _, err := huono.OpenAI().Chat().Completions().Create(context.Background(), adc.ChatCompletionRequest{
+        Model:    "gpt-4o-mini",
+        Messages: []map[string]any{{"role": "user", "content": "hi"}},
+        MaxTokens: 5,
+    })
+    if err != nil {
+        var apiErr *adc.APIError
+        if errors.As(err, &apiErr) {
+            fmt.Println("status:", apiErr.StatusCode)
+            fmt.Println("code:", apiErr.Code)
+            fmt.Println("message:", apiErr.Message)
+        } else {
+            fmt.Println("muu virhe:", err)
+        }
+    }
+}
+```
+
+`adc.APIError` kattaa samanaikaisesti 401 / 403 / 404 / 422 / 429 / 5xx, liiketoimintakoodissa käytetään `errors.As` rakenteellisten kenttien saamiseksi. HTTP-tilakoodit, palvelimen `code` ja `message` säilyvät ennallaan. Verkkokerroksen virheet (DNS-epäonnistuminen, yhteys hylätty jne.) käsitellään `context.DeadlineExceeded`, `net.OpError` jne. standardin Go-virheen kautta, eikä niitä nielaiseta.
+
+## Konfigurointivaihtoehdot (funktionaaliset vaihtoehdot)
+
+```go
+asiakas, err := adc.NewClient(
+    // Pakollinen: API-tunnus; suositellaan luettavaksi ympäristömuuttujasta
+    adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")),
+
+    // Alustan API-pohjaosoite, oletusarvoisesti https://api.acedata.cloud
+    adc.WithBaseURL("https://api.acedata.cloud"),
+
+    // Yhden pyynnön aikaraja, oletusarvoisesti 5 minuuttia
+    adc.WithTimeout(60*time.Second),
+
+    // Automaattisten uusintakertojen määrä, oletusarvoisesti 2
+    adc.WithMaxRetries(2),
+
+    // Mukautetut pyyntöotsikot
+    adc.WithHeader("x-app", "my-service/1.0"),
+)
+```
+
+`NewClient` palauttaa `(*Client, error)`: kun tunnus on tyhjää **ja** `WithPaymentHandler` (X402) ei ole annettu, se ilmoittaa virheestä heti, mikä helpottaa konfiguraation puutteiden havaitsemista palvelun käynnistysvaiheessa.
+
+## Edistyksellinen: Clientin uudelleenkäyttö
+
+Go SDK käyttää sisäisesti yhtä `*http.Client` + `http.Transport`, joka sisältää yhteysaltaan ja HTTP/2-uudelleenkäytön. **Suositellaan, että prosessin elinkaaren aikana luodaan vain yksi `*adc.Client`** ja jaetaan se goroutinien kesken - kaikki menetelmät ovat rinnakkaisesti turvallisia.
+
+```go
+// pkg/acelearn/client.go
+var sharedClient *adc.Client
+
+func init() {
+    var err error
+    sharedClient, err = adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+
+func Chat(ctx context.Context, malli, kehotus string) (string, error) {
+    res, err := sharedClient.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:    malli,
+        Messages: []map[string]any{{"role": "user", "content": kehotus}},
+    })
+    if err != nil {
+        return "", err
+    }
+    return res["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string), nil
+}
+```
+
+## Rajoitukset ja tiekartta
+
+Nykyiset vakaat / suositellut tuotantokäyttöön:
+
+- ✅ `client.OpenAI().Chat().Completions().Create` synkroninen ei-virtaava
+- ✅ `client.OpenAI().Chat().Completions().CreateStream` SSE-virtaava
+- ✅ `errors.As` + `APIError` virheenkäsittely
+- ✅ Automaattinen uusinta + eksponentiaalinen taantuminen
+
+On edelleen alpha-vaiheessa:
+
+- 🚧 `client.Images()` / `client.Video()` / `client.Audio()` — rajapinta on kehitysvaiheessa, suositellaan käyttämään ensin HTTP:ta suoraan
+- 🚧 `TaskHandle` asynkroninen kysely — ei ole vielä altistettu Go SDK:n pinnalle
+- 🚧 `WithPaymentHandler` (X402 ketjussa maksaminen) — suunnitteilla, tällä hetkellä X402 tukee vain [TypeScript](https://platform.acedata.cloud/documents/x402-typescript-sdk) ja [Python](https://platform.acedata.cloud/documents/x402-python-sdk)
+
+## Kuinka tarkistaa jäljellä oleva saldo
+
+Voit tarkistaa nykyisen tilisi jäljellä olevan saldon [Ace Data Cloud -hallintapaneelin - Sovellusluettelon](https://platform.acedata.cloud/console/applications) kautta.
+
+Voit tarkistaa kaikki käyttöhistorian ja maksutiedot [Ace Data Cloud -hallintapaneelin - Käyttöhistorian](https://platform.acedata.cloud/console/usages) kautta.
+
+## Lisätietoja
+
+- 🟦 [`github.com/AceDataCloud/SDK/go` pkg.go.dev:ssä](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+- 🗂 [SDK-lähdekoodi](https://github.com/AceDataCloud/SDK/tree/main/go)
+- 📘 [TypeScript SDK -integrointiohje](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Python SDK -integrointiohje](https://platform.acedata.cloud/documents/sdk-python)
+- 🔌 [SDK + X402 maksuhook](https://platform.acedata.cloud/documents/sdk-x402-payment)

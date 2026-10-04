@@ -1,0 +1,234 @@
+---
+title: "X402 Order Payment Tutorial"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+In addition to paying directly per API request, Ace Data Cloud also supports paying console orders with X402. Order payment uses the same core protocol as API calls: the first request returns 402, the client signs `PAYMENT-SIGNATURE`, then retries with the same request.
+
+The difference is that order payment is a platform API and requires an account token; while directly calling the AI API at `x402.acedata.cloud` can use only X402 and does not require an API Token.
+
+## Prepare an Order
+
+Go to the [Ace Data Cloud Console](https://platform.acedata.cloud/console/orders), select the order that needs to be paid, and record the order ID.
+
+If you do not have an order yet, you can create a pending-payment order on the package page. The order price is subject to what is displayed on the page, and the `amount` in the X402 402 response is the final basis for signing.
+
+## Create an Account Token
+
+Order payment requests require an account token. Open the [Platform Token page](https://platform.acedata.cloud/console/platform-tokens) and create a token in the `platform-v1-...` format.
+
+Use the following for subsequent requests:
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+An account token is different from a regular API Token. A regular API Token is used to consume API credits; an account token is used to operate platform resources on behalf of your account, such as order payment.
+
+## Trigger 402
+
+First send a request without `PAYMENT-SIGNATURE`:
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+The returned status is 402, and the response contains `accepts`:
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+Order payment uses the official x402 v2: `x402Version` is `2`, `network` uses the CAIP-2 identifier, and the amount field is `amount`.
+
+Program output from creating a 10 Credits order and triggering 402:
+
+> The following transaction records are historical tested samples under the old policy. The amounts and transaction hashes are retained as-is. New X402 orders no longer have payment-method discounts; please use the `amount` in this 402 response as the basis for signing and payment.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+Result explanation:
+
+- The status after the order is created successfully is `Pending`; there is no on-chain payment yet at this time.
+- The first `pay/` request does not carry `PAYMENT-SIGNATURE`, so it returns HTTP 402.
+- `accepts` provides both Base `exact` and Solana `exact`; this tutorial selects Base for the following steps.
+- The price when the order was created was `1.26`. When payment was made during the old X402 payment discount policy, the actual signed and settled amount was `1.2` USDC, corresponding to `1200000` atomic USDC.
+
+Note that `resource` here is a field returned by the server and participates in signing. The client must not rewrite the protocol, path, or order ID in it by itself.
+
+## Sign and Retry
+
+Order payment can reuse the low-level signing functions of `@acedatacloud/x402-client` or `acedatacloud-x402`. The following is a TypeScript example:
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+Program output after signing and retrying the same order with Base `exact`:
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+On-chain confirmation result:
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+Result description:
+
+- `status 200` indicates that the platform order payment API accepted this `PAYMENT-SIGNATURE`.
+- `has_x_payment_response True` indicates that the response header contains a Base64-encoded `PAYMENT-RESPONSE` receipt.
+- `settle_header.success=True` and `network=base` indicate that the Facilitator has completed Base settlement.
+- The final order status is `Finished`, `pay_way` is `X402`, and `pay_id` is written with the on-chain transaction hash.
+- The `Transfer` event on BaseScan shows that the payment address transferred `1200000` atomic USDC to the platform receiving address, which is `1.2` USDC.
+
+## Successful Response and Receipt
+
+After the order payment succeeds, the response body contains order information. The platform will also include a Base64-encoded settlement response in the response header `PAYMENT-RESPONSE`. After decoding, common fields include:
+
+| Field            | Description                           |
+| ------------- | ---------------------------- |
+| `success`     | Whether Facilitator settlement succeeded. |
+| `transaction` | On-chain settlement transaction hash.                    |
+| `network`     | Payment network.                        |
+| `payer`       | Payer wallet address.                      |
+| `amount`      | Actual settlement amount, using atomic units.      |
+
+If reconciliation is required, it is recommended to save the order ID, payer wallet address, `transaction`, and final order status at the same time.
+
+## Notes
+
+- Order payment requires a platform account token and cannot be completed using only an X402 wallet signature.
+- `amount` uses USDC atomic units; `1200000` represents `1.2` USDC.
+- Do not construct the receiving address or asset address yourself; use the `accepts` in the 402 response as the source of truth.
+- If the same `PAYMENT-SIGNATURE` is submitted repeatedly, the Facilitator performs replay protection based on the nonce.
+
+## Payment Failure Response
+
+The first HTTP 402 without `PAYMENT-SIGNATURE` is a normal payment challenge and does not indicate payment failure. Verification or settlement failure after signing still retains the standard string `error` as a compatibility fallback, and returns a stable error structure in `extensions.acedatacloud.paymentError`:
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+Clients should prioritize localizing based on `code`; unknown codes should fall back to a general payment failure. `charged` is a tri-state field: `false` is returned only when the payment is explicitly rejected before settlement; if the field is missing, the charge status is unknown and cannot be interpreted as “not charged.” After the current order enters `Failed`, it cannot be retried using the original order; please create a new order after resolving the wallet issue.
+
+Do not record or submit the complete `PAYMENT-SIGNATURE`, wallet signature, authorization payload, Facilitator raw diagnostics, or RPC response. Customer support troubleshooting only requires the order ID and the public error `code`.
+```

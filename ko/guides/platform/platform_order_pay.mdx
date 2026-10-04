@@ -1,0 +1,78 @@
+---
+title: "AceDataCloud 플랫폼 주문 결제"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+`Pending` 주문에 대한 결제 세션을 생성하거나 새로고침합니다. 결제 작업은 결제 채널에 접근하며 주문 상태를 변경할 수 있으므로, 호출 전에 반드시 주문 ID, 금액 및 결제 방식을 확인해야 합니다.
+
+## 인터페이스 개요
+
+| 항목   | 내용                                                             |
+| ---- | -------------------------------------------------------------- |
+| 메서드   | `POST`                                                         |
+| URL  | `https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/` |
+| 인증   | 호스팅 리디렉션 유형 결제는 익명 가능; 기타 방식은 로그인 상태 또는 Account Token 필요                            |
+| Body | JSON, 미결제 주문은 반드시 `pay_way` 제공                                       |
+
+## 익명 결제의 범위
+
+익명 접근은 복사된 결제 링크를 열었을 때 로그인 상태가 사라지는 시나리오를 위한 것이며, 장기 Account Token을 제공할 필요도 없고 제공해서도 안 됩니다. 익명 호출:
+
+- 서버 측에 구성된 호스팅 리디렉션 결제 방식만 허용합니다;
+- 데스크톱 결제 페이지를 고정으로 사용합니다;
+- 무료 주문을 수령할 수 없습니다;
+- IP 및 단일 주문 속도 제한을 적용받습니다;
+- 계정, Application 또는 내부 metadata를 포함하지 않는 최소 주문 프로젝션을 반환합니다.
+
+인증된 호출자는 반드시 주문 소유자 또는 슈퍼 관리자여야 합니다. X402, 보상 교환 등 사용자 컨텍스트가 필요한 방식은 익명으로 호출할 수 없습니다.
+
+## 요청 예시
+
+```shell
+export ORDER_ID='당신의 Pending 주문 ID'
+
+curl -X POST \
+  "https://platform.acedata.cloud/api/v1/orders/${ORDER_ID}/pay/" \
+  -H 'Content-Type: application/json' \
+  -d '{"pay_way":"Stripe"}'
+```
+
+인증이 필요한 결제 방식:
+
+```shell
+export PLATFORM_TOKEN='당신의 계정 토큰'
+
+curl -X POST \
+  "https://platform.acedata.cloud/api/v1/orders/${ORDER_ID}/pay/" \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"pay_way":"X402"}'
+```
+
+`pay_way`는 주문 모델이 지원하는 실제 값을 사용합니다. 예: `WechatPay`, `AliPay`, `Stripe`, `Card`, `Airwallex`, `X402`, `PayPal`, `AppleIAP`, `Reward`, `BankTransfer`입니다. 모든 값이 익명 요청 또는 모든 사이트에서 열려 있는 것은 아닙니다.
+
+## 응답 설명
+
+성공 응답은 업데이트된 주문 객체이며, 일반적으로 `pay_url`을 통해 다음 단계 진입점을 제공합니다; 서로 다른 결제 방식은 제어된 필드에서 클라이언트가 결제를 계속하는 데 필요한 정보를 반환할 수도 있습니다. 익명 응답은 최소 필드 화이트리스트를 사용하며, 인증된 소유자는 전체 세부 정보를 받습니다.
+
+`payment_url`, `qr_code_url` 또는 `payment_method` 등의 이전 필드명에 의존하지 마세요; 현재 Order 계약은 `pay_url` 및 `pay_way`를 사용합니다.
+
+## iOS 인앱 결제
+
+로그인한 주문 소유자는 `pay_way: "AppleIAP"`를 전달할 수 있습니다. 이 요청은 선택한 요금제의 `metadata.apple_price`에 따라 미결제 주문을 업데이트하고 할인을 제거하며, 청구를 생성하지 않고, 크레딧을 지급하지 않으며, 결제 링크도 반환하지 않습니다. 이전 미결제 주문은 먼저 이 단계를 완료한 후 Apple 네이티브 결제를 시작해야 합니다. Apple 상품과 가격이 구성된 Usage 요금제 하나만 지원합니다; 지원되지 않는 요금제 또는 일괄 주문은 `400`을 반환합니다.
+
+Apple 네이티브 결제 후 `/api/v1/orders/{id}/apple-verify/`를 통해 `transaction_id`를 제출하여 서버 측 검증 및 크레딧 지급을 완료합니다. 크레딧 수량은 요금제에서 가져옵니다; 금액은 Apple의 독립적인 미국 달러 사전 설정 가격을 사용하며, 멤버십 할인 또는 사이트 추가 요금은 적용되지 않고, 기타 지역의 현지 통화 청구 금액은 Apple 확인 페이지를 기준으로 합니다.
+
+## 오류 및 재시도
+
+- 주문이 `Pending`이 아님: `400`을 반환합니다; 결제 세션을 반복 생성하지 마세요.
+- `pay_way`를 제공하지 않음: 0이 아닌 금액의 주문은 `400`을 반환합니다.
+- 익명 호출이 허용되지 않는 방식 또는 무료 주문을 사용함: `403`을 반환하며, 로그인 후 소유자가 재시도합니다.
+- 인증되었지만 주문 소유자가 아님: `403`을 반환합니다.
+- 결제 채널 실패: 무작정 반복 제출하지 마세요; 먼저 주문 세부 정보를 조회하고, 여전히 `Pending`인지 확인한 후 재시도하세요.
+
+## 관련 인터페이스
+
+- [충전 주문 생성](https://platform.acedata.cloud/documents/platform-order-create)
+- [주문 세부 정보 가져오기](https://platform.acedata.cloud/documents/platform-order-detail)
+- [주문 상태 새로고침](https://platform.acedata.cloud/documents/platform-order-refresh)

@@ -1,0 +1,227 @@
+---
+title: "X402 Python SDK 接入教程"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+Python SDK 适合后端服务、数据任务、自动化 Agent 和批处理脚本。`acedatacloud` 负责 API 调用，`acedatacloud-x402` 负责签出 `PAYMENT-SIGNATURE` 请求头。
+
+源码与包地址：
+
+- SDK 仓库：[https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- X402 Client 仓库：[https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- PyPI SDK：[https://pypi.org/project/acedatacloud/](https://pypi.org/project/acedatacloud/)
+- PyPI X402 Client：[https://pypi.org/project/acedatacloud-x402/](https://pypi.org/project/acedatacloud-x402/)
+
+## 安装依赖
+
+```bash
+pip install acedatacloud acedatacloud-x402
+```
+
+如果要使用 `upto`，还需要一次性调用 Permit2 approve CLI，该 CLI 依赖 `web3`：
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+```
+
+干净 Python venv 的安装和导入检查输出：
+
+```text
+acedatacloud 2026.4.26.1
+acedatacloud-x402 2026.5.31.3
+imports_ok True True True True True True
+usage: acedatacloud-x402 [-h] {approve-permit2} ...
+approve-permit2  One-time ERC-20 approve(Permit2, amount) needed before signing upto payments.
+```
+
+结果说明：
+
+- `acedatacloud` 和 `acedatacloud-x402` 均可从 PyPI 安装并导入。
+- `pip install 'acedatacloud-x402[cli]'` 会带上 `approve-permit2` CLI，用于 `upto` 前置授权。
+
+## Base 或 SKALE 示例
+
+下面示例不需要 API Token。钱包私钥只在本地签名，不会发送给 Ace Data Cloud。
+
+```python
+import os
+
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import EVMAccountSigner, create_x402_payment_handler
+
+signer = EVMAccountSigner.from_private_key(os.environ["EVM_PRIVATE_KEY"])
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+    )
+)
+
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Say hi in 3 words"}],
+    max_tokens=10,
+)
+
+print(res["choices"][0]["message"]["content"])
+```
+
+Python SDK 当前返回的是 `dict`，所以示例使用 `res["choices"][0]["message"]["content"]`。不要直接假设它一定有 `.choices` 属性。
+
+SKALE paid call 的程序运行结果：
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 4786
+content ADC_PY_SDK_X402_OK
+id chatcmpl-DlcWajqAHOop3iebmO19XRfT5bTPz
+```
+
+结果说明：
+
+- 程序完成了 402 解析、`PAYMENT-SIGNATURE` 签名和原请求重试。
+- `content ADC_PY_SDK_X402_OK` 是模型真实返回的固定字符串，说明请求已经通过 X402 付费链路进入目标 API。
+- `id chatcmpl-DlcWajqAHOop3iebmO19XRfT5bTPz` 是这次 chat completion 响应 ID。
+
+使用 SKALE 时只需要改网络名：
+
+```python
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="skale",
+        evm_signer=signer,
+    )
+)
+```
+
+## Solana 示例
+
+Solana 使用 base58 编码的 secret key：
+
+```python
+import os
+
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import SolanaKeypairSigner, create_x402_payment_handler
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="solana",
+        solana_signer=SolanaKeypairSigner.from_base58(os.environ["SOLANA_SECRET_KEY"]),
+    )
+)
+
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Say hi in 3 words"}],
+    max_tokens=10,
+)
+```
+
+Solana 路径会构造并提交 SPL USDC `TransferChecked` 交易，然后把交易签名放进 `PAYMENT-SIGNATURE` envelope。
+
+Solana paid retry 在生产 API 上已返回 HTTP 200 和 `ADC_SOLANA_E2E_OK`。本次公开 RPC 查询遇到限流，未稳定确认链上 signature；需要对账时请用你自己的 Solana RPC 查询该次交易。
+
+## Async 客户端
+
+同一个 payment handler 可以用于 `AsyncAceDataCloud`：
+
+```python
+import os
+
+from acedatacloud import AsyncAceDataCloud
+from acedatacloud_x402 import EVMAccountSigner, create_x402_payment_handler
+
+signer = EVMAccountSigner.from_private_key(os.environ["EVM_PRIVATE_KEY"])
+
+client = AsyncAceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+    )
+)
+
+res = await client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Say hi in 3 words"}],
+    max_tokens=10,
+)
+```
+
+## 使用 `upto` 后置计量
+
+聊天补全、模型调用等 API 的真实成本可能需要等响应结束后才知道。此时 API 可能同时返回 `exact` 和 `upto`。如果要优先使用 `upto`：
+
+```python
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=signer,
+        prefer_scheme="upto",
+    )
+)
+```
+
+Base `upto` 的程序运行结果：
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+settlement tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+settled value 3 atomic USDC
+```
+
+链上确认：
+
+```text
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+transfer value 3 atomic USDC
+```
+
+结果说明：
+
+- `content ADC_BASE_UPTO_OK` 说明请求真实进入模型 API。
+- `settled value 3 atomic USDC` 说明 `upto` 按实际用量结算，而不是扣完整上限。
+- `settlement tx` 可在 BaseScan 打开，对账时保存 tx hash、payer、completion id 和请求摘要。
+
+`upto` 使用 Permit2 授权一个上限，实际结算金额不能超过该上限。第一次使用前，需要对目标链上的 USDC 做一次 `approve(Permit2, amount)`。
+
+CLI 方式：
+
+```bash
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+程序方式：
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+该 helper 是幂等的。如果 allowance 已经足够，会返回 `{"skipped": true}`，不会重复发链上交易。
+
+## 低层签名
+
+如果你不使用 SDK，也可以直接调用低层签名函数：
+
+```python
+import base64
+import json
+
+from acedatacloud_x402 import EVMAccountSigner, sign_evm_payment
+
+envelope = sign_evm_payment(requirement, EVMAccountSigner.from_private_key("0x..."))
+x_payment = base64.b64encode(json.dumps(envelope, separators=(",", ":")).encode()).decode()
+```
+
+低层函数适合测试、代理层、网关集成或非官方 SDK。普通业务代码优先使用 `create_x402_payment_handler`。

@@ -1,0 +1,190 @@
+---
+title: "Réseaux et modes de paiement X402"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 est actuellement centré sur le règlement en USDC et prend en charge deux types de chaînes : EVM et Solana. Les méthodes de signature, les adresses d’actifs, le comportement du gas et les scénarios applicables diffèrent selon les réseaux ; vous devez donc choisir le réseau avant l’intégration.
+
+## Les identifiants de réseau utilisent CAIP-2
+
+Le champ `accepts[].network` de x402 v2 est un identifiant CAIP-2, et non une abréviation telle que `base` ou `skale`. Les clients doivent comparer les réseaux selon la chaîne CAIP-2 :
+
+| Réseau             | Identifiant CAIP-2                         |
+| -------------- | ----------------------------------------- |
+| Base           | `eip155:8453`                             |
+| SKALE Base     | `eip155:1187947933`                       |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` |
+
+## Matrice de prise en charge
+
+| Réseau     | scheme  | Actif                  | Méthode de signature                                 | Scénario applicable                        |
+| ------ | ------- | ------------------- | ------------------------------------ | --------------------------- |
+| Base   | `exact` | Base USDC           | EIP-3009 `TransferWithAuthorization` | Recommandé par défaut, prise en charge mature des wallets et de la liquidité.            |
+| Base   | `upto`  | Base USDC + Permit2 | Permit2 `PermitWitnessTransferFrom`  | API de facturation a posteriori, telles que le chat et les modèles.             |
+| SKALE  | `exact` | USDC bridgé SKALE  | EIP-3009 `TransferWithAuthorization` | Faible coût de gas, adapté à la vérification de paiements EVM et aux appels à faible coût. |
+| Solana | `exact` | Solana USDC         | SPL `TransferChecked`                | Scénarios de wallets Solana, d’Agent ou d’applications on-chain.    |
+
+`upto` est actuellement fourni uniquement sur Base. Les options réellement disponibles dépendent du champ `accepts` renvoyé par l’API. Vous pouvez également consulter le Facilitator :
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+La réponse de Facilitator `/supported` :
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ]
+}
+```
+
+Explication des résultats :
+
+- Les `exact` de Base, SKALE et Solana sont des parcours de paiement à montant fixe.
+- Seule Base fournit le parcours de facturation a posteriori `upto`, qui dépend de l’approbation Permit2.
+- L’adresse `extra.facilitatorAddress` dans l’entrée `upto` est l’adresse que le client doit inscrire dans le witness lors de la signature ; elle doit être identique à la valeur renvoyée par le serveur.
+
+## Base
+
+Base utilise le contrat USDC officiel :
+
+```text
+0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+```
+
+Dans le schéma `exact`, le client signe EIP-712 `TransferWithAuthorization`. Le contenu de la signature comprend :
+
+- `from` : adresse du wallet payeur
+- `to` : adresse de réception d’Ace Data Cloud
+- `value` : montant de ce paiement
+- `validAfter` / `validBefore` : fenêtre de validité de la signature
+- `nonce` : nonce aléatoire de 32 octets
+
+Après avoir vérifié la signature, le Facilitator appellera `transferWithAuthorization` de l’USDC on-chain afin d’effectuer le transfert.
+
+Base est le réseau le plus recommandé pour une intégration officielle, particulièrement pour la facturation a posteriori `upto`, car les écosystèmes Permit2, USDC et de wallets y sont plus matures.
+
+Exemple de résultat de vérification Base `exact` :
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+```
+
+Explication des résultats :
+
+- Le paid retry de l’API renvoie le contenu de modèle `ADC_BASE_E2E_OK`.
+- La transaction on-chain est consultable sur BaseScan, et le numéro de bloc est `46726299`.
+- `95215` atomic USDC correspond à `0.095215` USDC, soit le montant réellement réglé pour cet appel API.
+
+Résultat de l’exécution du programme de paiement de commande Base `exact` :
+
+```text
+order 78481793-304e-47f7-bc0c-8231aec9cc1e
+state Finished
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Explication des résultats :
+
+- L’état final de la commande de la plateforme est `Finished`.
+- Le `pay_id` de la commande inscrit le même hash de transaction Base.
+- `1200000` atomic USDC correspond à `1.2` USDC, soit le montant historique effectivement payé pour cette commande de 10 Credits sous l’ancienne politique ; les nouvelles commandes ne bénéficient plus d’une remise supplémentaire pour le mode de paiement X402, et le montant de la signature dépend de la réponse 402 actuelle.
+
+## SKALE
+
+SKALE utilise de l’USDC bridgé ; sa méthode de signature est similaire à celle de Base et utilise également EIP-3009. Il convient aux scénarios de paiement EVM à faible coût de gas ; les appels effectifs dépendent toujours du champ `accepts` renvoyé par l’API.
+
+Les `accepts` 402 typiques de SKALE incluent :
+
+```json
+{
+  "network": "eip155:1187947933",
+  "scheme": "exact",
+  "extra": {
+    "name": "Bridged USDC (SKALE Bridge)",
+    "version": "2",
+    "chainId": 1187947933,
+    "verifyingContract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+  }
+}
+```
+
+SKALE fournit actuellement uniquement `exact`. Si vous avez besoin d’une facturation a posteriori, utilisez Base `upto`.
+
+Exemple de résultat de vérification SKALE `exact` :
+
+```text
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+```
+
+Explication des résultats :
+- La nouvelle tentative payante de l’API renvoie le contenu du modèle `ADC_SKALE_E2E_OK`。
+- La transaction est consultable dans le SKALE explorer, avec le numéro de bloc `1969317`。
+- Le montant de règlement de ce paiement `exact` est de `0.095215` USDC。
+
+## Solana
+
+Solana utilise SPL USDC `TransferChecked`。Le client construit une transaction de transfert, la signe et la soumet, puis place la signature de la transaction ou la transaction sérialisée dans l’enveloppe `PAYMENT-SIGNATURE`。
+
+Les caractéristiques de Solana：
+
+- utilise Solana wallet adapter ou une clé secrète base58；
+- l’actif est le mint Solana USDC；
+- seul `exact` est actuellement pris en charge；
+- le Facilitator vérifiera le mint, la destination, l’authority et le amount de la transfer instruction。
+
+Si le mode wallet fee payer est utilisé, le wallet soumet directement la transaction, et le Facilitator est responsable de confirmer la transaction et de renvoyer le résultat de settlement。
+
+Exemple de résultat de vérification Solana `exact`：
+
+```text
+payer AY2RmGm2zPxB1uKvvF4dKyYdr2VySyL3wcD1MKJZoLRd
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run
+```
+
+Explication des résultats：
+
+- La nouvelle tentative payante a déjà renvoyé HTTP 200, et le modèle a généré `ADC_SOLANA_E2E_OK`。
+- Des limitations de débit peuvent être rencontrées lors de la requête de la signature on-chain via le RPC public。
+- Étant donné que les requêtes RPC publiques peuvent être limitées en débit, le Solana explorer n’est pas indiqué ici。Lorsqu’une réconciliation stricte est nécessaire, veuillez utiliser votre propre RPC Solana ou les enregistrements de règlement côté plateforme pour confirmer la signature de la transaction。
+
+## Comment choisir
+
+| Ce que vous voulez faire        | Réseau recommandé                         |
+| ------------ | ---------------------------- |
+| Parcourir rapidement le chemin minimal     | SKALE `exact` ou Base `exact` |
+| Destiné aux utilisateurs Web3 ordinaires | Base                         |
+| Effectuer une mesure différée pour les complétions de chat, etc.   | Base `upto`                  |
+| Applications de l’écosystème Solana  | Solana `exact`               |
+| Vérification de paiement EVM à faible coût | SKALE `exact`                |
+
+Quelle que soit la chaîne choisie, ne codez pas en dur les prix dans le client。Le prix est déterminé par `accepts[].maxAmountRequired` renvoyé par le serveur。

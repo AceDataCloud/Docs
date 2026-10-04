@@ -1,0 +1,318 @@
+---
+title: "SDK Task Polling and Streaming Response"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+Services on Ace Data Cloud are divided into two categories based on response mode:
+
+| Type          | Typical Services                                                                         | Calling Mode                                     |
+|---------------|-----------------------------------------------------------------------------------------|-------------------------------------------------|
+| **Synchronous Generation** | NanoBanana / Flux / Seedream / Chat Completions (non-streaming) / Google Search              | One HTTP call, result in the response body                          |
+| **Streaming Response**     | Chat Completions (`stream: true`)                                             | SSE, multi-frame token push                         |
+| **Asynchronous Tasks**     | Midjourney / Sora / Veo / Luma / Kling / Hailuo / Suno / Pixverse / Seedance | First create a task to get `task_id`, then poll `/<provider>/tasks` |
+
+This article focuses on the last two categories: **TaskHandle polling for asynchronous tasks** and the details, pitfalls, and cross-language differences of **chat streaming responses**.
+
+## I. TaskHandle — Unified Abstraction for Asynchronous Tasks
+
+All three SDKs encapsulate asynchronous tasks into `TaskHandle`, providing the same four methods:
+
+| Method                             | Behavior                                                         |
+|------------------------------------|------------------------------------------------------------------|
+| `get()`                            | Pull the latest status once (`POST /<provider>/tasks {id, action: "retrieve"}`) |
+| `is_completed()` / `isCompleted()` | Call `get()` once to check if `status` is `succeeded` / `failed`           |
+| `wait()`                           | Block polling until `succeeded` / `failed` or `max_wait` timeout             |
+| `result` property                  | The complete response obtained from the last `wait()` call; `null` before calling                           |
+
+### Two Calling Methods for Creating Tasks
+
+Each asynchronous resource (`images.generate` / `video.generate` / `audio.generate`) has a `wait` parameter:
+
+- `wait=False` (default): Immediately returns `TaskHandle`, business code decides when to poll.
+- `wait=True`: The SDK internally calls `handle.wait()`, returning the response after completion. **Only use this when you are sure the target API will return the `status: succeeded` field**—a few providers do not adhere to this convention, causing `wait` to keep polling until `max_wait` throws a `TimeoutError`.
+
+### Unit Differences (⚠️ Must Read)
+
+The **units of `poll_interval` and `max_wait` differ across the three languages**, which is a common pitfall during cross-language migration:
+
+| Language         | `poll_interval` Unit         | `max_wait` Unit | Default Value                                   |
+|------------------|------------------------------|------------------|-------------------------------------------------|
+| **TypeScript**   | **Milliseconds**             | **Milliseconds**  | `pollInterval=3000`, `maxWait=600000`          |
+| **Python**       | **Seconds**                  | **Seconds**       | `poll_interval=3.0`, `max_wait=600.0`          |
+| Go               | (TaskHandle not yet exposed in Go SDK) | —                | —                                               |
+
+> Treating TS's `{ pollInterval: 3000 }` as seconds and translating it to Python `poll_interval=3000` will cause the SDK to wait 50 minutes before polling a second time.
+
+### Example: Python Explicit Polling for Midjourney
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+# wait=False immediately gets handle
+handle = client.images.generate(
+    provider="midjourney",
+    prompt="a cinematic photo of a banana wearing a tuxedo",
+    wait=False,
+)
+print("task_id", handle.id)
+
+t0 = time.time()
+result = handle.wait(poll_interval=3.0, max_wait=180.0)
+print("elapsed_s", round(time.time() - t0, 1))
+print("status", result.get("response", result).get("status"))
+print("images", [it.get("image_url") for it in (result.get("response", result).get("data") or [])])
+```
+
+The entire code does the following:
+
+1. `images.generate(..., wait=False)` submits the `prompt` to the Midjourney API, immediately obtaining the `handle` without blocking.
+2. `handle.wait(poll_interval=3.0, max_wait=180.0)` internally POSTs to `/midjourney/tasks` every 3 seconds until `status` changes to `succeeded` or `failed`, or the total time exceeds 180 seconds, throwing a `TimeoutError`.
+3. After completion, `result["response"]["data"]` usually contains 4 images (Midjourney defaults to a 2x2 grid).
+
+### Example: TypeScript Explicit Polling
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+// wait: false immediately gets handle
+const handle: any = await client.images.generate({
+  provider: 'midjourney',
+  prompt: 'a cinematic photo of a banana wearing a tuxedo',
+  wait: false,
+});
+console.log('task_id', handle.id);
+
+const t0 = Date.now();
+const result: any = await handle.wait({ pollInterval: 3000, maxWait: 180_000 });
+console.log('elapsed_s', ((Date.now() - t0) / 1000).toFixed(1));
+const response = result.response ?? result;
+console.log('status', response.status);
+console.log('images', (response.data ?? []).map((it: any) => it.image_url));
+```
+
+### Trade-offs Between Synchronous Generation and Asynchronous Tasks
+
+If your provider itself generates images synchronously (NanoBanana / Flux / Seedream), **do not pass `wait`**:
+
+```python
+# ✅ Recommended
+res = client.images.generate(provider="nano-banana", prompt="...")
+url = res["data"][0]["image_url"]
+
+# ❌ Anti-example: will trigger the SDK to poll /nano-banana/tasks, wasting RTT
+res = client.images.generate(provider="nano-banana", prompt="...", wait=True)
+```
+
+The judgment method is simple: if the target API documentation **does not** have the `task_id` + `/tasks` pair, it is synchronous generation; the response of synchronous generation already contains the final result in the `data` field.
+
+### Internal Protocol of TaskHandle
+
+The `TaskHandle.get()` call is:
+
+```http
+POST {API_BASE}/<provider>/tasks
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{"id": "<task_id>", "action": "retrieve"}
+```
+
+The response has a unified structure:
+
+```json
+{
+  "task_id": "...",
+  "trace_id": "...",
+  "response": {
+    "status": "pending | running | succeeded | failed",
+    "data": [...]
+  }
+}
+```
+
+The SDK also supports **older responses without the outer `response` wrapper**—it directly reads the top-level `status`, so switching between old and new responses does not affect business code.
+
+## II. SSE Streaming Response (chat.completions)
+
+`chat.completions.create(stream=True)` is currently the only streaming interface in the SDK (audio/video streams are not yet supported). The iterative styles of the three languages are native to each:
+
+| Language         | Iteration                                                                        | Cancellation Mechanism                       |
+|------------------|---------------------------------------------------------------------------------|---------------------------------------------|
+| TypeScript       | `for await (const chunk of stream)`                                             | `AbortController` passed to fetch           |
+| Python           | `for chunk in client.openai.chat.completions.create(..., stream=True)`         | Break out of the loop (connection closed automatically by SDK)       |
+| Go               | `chunks, errs := ...CreateStream(ctx, req)` → `for chunk := range chunks`     | Cancel `context.Context`                    |
+
+### TypeScript
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const stream: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Count from 1 to 5 separated by spaces. Just the numbers.' }],
+  max_tokens: 30,
+  temperature: 0,
+  stream: true
+});
+
+let chunks = 0;
+let collected = '';
+for await (const chunk of stream) {
+  chunks++;
+  const delta = chunk?.choices?.[0]?.delta?.content;
+  if (delta) collected += delta;
+}
+console.log('chunks', chunks);
+console.log('collected', collected);
+```
+
+Actual running result:
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Python
+
+```python
+import os
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+chunks = 0
+collected = []
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Count from 1 to 5 separated by spaces. Just the numbers."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+print("chunks", chunks)
+print("collected", "".join(collected))
+```
+
+Actual running result:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+### Go
+
+```go
+chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+    Model:     "gpt-4o-mini",
+    Messages:  []map[string]any{{"role": "user", "content": "Count from 1 to 5 separated by spaces. Just the numbers."}},
+    MaxTokens: 30,
+})
+cnt := 0
+collected := ""
+for chunk := range chunks {
+    cnt++
+    if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+        if d, ok := ch[0].(map[string]any)["delta"].(map[string]any); ok {
+            if s, ok := d["content"].(string); ok {
+                collected += s
+            }
+        }
+    }
+}
+if e, ok := <-errs; ok && e != nil {
+    log.Println("stream_err", e)
+}
+fmt.Println("chunks", cnt, "collected", collected)
+```
+
+Actual running result:
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Structure of Stream Chunks
+
+Each chunk is an OpenAI compatible `chat.completion.chunk`:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion.chunk",
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "content": " 3"
+      },
+      "finish_reason": null
+    }
+  ]
+}
+```
+
+- The first chunk usually carries `delta.role: "assistant"` but has an empty `content`.
+- The middle chunks each carry `delta.content`, which can be concatenated directly.
+- The last chunk has an empty `delta`, and `finish_reason` is `stop` / `length` / `content_filter`.
+
+### Cancelling Midway
+
+| Language     | Cancellation Method                                                                  |
+| ------------ | ----------------------------------------------------------------------------------- |
+| TypeScript   | Pass `signal: abortController.signal` in the `create()` call, call `abortController.abort()` |
+| Python       | Use `break` to exit the `for` loop, the SDK will close the HTTPx stream in `__exit__` |
+| Go           | Call `cancel()` on the `ctx` passed in `NewClient`, the `chunks` channel will close immediately |
+
+Tokens generated before cancellation are still billed — tokens generated before the cancellation moment will still be charged based on actual consumption.
+
+## III. Timeouts and Retries
+
+The three SDKs share the same retry strategy:
+
+| Trigger Condition                  | Behavior                                                                          |
+| ---------------------------------- | -------------------------------------------------------------------------------- |
+| HTTP 408 / 409 / 429 / 5xx        | Default retries 2 times, exponential backoff 1s → 2s → 4s                      |
+| Network layer errors (DNS, connection refused, TLS failure) | Same as above                                                                    |
+| 401 / 403 / 404 / 422             | No retries, directly throw the corresponding typed error                         |
+| Streaming (`stream=True`) requests | **No retries** — once the first frame has streamed out, it cannot be replayed   |
+| Explicit `timeout` triggered       | Throw `APITimeoutError` (Python) / `TimeoutError` (TS) / `context.DeadlineExceeded` (Go) |
+
+To disable retries: pass `max_retries=0` / `maxRetries: 0` / `WithMaxRetries(0)` when constructing the client.
+
+Polling of asynchronous tasks (TaskHandle) is not affected by `max_retries` — its loop is business-level rather than HTTP-level, controlled by `max_wait` for total duration.
+
+## IV. Common Pitfalls
+
+1. **Do not pass `wait` for synchronous providers**: NanoBanana / Flux / Seedream are synchronously generated, forcing `wait=True` will make the SDK poll a `tasks` interface that will not update at all.
+2. **TaskHandle unit differences**: Python is in seconds, TS is in milliseconds, make sure to convert when porting across languages.
+3. **`wait=True` may still result in `TimeoutError`**: The response must meet `status in ('succeeded','failed')` to exit the loop; if the provider uses different field names, the business code must handle `handle.get()` parsing itself.
+4. **Streaming cancellation**: Tokens generated before cancellation have already been billed.
+5. **Reuse client within the same process**: The SDK has a built-in connection pool, frequently calling `new AceDataCloud()` / `AceDataCloud()` will make TLS handshake a bottleneck.
+
+## Learn More
+
+- 📘 [TypeScript SDK Integration Guide](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Python SDK Integration Guide](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Go SDK Integration Guide](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 Payment Hook](https://platform.acedata.cloud/documents/sdk-x402-payment)
+- 📦 [SDK monorepo source code](https://github.com/AceDataCloud/SDK)

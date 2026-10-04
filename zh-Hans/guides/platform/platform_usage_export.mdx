@@ -1,0 +1,146 @@
+---
+title: "导出 AceDataCloud 平台 API 调用记录"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+将当前账户的 API 调用明细直接下载为 CSV，适合财务对账、离线分析或保存大批量记录。若只需在页面中查看少量明细，请先使用[调用记录列表](https://platform.acedata.cloud/documents/platform-usage-list)。
+
+## 准备工作
+
+1. 登录 [AceDataCloud 平台](https://platform.acedata.cloud)。
+2. 在 [Account Token 控制台](https://platform.acedata.cloud/console/platform-tokens)创建账户令牌，并立即保存到密码管理器或 Secret Manager。
+3. 按需从[服务申请列表](https://platform.acedata.cloud/documents/platform-application-list)、[API 凭证列表](https://platform.acedata.cloud/documents/platform-credential-list)或[API 列表](https://platform.acedata.cloud/documents/platform-api-list)取得筛选 ID。
+
+完整令牌说明见[管理账户令牌](https://platform.acedata.cloud/documents/platform-token)。账户令牌与调用业务 API 的 Credential 不可混用。
+
+```shell
+export PLATFORM_TOKEN='你的账户令牌'
+```
+
+## 接口概览
+
+| 项 | 内容 |
+| --- | --- |
+| 方法 | `GET` |
+| URL | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| 鉴权 | `Authorization: Bearer ${PLATFORM_TOKEN}` |
+| OAuth Scope | `usage:read`（`platform:read` / `platform` 可展开包含） |
+| 响应 | `200 text/csv; charset=utf-8` |
+| 文件名 | `usages.csv` |
+
+本接口同步流式返回 CSV，不会创建导出任务，也不返回 JSON 或下载链接。只有当起止时间都未提供时，才默认导出当前自然月开始至当前时刻的记录；仅提供一侧边界时，另一侧不会自动补成本月边界。
+
+## 查询参数
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `perspective` | string | 否 | `both` | `billing`、`actor` 或 `both` |
+| `service_id` | UUID | 否 | — | 按服务筛选；支持重复参数 |
+| `application_id` | UUID | 否 | — | 按 Application 筛选；支持重复参数 |
+| `api_id` | UUID | 否 | — | 按 API 筛选；支持重复参数 |
+| `credential_id` | UUID | 否 | — | 按 API 凭证筛选；支持重复参数 |
+| `status_code` | integer | 否 | — | 支持重复或逗号分隔值 |
+| `created_at_from` | datetime | 否 | — | ISO 8601 起始时间 |
+| `created_at_to` | datetime | 否 | — | ISO 8601 结束时间 |
+
+导出范围始终限制在当前账户作为付款主体和/或实际调用者可见的记录，不支持跨账户导出。
+
+## 请求示例
+
+直接保存当前月 CSV：
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+按 Application、时间和状态码导出：
+
+```shell
+export APPLICATION_ID='你的 Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Python 流式保存并检查完整性：
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("服务器没有返回 CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"导出不完整：{last_line}")
+```
+
+## CSV 列
+
+CSV 表头顺序固定为：
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| 列 | 说明 |
+| --- | --- |
+| `Usage ID` | 调用记录 ID |
+| `API` | API 标题；无法匹配时可能为 API ID 或空值 |
+| `Status Code` | HTTP 状态码 |
+| `Deducted Amount` | 最终实际扣除额度 |
+| `Original Amount` | 应用折扣前的原始额度 |
+| `Trace ID` | 请求追踪标识 |
+| `Created At` | 记录创建时间，ISO 8601 |
+
+额度单位由对应 Application 的 `service.unit` 决定。
+
+## 判断导出是否完整
+
+单次最多输出 1,000,000 条数据。服务端已经开始返回 CSV 后，无法再把中途错误改成其他 HTTP 状态，因此客户端必须检查最后一行：
+
+- `# truncated:`：达到行数上限；按更小时间窗口分段导出。
+- `# error:`：流式读取中断；缩小范围后重新导出。
+
+对账程序看到任一 marker 都必须把文件视为不完整，不能静默入账。
+
+## 错误与重试
+
+| 情况 | 处理方式 |
+| --- | --- |
+| `400 usage_history_expired` | 使用响应中的 `available_from` 调整到最近 60 天范围内 |
+| `401 not_authenticated` | 检查 Account Token 是否存在、正确且未删除 |
+| 非 CSV 响应 | 不要保存为成功文件；先读取错误响应并修正请求 |
+| 下载中断或 marker | 缩小时间窗口，使用退避策略重新导出 |
+
+## 下一步
+
+- [查看调用记录](https://platform.acedata.cloud/documents/platform-usage-list)：在线筛选和定位单次请求。
+- [聚合调用量](https://platform.acedata.cloud/documents/platform-usage-aggregate)：查看按日期、API 或模型汇总的数据。
+- [查看服务申请详情](https://platform.acedata.cloud/documents/platform-application-detail)：核对额度单位与剩余额度。
