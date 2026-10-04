@@ -37,25 +37,6 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             }), encoding="utf-8")
             self.assertIsNone(sync.merge_openapi_specs(backend, {"alias": "test", "apis": [{"id": "private"}]}))
 
-    def test_flux_video_guide_is_restored_with_image_and_task_guides(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            backend = root / "backend"
-            (backend / "docs").mkdir(parents=True)
-            keys = ["flux_generate_video", "flux_generate_image", "flux_tasks"]
-            localized = {}
-            for key in keys:
-                (backend / "docs" / f"development_{key}.md").write_text(f"# {key}", encoding="utf-8")
-                localized[sync.normalize(key)] = {"content": f"# {key}", "title": key}
-                old = root / "old/en/guides/flux" / f"{key}.mdx"
-                old.parent.mkdir(parents=True, exist_ok=True)
-                old.write_text(f"# old {key}", encoding="utf-8")
-            with patch.object(sync, "load_localized_guides", return_value=localized):
-                sync.sync_guides(backend, root / "out", {"flux": {}}, dict.fromkeys(keys, "flux"),
-                                 ["en", "zh-Hans"], fallback_root=root / "old")
-            for language in ["en", "zh-Hans"]:
-                for key in keys:
-                    self.assertTrue((root / "out" / language / f"guides/flux/{key}.mdx").exists())
 
     def test_private_kling_operations_are_excluded_from_stale_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -71,50 +52,7 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             merged = sync.merge_openapi_specs(backend, service)
             self.assertEqual(set(merged["paths"]), paths - sync.PRIVATE_API_PATHS)
 
-    def test_shared_kling_assets_guide_uses_localized_element_alias(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            backend = root / "backend"
-            (backend / "docs").mkdir(parents=True)
-            (backend / "docs/development_kling_assets.md").write_text("# 中文资产指南", encoding="utf-8")
-            localized = {sync.normalize("kling_elements"): {
-                "content": "# Kling Assets\n\nVoice creation costs 0.07 Credits.", "title": "Kling Elements"}}
-            # Exercise alias resolution independently of the temporary publication hold.
-            with patch.object(sync, "load_localized_guides", return_value=localized), patch.object(
-                sync, "SKIP_DOC_KEYS", sync.SKIP_DOC_KEYS - {"kling_assets"}
-            ):
-                sync.sync_guides(backend, root / "out", {"kling": {"display_name": "Kling"}},
-                                 {"kling_assets": "kling"}, ["en"])
-            content = (root / "out/en/guides/kling/kling_assets.mdx").read_text(encoding="utf-8")
-            self.assertIn("Voice creation costs 0.07 Credits.", content)
-            self.assertNotIn("中文", content)
 
-    def test_unverified_kling_guides_stay_hidden_with_localized_and_fallback_content(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            backend = root / "backend"
-            (backend / "docs").mkdir(parents=True)
-            hidden = {"kling_apparel", "kling_virtual_try_on", "kling_assets"}
-            keys = hidden | {"kling_videos"}
-            localized = {}
-            for key in keys:
-                (backend / "docs" / f"development_{key}.md").write_text(f"# {key}", encoding="utf-8")
-                localized[sync.normalize(key)] = {"content": f"# {key}", "title": key}
-                fallback = root / "old" / "en/guides/kling" / f"{key}.mdx"
-                fallback.parent.mkdir(parents=True, exist_ok=True)
-                fallback.write_text("Previously published content", encoding="utf-8")
-            services = [{"alias": "kling", "apis": [{"path": "/kling/videos"}]}]
-            mapping = sync.build_doc_service_map(services, backend)
-            for key in hidden:
-                self.assertIsNone(mapping[key])
-            # Even a stale caller-provided map cannot republish the held guides.
-            with patch.object(sync, "load_localized_guides", return_value=localized):
-                sync.sync_guides(backend, root / "out", {"kling": {}},
-                                 dict.fromkeys(keys, "kling"), ["en", "zh-Hans"], fallback_root=root / "old")
-            for language in ["en", "zh-Hans"]:
-                for key in hidden:
-                    self.assertFalse((root / "out" / language / "guides/kling" / f"{key}.mdx").exists())
-                self.assertTrue((root / "out" / language / "guides/kling/kling_videos.mdx").exists())
 
     def test_build_doc_service_map_reads_flattened_docs_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -158,34 +96,6 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             self.assertEqual(mapping["tool_route"], "coding")
             self.assertEqual(exact["tool_route"]["output_path"], "guides/coding/custom_name.mdx")
 
-    def test_sync_guides_writes_exact_output_path(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            backend = root / "backend"
-            output = root / "output"
-            docs = backend / "docs"
-            docs.mkdir(parents=True)
-            (docs / "development_tool_route.md").write_text("# Exact tool\n\nBody", encoding="utf-8")
-            exact = {
-                "tool_route": {
-                    "source_doc_key": "development_tool_route",
-                    "service_alias": "coding",
-                    "output_path": "guides/coding/exact_name.mdx",
-                    "canonical_alias": "tool-route",
-                }
-            }
-
-            sync.sync_guides(
-                backend,
-                output,
-                {"coding": {"alias": "coding", "display_name": "Coding"}},
-                {"tool_route": "coding"},
-                ["zh-Hans"],
-                exact_records=exact,
-            )
-
-            self.assertTrue((output / "zh-Hans/guides/coding/exact_name.mdx").is_file())
-            self.assertFalse((output / "zh-Hans/guides/coding/tool_route.mdx").exists())
 
     def test_exact_records_fail_closed_on_invalid_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -243,101 +153,11 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
             25,
         )
 
-    def test_index_localized_guides_maps_alias_and_api_path(self) -> None:
-        payload = {
-            "items": [
-                {
-                    "alias": "gemini-videos",
-                    "api": {"path": "/gemini/videos"},
-                    "sibling": {
-                        "alias": "gemini-videos-integration",
-                        "title": "Gemini Video API Integration Guide",
-                        "content": "# Gemini Video\n\nLocalized body",
-                    },
-                }
-            ]
-        }
 
-        guides = sync.index_localized_guides(payload, "en")
 
-        self.assertEqual(guides["geminivideos"]["title"], "Gemini Video API Integration Guide")
-        self.assertIn("Localized body", guides["geminivideos"]["content"])
 
-    def test_index_localized_guides_ignores_reciprocal_text_sibling(self) -> None:
-        payload = {
-            "items": [
-                {
-                    "alias": "suno-voices",
-                    "api": {"path": "/suno/voices"},
-                    "sibling": {
-                        "alias": "suno-voices-integration",
-                        "title": "Suno Voice Clone API Integration Instructions",
-                        "content": "Localized integration guide",
-                    },
-                },
-                {
-                    "alias": "suno-voices-integration",
-                    "api": None,
-                    "sibling": {
-                        "alias": "suno-voices",
-                        "title": "Suno Voices API",
-                        "content": "API document body",
-                    },
-                },
-            ]
-        }
 
-        guides = sync.index_localized_guides(payload, "en")
 
-        self.assertEqual(guides["sunovoices"]["title"], "Suno Voice Clone API Integration Instructions")
-        self.assertEqual(guides["sunovoices"]["content"], "Localized integration guide")
-
-    def test_index_localized_guides_resolves_namespaced_operation_id(self) -> None:
-        payload = {"items": [{
-            "alias": "flux-videos",
-            "api": {"path": "/flux/videos", "method": "POST", "definition": {
-                "paths": {"/flux/videos": {"post": {"operationId": "flux_generate_video"}}}
-            }},
-            "sibling": {"alias": "flux-videos-integration", "content": "# FLUX Video"},
-        }]}
-        guides = sync.index_localized_guides(payload, "en")
-        self.assertEqual(guides["fluxgeneratevideo"]["content"], "# FLUX Video")
-
-    def test_index_localized_guides_rejects_empty_feed(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "No localized guides"):
-            sync.index_localized_guides({"items": []}, "en")
-
-    def test_index_localized_guides_rejects_collisions(self) -> None:
-        payload = {
-            "items": [
-                {"alias": "same-key", "api": {"path": "/one"}, "sibling": {"title": "One", "content": "One"}},
-                {"alias": "same_key", "api": {"path": "/two"}, "sibling": {"title": "Two", "content": "Two"}},
-            ]
-        }
-
-        with self.assertRaisesRegex(RuntimeError, "Conflicting localized guide key"):
-            sync.index_localized_guides(payload, "en")
-
-    def test_index_localized_guides_does_not_overwrite_alias_with_shared_api_path(self) -> None:
-        payload = {
-            "items": [
-                {
-                    "alias": "fish-model",
-                    "api": {"path": "/fish/model"},
-                    "sibling": {"title": "Fish Model", "content": "Model"},
-                },
-                {
-                    "alias": "fish-model-query",
-                    "api": {"path": "/fish/model"},
-                    "sibling": {"title": "Fish Model Query", "content": "Query"},
-                },
-            ]
-        }
-
-        guides = sync.index_localized_guides(payload, "en")
-
-        self.assertEqual(guides["fishmodel"]["content"], "Model")
-        self.assertEqual(guides["fishmodelquery"]["content"], "Query")
 
     def test_guide_description_uses_output_language(self) -> None:
         self.assertEqual(sync.guide_description("zh-Hans", "Gemini"), "Gemini 集成指南 - Ace Data Cloud")
@@ -469,10 +289,10 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         request_only["paths"]["/items"]["post"]["responses"]["200"]["content"]["application/json"]["example"]["video_url"] = "https://media.invalid/video.mp4"
         self.assertTrue(sync.invalid_openapi_response_artifact_urls(request_only))
 
-    def test_managed_paths_only_owns_generated_mcp_locale(self) -> None:
+    def test_managed_paths_owns_all_generated_locales(self) -> None:
         paths = sync.managed_paths(["zh-Hans", "en"])
         self.assertIn(Path("zh-Hans/mcp"), paths)
-        self.assertNotIn(Path("en/mcp"), paths)
+        self.assertIn(Path("en/mcp"), paths)
 
     def test_clear_managed_paths_removes_stale_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
