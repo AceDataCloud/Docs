@@ -1,0 +1,233 @@
+---
+title: "X402-Anleitung zur Bestellzahlung"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Neben der direkten Bezahlung pro API-Anfrage unterstützt Ace Data Cloud auch die Bezahlung von Bestellungen über die X402-Zahlungskonsole. Bestellzahlungen und API-Aufrufe verwenden dasselbe Kernprotokoll: Die erste Anfrage gibt 402 zurück, der Client stellt `PAYMENT-SIGNATURE` aus und wiederholt die Anfrage dann mit derselben Anfrage.
+
+Der Unterschied besteht darin, dass Bestellzahlungen Plattform-APIs sind und ein Kontotoken benötigen; die direkte Nutzung der AI-API von `x402.acedata.cloud` kann nur X402 verwenden und benötigt kein API-Token.
+
+## Bestellung vorbereiten
+
+Rufe die [Ace Data Cloud-Konsole](https://platform.acedata.cloud/console/orders) auf, wähle die zu bezahlende Bestellung aus und notiere die Bestell-ID.
+
+Wenn du noch keine Bestellung hast, kannst du auf der Paket-Seite eine noch zu bezahlende Bestellung erstellen. Der Bestellpreis richtet sich nach der Anzeige auf der Seite; das `amount` in der X402-402-Antwort ist die endgültige Grundlage für die Signatur.
+
+## Kontotoken erstellen
+
+Anfragen zur Bestellzahlung benötigen ein Kontotoken. Öffne die [Plattform-Token-Seite](https://platform.acedata.cloud/console/platform-tokens) und erstelle ein Token im Format `platform-v1-...`.
+
+Verwende für nachfolgende Anfragen:
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+Das Kontotoken unterscheidet sich von einem normalen API-Token. Normale API-Token werden zum Verbrauch von API-Guthaben verwendet; Kontotoken werden verwendet, um Plattformressourcen im Namen deines Kontos zu bedienen, beispielsweise Bestellzahlungen.
+
+## 402 auslösen
+
+Sende zunächst eine Anfrage ohne `PAYMENT-SIGNATURE`:
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+Der zurückgegebene Status ist 402, und die Antwort enthält `accepts`:
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+Die Bestellzahlung verwendet das offizielle x402 v2: `x402Version` ist `2`, `network` verwendet die CAIP-2-Kennung, und das Betragsfeld ist `amount`.
+
+Programmausgabe beim Erstellen einer Bestellung über 10 Credits und beim Auslösen von 402:
+
+> Die folgenden Transaktionsaufzeichnungen sind historische, praktisch getestete Beispiele unter der alten Richtlinie; Beträge und Transaktions-Hashes bleiben unverändert. Neue X402-Bestellungen erhalten keinen Zahlungsartenrabatt mehr; verwende für Signatur und Zahlung bitte das `amount` aus der aktuellen 402-Antwort.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+Erläuterung der Ergebnisse:
+
+- Nach erfolgreicher Erstellung der Bestellung lautet der Status `Pending`; zu diesem Zeitpunkt gibt es noch keine On-Chain-Zahlung.
+- Die erste `pay/`-Anfrage enthält keine `PAYMENT-SIGNATURE`, daher wird HTTP 402 zurückgegeben.
+- `accepts` enthält gleichzeitig Base `exact` und Solana `exact`; in dieser Anleitung wird anschließend Base ausgewählt.
+- Der Preis bei der Bestellungserstellung beträgt `1.26`; bei Zahlung während der alten X402-Zahlungsrabattrichtlinie betrugen der tatsächlich signierte und abgerechnete Betrag `1.2` USDC, entsprechend `1200000` Atomic USDC.
+
+Beachte, dass `resource` hier ein vom Server zurückgegebenes und an der Signatur beteiligtes Feld ist; der Client darf das darin enthaltene Protokoll, den Pfad oder die Bestell-ID nicht selbst umschreiben.
+
+## Signieren und erneut versuchen
+
+Für Bestellzahlungen können die Low-Level-Signaturfunktionen von `@acedatacloud/x402-client` oder `acedatacloud-x402` wiederverwendet werden. Nachfolgend ein TypeScript-Beispiel:
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+Programmausgabe nach Signierung und erneutem Versuch derselben Bestellung mit Base `exact`:
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+Ergebnis der On-Chain-Bestätigung:
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+Erklärung der Ergebnisse:
+
+- `status 200` bedeutet, dass die Plattform-Bestellzahlungsschnittstelle diese `PAYMENT-SIGNATURE` akzeptiert hat.
+- `has_x_payment_response True` bedeutet, dass der Response-Header einen Base64-kodierten `PAYMENT-RESPONSE`-Beleg enthält.
+- `settle_header.success=True` und `network=base` bedeuten, dass der Facilitator das Base-Settlement abgeschlossen hat.
+- Der endgültige Bestellstatus ist `Finished`, `pay_way` ist `X402`, und `pay_id` enthält den On-Chain-Transaktionshash.
+- Das `Transfer`-Ereignis auf BaseScan zeigt, dass die Zahlungsadresse `1200000` atomic USDC, also `1.2` USDC, an die Plattform-Empfangsadresse überwiesen hat.
+
+## Erfolgreiche Antwort und Beleg
+
+Nach erfolgreicher Bestellzahlung enthält der Response-Body die Bestellinformationen. Die Plattform übermittelt außerdem im Response-Header `PAYMENT-RESPONSE` eine Base64-kodierte Settlement-Response, deren dekodierte häufige Felder Folgendes umfassen:
+
+| Feld            | Beschreibung                           |
+| ------------- | ---------------------------- |
+| `success`     | Ob das Facilitator-Settlement erfolgreich ist. |
+| `transaction` | On-Chain-Settlement-Transaktionshash.                    |
+| `network`     | Zahlungsnetzwerk.                        |
+| `payer`       | Zahlungs-Wallet-Adresse.                      |
+| `amount`      | Tatsächlich abgerechneter Betrag in atomic units.      |
+
+Wenn du einen Abgleich benötigst, wird empfohlen, gleichzeitig die Bestell-ID, die Zahlungs-Wallet-Adresse, `transaction` und den endgültigen Bestellstatus zu speichern.
+
+## Hinweise
+
+- Für die Bestellzahlung ist ein Plattformkonto-Token erforderlich; sie kann nicht allein mit einer X402-Wallet-Signatur abgeschlossen werden.
+- `amount` verwendet USDC atomic units, `1200000` bedeutet `1.2` USDC.
+- Setze Empfangs- oder Asset-Adressen nicht selbst zusammen; maßgeblich ist `accepts` in der 402-Response.
+- Wenn dieselbe `PAYMENT-SIGNATURE` wiederholt übermittelt wird, führt der Facilitator anhand der Nonce einen Replay-Schutz durch.
+
+## Antwort bei fehlgeschlagener Zahlung
+
+Das erste HTTP 402 ohne `PAYMENT-SIGNATURE` ist eine normale Zahlungs-Challenge und bedeutet nicht, dass die Zahlung fehlgeschlagen ist. Bei einem Fehler der signierten Verifizierung oder des Settlements bleibt das standardmäßige String-`error` als kompatibler Fallback erhalten, und unter `extensions.acedatacloud.paymentError` wird eine stabile Fehlerstruktur zurückgegeben:
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+Der Client sollte vorrangig anhand von `code` lokalisieren; bei unbekanntem Code sollte auf einen allgemeinen Zahlungsfehler zurückgefallen werden. `charged` ist ein dreistufiges Feld: Nur wenn vor dem Settlement eindeutig abgelehnt wird, wird `false` zurückgegeben; ein fehlendes Feld bedeutet, dass der Belastungsstatus unbekannt ist, und darf nicht als „nicht belastet“ interpretiert werden. Nachdem die aktuelle Bestellung in `Failed` übergeht, kann sie nicht mit derselben Bestellung erneut versucht werden; erstelle nach Behebung des Wallet-Problems eine neue Bestellung.
+
+Protokolliere oder übermittle nicht die vollständige `PAYMENT-SIGNATURE`, Wallet-Signaturen, autorisierte Payloads, ursprüngliche Facilitator-Diagnosen oder RPC-Responses. Für die Untersuchung durch den Kundendienst werden nur die Bestell-ID und der öffentliche Fehler-`code` benötigt.

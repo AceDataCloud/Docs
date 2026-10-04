@@ -1,0 +1,190 @@
+---
+title: "X402-verkot ja maksutavat"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 käyttää tällä hetkellä USDC-selvitystä ja tukee kahta ketjutyyppiä: EVM:ää ja Solanaa. Eri verkkojen allekirjoitustavat, omaisuusosoitteet, gas-käyttäytyminen ja soveltuvat käyttötapaukset ovat erilaisia, joten verkko on valittava ennen käyttöönottoa.
+
+## Verkkojen tunnisteissa käytetään CAIP-2:ta
+
+x402 v2:n `accepts[].network` on CAIP-2-tunniste, ei lyhenne kuten `base` tai `skale`. Asiakkaan on verrattava verkkoja CAIP-2-merkkijonon perusteella:
+
+| Verkko             | CAIP-2-tunniste                                 |
+| -------------- | ----------------------------------------- |
+| Base           | `eip155:8453`                             |
+| SKALE Base     | `eip155:1187947933`                       |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` |
+
+## Tukimatriisi
+
+| Verkko     | scheme  | Omaisuus                  | Allekirjoitustapa                                 | Soveltuva käyttötapa                        |
+| ------ | ------- | ------------------- | ------------------------------------ | --------------------------- |
+| Base   | `exact` | Base USDC           | EIP-3009 `TransferWithAuthorization` | Oletussuositus, lompakko- ja likviditeettituki ovat kypsiä.            |
+| Base   | `upto`  | Base USDC + Permit2 | Permit2 `PermitWitnessTransferFrom`  | Jälkikäteismittaukselliset API:t, kuten chat ja mallit.             |
+| SKALE  | `exact` | SKALE bridged USDC  | EIP-3009 `TransferWithAuthorization` | Alhaiset gas-kustannukset, soveltuu EVM-maksujen vahvistamiseen ja edullisiin kutsuihin. |
+| Solana | `exact` | Solana USDC         | SPL `TransferChecked`                | Solana-lompakot, Agentit tai ketjusovellusten käyttötapaukset.    |
+
+`upto` on tällä hetkellä saatavilla vain Basessa. Todelliset käytettävissä olevat kohteet määräytyvät API:n palauttaman `accepts`-kentän mukaan. Voit myös tarkistaa Facilitatorin:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Facilitatorin `/supported`-palautus:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ]
+}
+```
+
+Tulosten selitys:
+
+- Basen, SKALEn ja Solanan `exact` on kiinteän summan maksupolku.
+- Vain Base tarjoaa `upto`-jälkikäteismittauspolun, joka perustuu Permit2-approveen.
+- `upto`-merkinnän `extra.facilitatorAddress` on osoite, joka asiakkaan on kirjoitettava witnessiin allekirjoituksen yhteydessä, ja sen on vastattava palvelimen palauttamaa arvoa.
+
+## Base
+
+Base käyttää virallista USDC-sopimusta:
+
+```text
+0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+```
+
+`exact`-mallissa asiakas allekirjoittaa EIP-712 `TransferWithAuthorization` -valtuutuksen. Allekirjoitussisältö sisältää:
+
+- `from`: maksavan lompakon osoite
+- `to`: Ace Data Cloudin vastaanottava osoite
+- `value`: tämän maksun summa
+- `validAfter` / `validBefore`: allekirjoituksen voimassaoloaikaikkuna
+- `nonce`: 32 tavun satunnainen nonce
+
+Kun Facilitator on vahvistanut allekirjoituksen, se kutsuu ketjussa USDC:n `transferWithAuthorization`-toimintoa siirron suorittamiseksi.
+
+Base on suositelluin verkko tuotantokäyttöönottoon, ja se soveltuu erityisen hyvin `upto`-jälkikäteismittaukseen, koska Permit2-, USDC- ja lompakkoekosysteemit ovat kaikki kypsempiä.
+
+Esimerkki Base `exact` -vahvistustuloksesta:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+```
+
+Tulosten selitys:
+
+- API:n maksettu uudelleenyritys palauttaa mallisisällön `ADC_BASE_E2E_OK`.
+- Ketjutapahtuma on tarkistettavissa BaseScanissa, ja lohkon numero on `46726299`.
+- `95215` atomic USDC vastaa `0.095215` USDC:tä ja on tämän API-kutsun todellinen selvityssumma.
+
+Tilauksen maksun Base `exact` -ohjelman suoritustulos:
+
+```text
+order 78481793-304e-47f7-bc0c-8231aec9cc1e
+state Finished
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+Tulosten selitys:
+
+- Alustan tilauksen lopullinen tila on `Finished`.
+- Tilauksen `pay_id` kirjoitetaan samaan Base-tapahtumahashiin.
+- `1200000` atomic USDC vastaa `1.2` USDC:tä ja on tämän 10 Credits -tilauksen historiallinen todellinen maksusumma vanhan käytännön mukaisesti; uudet tilaukset eivät enää saa ylimääräistä X402-maksutapa-alennusta, ja tarkka allekirjoitettava summa määräytyy tämänkertaisen 402-vastauksen mukaan.
+
+## SKALE
+
+SKALE käyttää bridged USDC:tä, ja allekirjoitustapa on samanlainen kuin Basessa, eli myös EIP-3009. Se soveltuu alhaisten gas-kustannusten EVM-maksutilanteisiin; todelliset kutsut määräytyvät edelleen API:n palauttaman `accepts`-kentän mukaan.
+
+SKALEn tyypillinen 402 `accepts` sisältää:
+
+```json
+{
+  "network": "eip155:1187947933",
+  "scheme": "exact",
+  "extra": {
+    "name": "Bridged USDC (SKALE Bridge)",
+    "version": "2",
+    "chainId": 1187947933,
+    "verifyingContract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+  }
+}
+```
+
+SKALE tarjoaa tällä hetkellä vain `exact`-vaihtoehdon. Jos tarvitset jälkikäteismittausta, käytä Base `upto` -vaihtoehtoa.
+
+Esimerkki SKALE `exact` -vahvistustuloksesta:
+
+```text
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+```
+
+Tulosten selitys:
+- API:n maksullinen uudelleenyritys palautti mallisisällön `ADC_SKALE_E2E_OK`。
+- Tapahtuma on löydettävissä SKALE explorerista, ja lohkon numero on `1969317`。
+- Tämän `exact`-maksun selvityssumma on `0.095215` USDC。
+
+## Solana
+
+Solana käyttää SPL USDC:n `TransferChecked`-toimintoa。Asiakas muodostaa siirtotapahtuman, allekirjoittaa ja lähettää sen, minkä jälkeen se sijoittaa tapahtuman allekirjoituksen tai sarjallistetun tapahtuman `PAYMENT-SIGNATURE` envelopeen。
+
+Solanan ominaisuudet：
+
+- käytetään Solana wallet adapteria tai base58-salaista avainta；
+- omaisuuserä on Solana USDC mint；
+- tällä hetkellä tuetaan vain `exact`；
+- Facilitator validoi transfer instructionin mintin, destinationin, authorityn ja amountin。
+
+Jos käytetään lompakon fee payer -tilaa, lompakko lähettää tapahtuman suoraan, ja Facilitator vastaa tapahtuman vahvistamisesta ja palauttaa settlement-tuloksen。
+
+Esimerkki Solanan `exact`-validointituloksesta：
+
+```text
+payer AY2RmGm2zPxB1uKvvF4dKyYdr2VySyL3wcD1MKJZoLRd
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run
+```
+
+Tuloksen selitys：
+
+- maksullinen uudelleenyritys on jo palauttanut HTTP 200:n, ja mallin tuloste on `ADC_SOLANA_E2E_OK`。
+- Julkisen RPC:n avulla tehtävässä ketjun signature-kyselyssä voi esiintyä nopeusrajoituksia。
+- Koska julkinen RPC-kysely voi olla nopeusrajoitettu, Solana exploreria ei kirjoiteta tähän。Jos tarvitaan tarkkaa täsmäytystä, vahvista tapahtuman allekirjoitus käyttämällä omaa Solana RPC:tä tai alustan settlement-tietoja。
+
+## Kuinka valita
+
+| Mitä haluat tehdä        | Suositeltu verkko                         |
+| ------------ | ---------------------------- |
+| Nopeasti läpi minimaalinen ketju     | SKALE `exact` tai Base `exact` |
+| Tavallisille Web3-käyttäjille | Base                         |
+| Jälkikäteen tapahtuvaan mittaukseen, kuten chat-täydennyksiin   | Base `upto`                  |
+| Solana-ekosysteemin sovellukset  | Solana `exact`               |
+| Matalakustannuksinen EVM-maksuvalidointi | SKALE `exact`                |
+
+Riippumatta siitä, minkä ketjun valitset, älä kovakoodaa hintaa asiakkaaseen。Hinta määräytyy palvelimen palauttaman `accepts[].maxAmountRequired`-arvon perusteella。

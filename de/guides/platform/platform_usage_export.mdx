@@ -1,0 +1,146 @@
+---
+title: "API-Aufrufprotokolle der AceDataCloud-Plattform exportieren"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Laden Sie die API-Aufrufdetails des aktuellen Kontos direkt als CSV herunter, geeignet für Finanzabgleiche, Offline-Analysen oder die Speicherung großer Mengen von Datensätzen. Wenn Sie nur wenige Details auf der Seite anzeigen müssen, verwenden Sie zuerst die [Liste der Aufrufprotokolle](https://platform.acedata.cloud/documents/platform-usage-list).
+
+## Vorbereitung
+
+1. Melden Sie sich bei der [AceDataCloud-Plattform](https://platform.acedata.cloud) an.
+2. Erstellen Sie in der [Account-Token-Konsole](https://platform.acedata.cloud/console/platform-tokens) ein Kontotoken und speichern Sie es sofort im Passwortmanager oder Secret Manager.
+3. Rufen Sie bei Bedarf die Filter-IDs aus der [Liste der Serviceanträge](https://platform.acedata.cloud/documents/platform-application-list), der [Liste der API-Anmeldedaten](https://platform.acedata.cloud/documents/platform-credential-list) oder der [API-Liste](https://platform.acedata.cloud/documents/platform-api-list) ab.
+
+Eine vollständige Token-Beschreibung finden Sie unter [Kontotoken verwalten](https://platform.acedata.cloud/documents/platform-token). Kontotoken und Credentials für den Aufruf von Business-APIs können nicht gemischt verwendet werden.
+
+```shell
+export PLATFORM_TOKEN='Ihr Kontotoken'
+```
+
+## Schnittstellenübersicht
+
+| Element     | Inhalt                                                     |
+| ----------- | ---------------------------------------------------------- |
+| Methode     | `GET`                                                      |
+| URL         | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| Authentifizierung | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope | `usage:read` (`platform:read` / `platform` schließen dies erweitert ein) |
+| Antwort     | `200 text/csv; charset=utf-8`                              |
+| Dateiname   | `usages.csv`                                               |
+
+Diese Schnittstelle gibt CSV synchron als Stream zurück, erstellt keine Exportaufgabe und gibt weder JSON noch einen Download-Link zurück. Nur wenn sowohl Start- als auch Endzeit nicht angegeben werden, werden standardmäßig Datensätze vom Beginn des aktuellen Kalendermonats bis zum aktuellen Zeitpunkt exportiert; wenn nur eine Seite der Grenze angegeben wird, wird die andere Seite nicht automatisch mit der Monatsgrenze ergänzt.
+
+## Abfrageparameter
+
+| Parameter         | Typ      | Erforderlich | Standard | Beschreibung                         |
+| ----------------- | -------- | --- | ------ | -------------------------- |
+| `perspective`     | string   | Nein | `both` | `billing`, `actor` oder `both` |
+| `service_id`      | UUID     | Nein | —      | Nach Service filtern; wiederholte Parameter werden unterstützt |
+| `application_id`  | UUID     | Nein | —      | Nach Application filtern; wiederholte Parameter werden unterstützt |
+| `api_id`          | UUID     | Nein | —      | Nach API filtern; wiederholte Parameter werden unterstützt |
+| `credential_id`   | UUID     | Nein | —      | Nach API-Anmeldedaten filtern; wiederholte Parameter werden unterstützt |
+| `status_code`     | integer  | Nein | —      | Unterstützt wiederholte oder kommagetrennte Werte |
+| `created_at_from` | datetime | Nein | —      | ISO-8601-Startzeit              |
+| `created_at_to`   | datetime | Nein | —      | ISO-8601-Endzeit              |
+
+Der Exportumfang ist stets auf Datensätze beschränkt, die für das aktuelle Konto als zahlende Partei und/oder tatsächlicher Aufrufer sichtbar sind; kontenübergreifende Exporte werden nicht unterstützt.
+
+## Anfragebeispiele
+
+CSV des aktuellen Monats direkt speichern:
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Nach Application, Zeit und Statuscode exportieren:
+
+```shell
+export APPLICATION_ID='Ihre Application-ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Python: Als Stream speichern und Vollständigkeit prüfen:
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("Der Server hat kein CSV zurückgegeben")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"Export unvollständig: {last_line}")
+```
+
+## CSV-Spalten
+
+Die Reihenfolge der CSV-Kopfzeile ist festgelegt:
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| Spalte            | Beschreibung                         |
+| ----------------- | -------------------------- |
+| `Usage ID`        | ID des Aufrufprotokolls                    |
+| `API`             | API-Titel; bei fehlender Zuordnung möglicherweise API-ID oder leerer Wert |
+| `Status Code`     | HTTP-Statuscode                   |
+| `Deducted Amount` | Endgültig tatsächlich abgezogenes Kontingent                   |
+| `Original Amount` | Ursprüngliches Kontingent vor Anwendung des Rabatts                 |
+| `Trace ID`        | Kennung zur Anfrageverfolgung                     |
+| `Created At`      | Erstellungszeit des Datensatzes, ISO 8601            |
+
+Die Einheit des Kontingents wird durch `service.unit` der entsprechenden Application bestimmt.
+
+## Prüfen, ob der Export vollständig ist
+
+Ein einzelner Export gibt maximal 1.000.000 Datensätze aus. Nachdem der Server bereits begonnen hat, CSV zurückzugeben, können Fehler währenddessen nicht mehr in einen anderen HTTP-Status geändert werden, daher muss der Client die letzte Zeile prüfen:
+
+- `# truncated:`: Die Zeilenobergrenze wurde erreicht; exportieren Sie segmentiert nach kleineren Zeitfenstern.
+- `# error:`: Das Streaming-Lesen wurde unterbrochen; verkleinern Sie den Bereich und exportieren Sie erneut.
+
+Wenn ein Abstimmungsprogramm einen beliebigen Marker erkennt, muss es die Datei als unvollständig behandeln und darf sie nicht stillschweigend verbuchen.
+
+## Fehler und Wiederholungen
+
+| Situation                          | Vorgehensweise                                  |
+| --------------------------- | ------------------------------------- |
+| `400 usage_history_expired` | Passen Sie den Wert anhand von `available_from` auf den Bereich der letzten 60 Tage an |
+| `401 not_authenticated`     | Prüfen Sie, ob das Account-Token vorhanden, korrekt und nicht gelöscht ist          |
+| Nicht-CSV-Antwort                    | Nicht als erfolgreiche Datei speichern; lesen Sie zuerst die Fehlerantwort und korrigieren Sie die Anfrage                |
+| Download-Unterbrechung oder Marker                | Verkleinern Sie das Zeitfenster und exportieren Sie mit einer Backoff-Strategie erneut                     |
+
+## Nächste Schritte
+
+- [Aufrufprotokolle anzeigen](https://platform.acedata.cloud/documents/platform-usage-list): Einzelne Anfragen online filtern und lokalisieren.
+- [Aufrufvolumen aggregieren](https://platform.acedata.cloud/documents/platform-usage-aggregate): Nach Datum, API oder Modell zusammengefasste Daten anzeigen.
+- [Details zum Serviceantrag anzeigen](https://platform.acedata.cloud/documents/platform-application-detail): Kontingenteinheit und verbleibendes Kontingent prüfen.

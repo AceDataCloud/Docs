@@ -1,0 +1,127 @@
+---
+title: "Varmennuskoodin tehtävän kysely API (palvelimen asynkroninen tehtävä) integrointiohje"
+description: "hCaptcha verification code recognition service API guide - Ace Data Cloud"
+---
+
+Tässä asiakirjassa esitellään varmennuskoodin asynkronisen tehtävän kyselyrajapinta `POST /captcha/tasks`. Kun kutsut mitä tahansa varmennuskoodirajapintaa (token-sarja tai tunnistus-sarja) ja lähetät `async: true`, rajapinta palauttaa välittömästi `task_id`:n, ja palvelin ottaa tehtävän hoitaakseen ja jatkaa käsittelyä; voit käyttää tätä `task_id`:ta lopullisen tuloksen kyselyyn, mutta kysely ei ole edellytys tehtävän jatkamiselle. Tämä soveltuu monen ratkaisijan kiertoon (multi-solver rotation) ja muihin vastaaviin tilanteisiin: lähetä tehtävä ja saat heti `task_id`:n, voit ensin ohjata muita ratkaisijoita ja palata myöhemmin lukemaan tuloksia.
+
+> 📘 Täydellinen interaktiivinen asiakirja (sisältää online-testauksen): [Varmennuskoodin tehtävän kysely API →](https://platform.acedata.cloud/documents/captcha-tasks)
+
+## Hakuprosessi
+
+Käyttääksesi tätä rajapintaa, mene ensin [Ace Data Cloud -hallintapaneeliin](https://platform.acedata.cloud/console/applications) saadaksesi API-tunnuksesi, jota voit käyttää varalla. **Yksi API-tunnus riittää kaikkien palveluiden kutsumiseen, eikä jokaiselle palvelulle tarvitse hakea erikseen.**
+
+## Peruskäyttö
+
+### Ensimmäinen vaihe: Luo tehtävä asynkronisesti
+
+Lähetä `async: true` mihin tahansa varmennuskoodirajapinnan pyyntöön, ja rajapinta palauttaa välittömästi `task_id`:n (HTTP 201) ilman, että se estää odottamasta:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/captcha/token/recaptcha2' \
+-H 'accept: application/json' \
+-H 'authorization: Bearer {token}' \
+-H 'content-type: application/json' \
+-d '{
+  "website_key": "6Le-wvkSAAAAAPBMRTvw0Q4Muexq9bi0DJwx_mJ-",
+  "website_url": "https://www.google.com/recaptcha/api2/demo",
+  "async": true
+}'
+```
+
+```json
+{
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "trace_id": "2efa9340-b21b-4e26-9e14-4aac95f343ab"
+}
+```
+
+### Toinen vaihe (valinnainen): Kysy tulosta task_id:lla
+
+Jos haluat aktiivisesti tarkistaa edistymistä, voit käyttää edellisessä vaiheessa palautettua `task_id`:ta kysyäksesi `POST /captcha/tasks` (suositellaan joka 3-5 sekunti). Tämä rajapinta ei laukaise tai edistä tehtävän käsittelyä; lue valmis tulos käyttäen olemassa olevaa kertaluonteista selvityskäyttäytymistä:
+
+```shell
+curl -X POST 'https://api.acedata.cloud/captcha/tasks' \
+-H 'accept: application/json' \
+-H 'authorization: Bearer {token}' \
+-H 'content-type: application/json' \
+-d '{
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002"
+}'
+```
+
+Käsittelyssä palautuu `status: processing`:
+
+```json
+{
+  "success": true,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "processing"
+}
+```
+
+Käsittelyn valmistuttua palautuu `status: ready` ja vastaavat tuloskentät — kenttästruktuuri on täysin sama kuin synkronisessa tilassa:
+
+- **token-sarja** (hcaptcha, recaptcha2, recaptcha3) palauttaa `token`:
+
+```json
+{
+  "success": true,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "ready",
+  "started_at": 1784885653.0,
+  "finished_at": 1784885665.4,
+  "elapsed": 12.4,
+  "token": "03AFcWeA5kjJyDQ9S1a9UYimR6nuxnpEnAs5x2Pixao0dXZhMB......"
+}
+```
+
+- **tunnistusluokka** (recognition/recaptcha2, recognition/hcaptcha) palauttaa `solution`; **recognition/image2text** palauttaa `text`.
+
+`/captcha/tasks` on yhteensopiva kaikkien varmennuskoodirajapintojen (token- ja tunnistus-sarja) kanssa, voit kysyä samaa `task_id`:ta.
+
+Palvelin jatkaa käsittelyä luomisesta alkaen, enintään 120 sekuntia. Jos viimeisessä kyselyssä määräajan aikana ei ole saatu tulosta, se palauttaa pysyvän HTTP 504. Tämä tila on lopullinen, ja asiakasohjelman tulisi lopettaa kysely; saman `task_id`:n toistuva kysely palauttaa johdonmukaisesti saman epäonnistumistuloksen:
+
+```json
+{
+  "detail": "The captcha task timed out.",
+  "code": "timeout",
+  "success": false,
+  "task_id": "61138bb6-19aa-11ec-a9c8-0242ac110002",
+  "status": "failed",
+  "started_at": 1784885653.0,
+  "finished_at": 1784885765.4,
+  "elapsed": 112.4
+}
+```
+
+`status: ready` ja HTTP 504:n lopulliset vastaukset sisältävät myös aikakentät.
+
+- `started_at`, tehtävän käsittelyn aloitusaika, Unix-aikaleima (sekunnit, liukuluku).
+- `finished_at`, tehtävän tuloksen tuottamisaika, Unix-aikaleima (sekunnit, liukuluku). Jos se on edelleen käsittelyssä, tätä kenttää ei palauteta.
+- `elapsed`, tehtävän käsittelyyn kulunut aika, yksikkönä sekunnit (liukuluku, 3 desimaalin tarkkuudella). Jos se on edelleen käsittelyssä, tätä kenttää ei palauteta.
+
+## Laskutustiedot
+
+Asynkronisessa tilassa tehtävän luominen ja "käsittelyssä" tilan lukeminen eivät aiheuta kustannuksia; **asiakasohjelma laskutetaan kerran ensimmäisestä onnistuneesta tuloksesta** (sama käytös ja hinta kuin synkronisessa tilassa). Palvelin edistää tehtävää itsenäisesti, mutta se ei veloita etukäteen, vaikka taustalla olisi jo valmis. 120 sekunnin määräajan sisällä epäonnistuneet tehtävät päättyvät HTTP 504:ään eikä niistä veloiteta.
+
+## Virheiden käsittely
+
+Kun kutsut tätä rajapintaa, jos kohtaat virheitä, palautetaan vastaavat virhekoodit ja -tiedot. Esimerkiksi:
+
+- `400 invalid_request`: Pyyntö puuttuu `task_id`-parametri.
+- `401 invalid_token`: Ei valtuutettu, valtuutus Token on virheellinen tai puuttuu.
+- `404 not_found`: `task_id` ei ole olemassa tai se ei kuulu nykyiselle tilille.
+- `504 timeout`: Tehtävä on päättynyt eikä tuottanut tulosta; lopeta tämän `task_id`:n kysely. Tämä epäonnistuminen ei aiheuta veloitusta.
+
+### Virhevastauksen esimerkki
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "not_found",
+    "message": "task not found"
+  }
+}
+```

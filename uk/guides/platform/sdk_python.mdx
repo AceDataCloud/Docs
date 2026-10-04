@@ -1,0 +1,308 @@
+---
+title: "Python SDK підключення"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`acedatacloud`](https://pypi.org/project/acedatacloud/) — це офіційний Python SDK Ace Data Cloud, який обгортає всі сервіси на `api.acedata.cloud` у типізовані методи, такі як `client.openai.chat.completions.create(...)`, `client.images.generate(...)`, `client.search.google(...)` тощо, одночасно надаючи дві версії клієнта: синхронну та асинхронну.
+
+В основі лежить `httpx`, який підтримує потоки SSE, автоматичне повторне виконання, типізовані виключення та валідацію типів pydantic.
+
+Адреси вихідного коду та пакету:
+
+- Репозиторій SDK: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- PyPI: [https://pypi.org/project/acedatacloud/](https://pypi.org/project/acedatacloud/)
+
+## Встановлення
+
+```bash
+pip install acedatacloud
+# або uv add / poetry add
+```
+
+Якщо потрібно платити на ланцюгу X402 (без шляху API Token), встановіть ще один:
+
+```bash
+pip install acedatacloud-x402
+```
+
+Перевірка версії на чистому venv:
+
+```text
+$ python -c "import importlib.metadata as m; print(m.version('acedatacloud'))"
+2026.4.26.1
+
+$ python -c "from acedatacloud import AceDataCloud, AsyncAceDataCloud; print('ok')"
+ok
+```
+
+Результати показують:
+
+- Версія пакету — `2026.4.26.1` (CalVer, виправлення 26 квітня 2026 року).
+- `AceDataCloud` — це синхронний клієнт, `AsyncAceDataCloud` — асинхронний клієнт asyncio.
+- Цей SDK не залежить від `pydantic`, тіло відповіді завжди повертає `dict`. Це відрізняється від `openai-python`, на що потрібно звернути увагу під час міграції.
+
+## Підготовка API Token
+
+Згідно з [Оглядом SDK - Отримання API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token), отримайте токен, а потім у shell `export`:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+При створенні клієнта не передавайте `api_token`, SDK автоматично зчитуватиме змінну середовища `ACEDATACLOUD_API_TOKEN`. Якщо у вашому середовищі вже зберігається `ACEDATACLOUD_API_KEY` (угода проекту), будь ласка, передайте явно: `AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])`.
+
+## Приклад 1: chat.completions (синхронний)
+
+```python
+import os, time, json
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_SDK_OK"}],
+    max_tokens=20,
+    temperature=0,
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("id", res["id"])
+print("model", res["model"])
+print("content", res["choices"][0]["message"]["content"])
+print("usage", json.dumps({k: v for k, v in res["usage"].items()
+                            if k in ("prompt_tokens","completion_tokens","total_tokens")}))
+```
+
+Результат виконання програми:
+
+```text
+elapsed_ms 2963
+id chatcmpl-DldFdnIlhSUXINpupgsUmZL78MnBu
+model gpt-4o-mini
+content ADC_PY_SDK_OK
+usage {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+```
+
+Результати показують:
+
+- `id` — це ID відповіді, який можна знайти в [Історії використання](https://platform.acedata.cloud/console/usages).
+- `content ADC_PY_SDK_OK` — це фіксований ідентифікатор, який модель повертає насправді.
+- `res["usage"]` повертає `dict`, а не модель pydantic; один виклик приблизно споживає 24 токена.
+
+## Приклад 2: chat.completions (потокове SSE)
+
+Коли `stream=True`, `create` повертає звичайний генератор, який кожного разу видає один розібраний chunk dict.
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+first_chunk_ms = None
+chunks = 0
+collected = []
+
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Count from 1 to 5, separated by single spaces, no extra text."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    if first_chunk_ms is None:
+        first_chunk_ms = int((time.time() - t0) * 1000)
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+
+print("total_elapsed_ms", int((time.time() - t0) * 1000))
+print("first_chunk_ms", first_chunk_ms)
+print("chunks", chunks)
+print("collected", "".join(collected).strip())
+```
+
+Результат виконання програми:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+Результати показують:
+
+- Затримка першого кадру 2104 мс, наступні 11 кадрів зайняли лише 7 мс, щоб зібратися — як тільки сервіс починає поток, локально це легко споживати.
+- chunk — це звичайний dict, безпечно отримуйте значення за форматом OpenAI SSE, використовуючи `.get()`.
+- У реальному виробництві рекомендується одночасно видавати та передавати SSE на фронт, загальна затримка першого кадру близько 2 секунд.
+
+## Приклад 3: AsyncAceDataCloud (асинхронний)
+
+API `AsyncAceDataCloud` повністю симетричний до синхронної версії, лише всі методи IO повертають корутину. Підходить для FastAPI / aiohttp / asyncio сервісів.
+
+```python
+import os, asyncio, time
+from acedatacloud import AsyncAceDataCloud
+
+async def main():
+    client = AsyncAceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+    t0 = time.time()
+    res = await client.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_ASYNC_OK"}],
+        max_tokens=20,
+        temperature=0,
+    )
+    print("elapsed_ms", int((time.time() - t0) * 1000))
+    print("id", res["id"])
+    print("content", res["choices"][0]["message"]["content"])
+    await client.close()
+
+asyncio.run(main())
+```
+
+Результат виконання програми:
+
+```text
+elapsed_ms 2392
+id chatcmpl-DldFwRlrgtYDBpIr0T55aDQI4GlbF
+content ADC_PY_ASYNC_OK
+```
+
+Результати показують:
+
+- Асинхронна версія та синхронна версія проходять через один і той же HTTP шлях, лише реалізація пулу з'єднань різна (`httpx.AsyncClient`).
+- При виході явно `await client.close()`, щоб закрити пул з'єднань; у службах з тривалим життєвим циклом потрібно закривати лише один раз перед виходом процесу.
+- Одноразова затримка приблизно така ж, як у синхронній версії, у сценаріях з паралельними запитами асинхронність виявляє свої переваги — один цикл подій може одночасно обробляти десятки або сотні запитів у процесі.
+
+## Приклад 4: images.generate (NanoBanana)
+
+API NanoBanana — це сервіс для синхронного генерування зображень, **не передавайте `wait`** — виклик SDK буде чекати, поки сервіс не поверне 200.
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.images.generate(
+    provider="nano-banana",
+    model="nano-banana",
+    prompt="Мінімалістичний логотип жовтого банана на білому фоні, плоский дизайн",
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("task_id", res.get("task_id"))
+print("trace_id", res.get("trace_id"))
+data = res.get("data") or []
+if data:
+    print("image_url", data[0].get("image_url"))
+```
+
+Результат програми:
+
+```text
+elapsed_ms 18977
+task_id 9e71f40f-1579-480d-adf4-07a95450904f
+trace_id 5aa21d7f-af84-48e6-9ce0-9c6c36c8e5d9
+image_url https://platform.cdn.acedata.cloud/nanobanana/884e92df-a497-44e0-9681-35c7a00e0a6c.png
+```
+
+Опис результату:
+
+- `image_url` є стабільною адресою на CDN, яку можна безпосередньо завантажити або вбудувати в веб-сторінку.
+- За 18.9 секунд майже весь час витрачено на інференцію моделі; витрати локального SDK становлять лише кілька мілісекунд.
+- Для таких справжніх асинхронних завдань, як Midjourney, Sora, Veo, Suno, потрібно використовувати `wait=True` або вручну `TaskHandle.wait()`, детальніше дивіться [SDK завдання опитування та потокова відповідь](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+## Приклад 5: Обробка помилок типізації
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud import AuthenticationError, RateLimitError, ValidationError
+
+bad = AceDataCloud(api_token="definitely-not-a-real-token")
+
+try:
+    bad.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5,
+    )
+except AuthenticationError as err:
+    print("err_class", type(err).__name__)
+    print("status", err.status_code)
+    print("code", err.code)
+except RateLimitError as err:
+    # 429, SDK вже автоматично виконує експоненціальне повторення 2 рази, якщо все ще не вдається
+    print("rate limited:", err.code)
+except ValidationError as err:
+    # 400, наприклад, відсутнє поле, ім'я моделі не існує
+    print("bad request:", err.code, err.message)
+```
+
+Ієрархія винятків така ж, як у TypeScript: `AuthenticationError` (401), `TokenMismatchError` (токен не відповідає сервісу), `InsufficientBalanceError` (недостатньо коштів), `ResourceDisabledError` (послуга вимкнена), `ValidationError` (400), `RateLimitError` (429), `ModerationError` (403 перевірка контенту), `APIError` (загальний), `TimeoutError` (тайм-аут), `TransportError` (мережевий рівень).
+
+## Налаштування параметрів
+
+```python
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(
+    # Обов'язковий один з: явний токен або змінна середовища ACEDATACLOUD_API_TOKEN
+    api_token="...",
+
+    # Коренева адреса API платформи, за замовчуванням https://api.acedata.cloud
+    base_url="https://api.acedata.cloud",
+
+    # Деякі сервіси (наприклад, метадані панелі) використовують домен платформи
+    platform_base_url="https://platform.acedata.cloud",
+
+    # Тайм-аут одного запиту, секунди; за замовчуванням 300.0
+    timeout=300.0,
+
+    # Кількість автоматичних повторів, за замовчуванням 2; умови повтору: 408 / 409 / 429 / 5xx / мережеві помилки
+    max_retries=2,
+
+    # Користувацькі заголовки запиту
+    headers={"x-app": "my-service/1.0"},
+)
+```
+
+> Тайм-аут Python SDK та `poll_interval` / `max_wait` TaskHandle вимірюються в **секундах**, а TypeScript SDK використовує **мілісекунди**, на це слід звернути особливу увагу під час міжмовної міграції. Детальніше дивіться [SDK завдання опитування та потокова відповідь](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+> SDK за замовчуванням читає змінну середовища `ACEDATACLOUD_API_TOKEN`; у цій статті, щоб узгодити з [Claude Code VS Code навчальним посібником](https://platform.acedata.cloud/documents/claude-code-vscode-integrations) та іншими посібниками, в прикладі використовується `ACEDATACLOUD_API_KEY`, потрібно явно вказати `api_token=os.environ["ACEDATACLOUD_API_KEY"]`.
+
+## Розширене: X402 платіжний хук
+
+```python
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import create_x402_payment_handler
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=my_evm_signer,
+        prefer_scheme="exact",   # або "upto"
+    )
+)
+```
+
+Повний процес і реальні результати на ланцюгу дивіться [SDK + X402 платіжний хук](https://platform.acedata.cloud/documents/sdk-x402-payment).
+
+## Як перевірити залишок
+
+Через [Консоль Ace Data Cloud - Список додатків](https://platform.acedata.cloud/console/applications) можна переглянути залишок на рахунку.
+
+Через [Консоль Ace Data Cloud - Історія використання](https://platform.acedata.cloud/console/usages) можна переглянути всю історію використання та деталі витрат.
+
+## Дізнатися більше
+
+- 🐍 [`acedatacloud` на PyPI](https://pypi.org/project/acedatacloud/)
+- 🗂 [Джерело SDK](https://github.com/AceDataCloud/SDK/tree/main/python)
+- 📘 [Посібник з інтеграції TypeScript SDK](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🟦 [Посібник з інтеграції Go SDK](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 платіжний хук](https://platform.acedata.cloud/documents/sdk-x402-payment)

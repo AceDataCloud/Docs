@@ -1,0 +1,190 @@
+---
+title: "X402 網路與支付方式"
+description: "Platform 整合指南 - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 目前圍繞 USDC 結算，支援 EVM 和 Solana 兩類鏈。不同網路的簽名方式、資產地址、gas 行為和適用場景不同，接入前需要先選好網路。
+
+## 網路識別使用 CAIP-2
+
+x402 v2 的 `accepts[].network` 是 CAIP-2 識別，不是 `base`、`skale` 這類簡稱。客戶端匹配網路時必須按 CAIP-2 字串比較：
+
+| 網路             | CAIP-2 識別                                 |
+| -------------- | ----------------------------------------- |
+| Base           | `eip155:8453`                             |
+| SKALE Base     | `eip155:1187947933`                       |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` |
+
+## 支援矩陣
+
+| 網路     | scheme  | 資產                  | 簽名方式                                 | 適用場景                        |
+| ------ | ------- | ------------------- | ------------------------------------ | --------------------------- |
+| Base   | `exact` | Base USDC           | EIP-3009 `TransferWithAuthorization` | 預設推薦，錢包和流動性支援成熟。            |
+| Base   | `upto`  | Base USDC + Permit2 | Permit2 `PermitWitnessTransferFrom`  | 聊天、模型等後置計量 API。             |
+| SKALE  | `exact` | SKALE bridged USDC  | EIP-3009 `TransferWithAuthorization` | 低 gas 成本，適合 EVM 支付驗證和低成本呼叫。 |
+| Solana | `exact` | Solana USDC         | SPL `TransferChecked`                | Solana 錢包、Agent 或鏈上應用場景。    |
+
+`upto` 目前只在 Base 上提供。實際可用項目以 API 回傳的 `accepts` 為準。你也可以查看 Facilitator：
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Facilitator `/supported` 的回傳：
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ]
+}
+```
+
+結果說明：
+
+- Base、SKALE 和 Solana 的 `exact` 是固定金額支付路徑。
+- 只有 Base 提供 `upto` 後置計量路徑，依賴 Permit2 approve。
+- `upto` 項目裡的 `extra.facilitatorAddress` 是客戶端簽名時要寫入 witness 的地址，必須和伺服器回傳值一致。
+
+## Base
+
+Base 使用官方 USDC 合約：
+
+```text
+0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+```
+
+`exact` 方案中，客戶端簽署 EIP-712 `TransferWithAuthorization`。簽名內容包括：
+
+- `from`：付款錢包地址
+- `to`：Ace Data Cloud 收款地址
+- `value`：本次支付金額
+- `validAfter` / `validBefore`：簽名有效時間視窗
+- `nonce`：32 位元組隨機 nonce
+
+Facilitator 驗證簽名後，會在鏈上呼叫 USDC 的 `transferWithAuthorization` 完成轉帳。
+
+Base 是最推薦的正式接入網路，尤其適合 `upto` 後置計量，因為 Permit2、USDC 和錢包生態都更成熟。
+
+Base `exact` 驗證結果範例：
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+```
+
+結果說明：
+
+- API paid retry 回傳模型內容 `ADC_BASE_E2E_OK`。
+- 鏈上交易已可在 BaseScan 查詢，區塊號是 `46726299`。
+- `95215` atomic USDC 對應 `0.095215` USDC，是這次 API 呼叫的實際結算金額。
+
+訂單支付 Base `exact` 的程式執行結果：
+
+```text
+order 78481793-304e-47f7-bc0c-8231aec9cc1e
+state Finished
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+結果說明：
+
+- 平台訂單最終狀態是 `Finished`。
+- 訂單 `pay_id` 寫入同一個 Base 交易雜湊。
+- `1200000` atomic USDC 對應 `1.2` USDC，是舊政策下該筆 10 Credits 訂單的歷史實付金額；新訂單不再額外享有 X402 支付方式折扣，具體簽名金額以本次 402 回應為準。
+
+## SKALE
+
+SKALE 使用 bridged USDC，簽名方式與 Base 類似，也是 EIP-3009。它適合低 gas 成本的 EVM 支付場景；實際呼叫仍以 API 回傳的 `accepts` 為準。
+
+SKALE 的典型 402 `accepts` 中會包含：
+
+```json
+{
+  "network": "eip155:1187947933",
+  "scheme": "exact",
+  "extra": {
+    "name": "Bridged USDC (SKALE Bridge)",
+    "version": "2",
+    "chainId": 1187947933,
+    "verifyingContract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+  }
+}
+```
+
+SKALE 目前只提供 `exact`。如果你需要後置計量，請使用 Base `upto`。
+
+SKALE `exact` 驗證結果範例：
+
+```text
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+```
+
+結果說明：
+- API 付費重試返回模型內容 `ADC_SKALE_E2E_OK`。
+- 交易已可在 SKALE explorer 查詢，區塊號是 `1969317`。
+- 這次 `exact` 支付的結算金額是 `0.095215` USDC。
+
+## Solana
+
+Solana 使用 SPL USDC `TransferChecked`。用戶端會建構一筆轉帳交易，簽名並提交，之後把交易簽名或序列化交易放入 `PAYMENT-SIGNATURE` envelope。
+
+Solana 的特點：
+
+- 使用 Solana wallet adapter 或 base58 secret key；
+- 資產是 Solana USDC mint；
+- 目前只支援 `exact`；
+- Facilitator 會校驗 transfer instruction 的 mint、destination、authority 和 amount。
+
+如果使用錢包 fee payer 模式，錢包會直接提交交易，Facilitator 負責確認交易並返回 settlement 結果。
+
+Solana `exact` 驗證結果範例：
+
+```text
+payer AY2RmGm2zPxB1uKvvF4dKyYdr2VySyL3wcD1MKJZoLRd
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run
+```
+
+結果說明：
+
+- 付費重試已經返回 HTTP 200，並且模型輸出 `ADC_SOLANA_E2E_OK`。
+- 公開 RPC 查詢鏈上 signature 時可能遇到限流。
+- 因為公開 RPC 查詢可能限流，這裡不寫 Solana explorer。需要嚴格對帳時，請使用自有 Solana RPC 或平台側結算記錄確認交易簽名。
+
+## 如何選擇
+
+| 你要做什麼        | 推薦網路                         |
+| ------------ | ---------------------------- |
+| 快速跑通最小鏈路     | SKALE `exact` 或 Base `exact` |
+| 面向一般 Web3 使用者 | Base                         |
+| 做聊天補全等後置計量   | Base `upto`                  |
+| Solana 生態應用  | Solana `exact`               |
+| 低成本 EVM 支付驗證 | SKALE `exact`                |
+
+無論選擇哪條鏈，都不要在用戶端硬編碼價格。價格由伺服器返回的 `accepts[].maxAmountRequired` 決定。

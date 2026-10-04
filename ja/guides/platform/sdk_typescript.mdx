@@ -1,0 +1,360 @@
+---
+title: "TypeScript SDK 接入教程"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`@acedatacloud/sdk`](https://www.npmjs.com/package/@acedatacloud/sdk) は Ace Data Cloud の公式 TypeScript / JavaScript SDK で、`api.acedata.cloud` 上のすべてのサービスを型付きの `client.openai.chat.completions.create(...)`、`client.images.generate(...)`、`client.search.google(...)` などのメソッドにラップし、SSE ストリーミング、リトライバックオフ、型付き例外を備えています。
+
+Node.js、Deno、Bun、そしてモダンブラウザ（バンドラー付き）で使用できます。
+
+ソースコードとパッケージのアドレス：
+
+- SDK リポジトリ：[https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- npm SDK：[https://www.npmjs.com/package/@acedatacloud/sdk](https://www.npmjs.com/package/@acedatacloud/sdk)
+
+## インストール
+
+```bash
+npm install @acedatacloud/sdk
+# または pnpm add / yarn add / bun add
+```
+
+X402 チェーン上での支払いが必要な場合（API トークンなしのパス）、もう一つインストールします：
+
+```bash
+npm install @acedatacloud/x402-client ethers
+```
+
+クリーンな npm プロジェクトのバージョンチェック出力：
+
+```text
+$ npm ls @acedatacloud/sdk
+└── @acedatacloud/sdk@2026.504.2
+
+$ node -e "console.log(require('@acedatacloud/sdk').AceDataCloud?.name)"
+AceDataCloud
+```
+
+結果の説明：
+
+- パッケージのバージョンは `2026.504.2`（CalVer、2026 年第 504 回 ISO 週の第 2 回修正）。
+- `AceDataCloud` はクライアントを構築するための主なクラスで、デフォルトエクスポートからアクセスできます。
+
+## API トークンの準備
+
+参考 [SDK 概要 - API トークンの取得](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) からトークンを取得し、シェルで `export` します：
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+クライアントを構築する際に `apiToken` を渡さないと、SDK は自動的に `ACEDATACLOUD_API_TOKEN` 環境変数を読み取ります。もしあなたの環境に `ACEDATACLOUD_API_KEY`（プロジェクトリポジトリの規約）がすでに保存されている場合は、明示的に渡すこともできます：`new AceDataCloud({ apiToken: process.env.ACEDATACLOUD_API_KEY })`。
+
+## 例 1：chat.completions（非ストリーミング）
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [
+    { role: 'user', content: 'Reply with exactly: ADC_TS_SDK_OK' }
+  ],
+  max_tokens: 20,
+  temperature: 0
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('id', res.id);
+console.log('model', res.model);
+console.log('content', res.choices[0].message.content);
+console.log('usage', JSON.stringify(res.usage));
+```
+
+プログラムの実行結果：
+
+```text
+elapsed_ms 2543
+id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA
+model gpt-4o-mini
+content ADC_TS_SDK_OK
+usage {"prompt_tokens":16,"completion_tokens":6,"total_tokens":22}
+```
+
+結果の説明：
+
+- `id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA` は OpenAI 互換のレスポンス ID で、コンソールの [使用履歴](https://platform.acedata.cloud/console/usages) で対応する記録を検索できます。
+- `content ADC_TS_SDK_OK` はモデルが実際に返した固定識別子で、レスポンスが SDK によって改ざんされていないことを証明します。
+- 一回のチャット完了で約 22 トークンを消費し、gpt-4o-mini の単価で課金されます。
+- SDK はレスポンスを `Record<string, unknown>` として宣言し、実行時には JSON オブジェクトになります。`.id` / `.choices[0].message.content` のようなドットアクセスは `.mjs`、Node REPL、Bun で動作します；厳密な TypeScript プロジェクトでは `(res as any).id` または tsconfig で `noImplicitAny` をオフにする必要があるかもしれません。
+
+## 例 2：chat.completions（SSE ストリーミング）
+
+`stream: true` を有効にすると、`create` は非同期イテレーターを返し、各フレームは `ChatCompletionChunk` です。
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+let firstChunkMs: number | null = null;
+let chunks = 0;
+const collected: string[] = [];
+
+const stream = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [
+    { role: 'user', content: 'Count from 1 to 5, separated by single spaces, no extra text.' }
+  ],
+  max_tokens: 20,
+  stream: true
+});
+
+for await (const chunk of stream) {
+  if (firstChunkMs === null) firstChunkMs = Date.now() - t0;
+  chunks++;
+  const delta = chunk.choices[0]?.delta?.content;
+  if (delta) collected.push(delta);
+}
+
+console.log('total_elapsed_ms', Date.now() - t0);
+console.log('first_chunk_ms', firstChunkMs);
+console.log('chunks', chunks);
+console.log('collected', collected.join('').trim());
+```
+
+プログラムの実行結果：
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+結果の説明：
+
+- 最初のフレームの遅延 2481 ms はモデルが最初のトークンを生成するのにかかる時間で、以降の 12 フレームは 135 ms 内にすべて到達しました。
+- 13 フレームを合わせると `"1 2 3 4 5"` になり、各トークンが個別のフレームとして生成され、最後のフレームには `finish_reason` が含まれます。
+- ストリーミングは非ストリーミングよりもトークンを節約するわけではありませんが、最初のトークンの遅延が大幅に短縮され、リアルタイム UI に適しています。
+
+## 例 3：images.generate（NanoBanana）
+
+`client.images.generate({ provider: 'nano-banana', ... })` は直接同期的に返され、**`wait` パラメータを渡す必要はありません**——NanoBanana API 自体が同期生成です。
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const img = await client.images.generate({
+  provider: 'nano-banana',
+  prompt: 'A minimalist logo of a yellow banana on a white background, flat design'
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('task_id', img.task_id);
+console.log('trace_id', img.trace_id);
+console.log('image_url', img.data[0].image_url);
+```
+
+プログラムの実行結果：
+
+```text
+elapsed_ms 16634
+task_id 8e4b44a6-5ece-46a4-9013-9e0c8aca2217
+trace_id 9529e241-54fe-40da-98a2-871e14989fb5
+image_url https://platform.cdn.acedata.cloud/nanobanana/331be1d3-3330-4196-bd1c-aa75717c549c.png
+```
+
+結果の説明：
+
+- `image_url` は CDN 上の安定したアドレスで、直接 `<img src />` またはダウンロードできます。
+- 16.6 秒の間、大部分の時間はモデルの推論にかかり、ローカル SDK のオーバーヘッドは無視できます。
+- `trace_id` はプラットフォームが割り当てたリクエスト ID で、問題が発生した場合はこの ID をカスタマーサポートに提供することで迅速に特定できます。
+- 非同期サービス（Midjourney、Sora、Veo など）には TaskHandle のポーリングが必要で、詳細は [SDK タスクポーリングとストリーミングレスポンス](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming) を参照してください。
+
+## 例 4：型付きエラーハンドリング
+
+SDK は HTTP ステータスに応じてエラーを具体的なサブクラス（`AuthenticationError` / `BadRequestError` / `RateLimitError` / `InternalServerError` / `APIConnectionError` など）としてスローし、`instanceof` を使用して正確に分岐できます。
+```ts
+import { AceDataCloud, AuthenticationError } from '@acedatacloud/sdk';
+
+const bad = new AceDataCloud({ apiToken: 'definitely-not-a-real-token' });
+
+try {
+  await bad.openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'hi' }],
+    max_tokens: 5
+  });
+} catch (err: any) {
+  console.log('err_class', err.constructor.name);
+  console.log('status', err.statusCode);
+  console.log('code', err.code);
+  console.log('instanceof AuthenticationError =', err instanceof AuthenticationError);
+}
+```
+
+プログラムの実行結果：
+
+```text
+A. err_class AuthenticationError
+A. status 401
+A. code invalid_token
+A. instanceof AuthenticationError = true
+```
+
+結果の説明：
+
+- 401 は自動的に `AuthenticationError` にマッピングされ、ビジネスコードは `instanceof` を使って正確に分岐できます。
+- `code: invalid_token` は PlatformGateway から来ており、バックエンドのログと照合しやすくなっています。
+- 同様に 429 → `RateLimitError`、400 → `BadRequestError`、5xx → `InternalServerError`。
+
+## サンプル 5：複数モデルのルーティング
+
+同じクライアントは複数のサービス間で自由に切り替え可能で、モデル名が一致していれば大丈夫です。
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const MODELS = ['gpt-4o-mini', 'gemini-2.5-flash', 'deepseek-v3', 'grok-3-fast'];
+
+for (const model of MODELS) {
+  const t0 = Date.now();
+  try {
+    const r = await client.openai.chat.completions.create({
+      model,
+      messages: [{ role: 'user', content: 'Reply with exactly: ADC_OK' }],
+      max_tokens: 5
+    });
+    console.log(model.padEnd(28), `${Date.now() - t0}ms`, `content="${r.choices[0].message.content}"`);
+  } catch (err: any) {
+    console.log(model.padEnd(28), `${Date.now() - t0}ms`, 'ERR', err.statusCode, err.code);
+  }
+}
+```
+
+プログラムの実行結果：
+
+```text
+gpt-4o-mini                  2189ms   content="ADC_OK"
+gemini-2.5-flash             2569ms   content=""
+deepseek-v3                  2047ms   content="ADC_OK"
+grok-3-fast                  3598ms   content="ADC_OK"
+```
+
+結果の説明：
+
+- 一つのコード、一つのトークンで、OpenAI / Google / DeepSeek / xAI の四種類のモデルサービスをカバーします。
+- `gemini-2.5-flash` は今回 `ADC_OK` を返さなかったのは、モデル自身の出力スタイルの違いによるもので、SDK は何も静かに飲み込まず、モデルの元の言葉をビジネスに忠実に透過させています。
+- 価格はそれぞれの実際のトークン単価で課金され、パスは一度だけ PlatformGateway を通ります。
+
+## サンプル 6：Google 検索
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const t0 = Date.now();
+const r = await client.search.google({
+  query: 'Ace Data Cloud',
+  resource: 'web'
+});
+const items = (r as any).organic ?? [];
+console.log('elapsed_ms', Date.now() - t0);
+console.log('organic_count', items.length);
+items.slice(0, 2).forEach((it: any, i: number) => {
+  console.log(`#${i + 1}`, it.title, '->', it.link);
+});
+```
+
+プログラムの実行結果：
+
+```text
+elapsed_ms 2382
+organic_count 10
+#1 Ace Data Cloud -> https://platform.acedata.cloud/
+#2 Ace Data Cloud - GitHub -> https://github.com/acedatacloud
+```
+
+結果の説明：
+
+- 一度のリクエストで 10 件のオーガニック結果を取得し、フィールド名は `organic`（`organic_results` ではありません）。
+- 検索は [Serp サービス](https://platform.acedata.cloud/services/serp) を通じて行われ、課金はリクエストごとに行われます。
+- 同じクライアントインスタンスはチャットも検索もでき、トークンは一つで十分です。
+
+## 設定オプション
+
+```ts
+const client = new AceDataCloud({
+  // 必須のいずれか：明示的なトークンまたは環境変数 ACEDATACLOUD_API_TOKEN
+  apiToken: process.env.MY_TOKEN,
+
+  // プラットフォーム API のルートアドレス、デフォルトは https://api.acedata.cloud
+  baseURL: 'https://api.acedata.cloud',
+
+  // 一部のサービス（例：ダッシュボードのメタデータ）はプラットフォームのドメインを通ります
+  platformBaseURL: 'https://platform.acedata.cloud',
+
+  // 一回のリクエストのタイムアウト、ミリ秒；デフォルトは 300_000（5 分）
+  timeout: 300_000,
+
+  // 自動再試行回数、デフォルトは 2；再試行条件：408 / 409 / 429 / 5xx / ネットワークエラー
+  maxRetries: 2,
+
+  // カスタムリクエストヘッダー
+  defaultHeaders: { 'x-app': 'my-service/1.0' }
+});
+```
+
+## ブラウザでの使用
+
+`@acedatacloud/sdk` は ESM + ISO（同構）パッケージで、バンドラーを持つ現代のブラウザで直接 `import` できます。注意：**フロントエンドコードに API トークンをハードコーディングしないでください**。フロントエンドの推奨：
+
+1. [X402 `paymentHandler`](https://platform.acedata.cloud/documents/sdk-x402-payment) を使用する —— ユーザーポケットが USDC をリクエストごとに署名し、トークンは不要です。
+2. または、自分のサーバーで SDK を使用し、ブラウザは自分のバックエンドを呼び出すだけで済みます。
+
+## 進階：タスクポーリングとストリーミングレスポンス
+
+- タスク型サービス（Midjourney、Sora、Veo、Suno）：`TaskHandle` を使用してポーリングし、単位、タイムアウト、再試行の詳細は [SDK タスクポーリングとストリーミングレスポンス](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming) を参照してください。
+- ストリーミングチャット：このページのサンプル 2 で示されています；ストリーミングオーディオ / ビデオも同様にサポートされています。
+
+## 進階：X402 支払いフック
+
+API トークンを申請したくない、リクエストごとにオンチェーンで支払いたい場合は、`paymentHandler` を使用できます：
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: (window as any).ethereum,  // EIP-1193 プロバイダー、または viem walletClient
+    evmAddress: userAddress
+  })
+});
+```
+
+> `createX402PaymentHandler` は TypeScript 側で `{ network, evmProvider, evmAddress, preferScheme? }`（EVM チェーン）または `{ network: 'solana', solanaWallet }`（Solana）を受け入れます。Node サーバー側で `window.ethereum` がない場合は、`viem` の `createWalletClient`（秘密鍵に基づく）を使用して EIP-1193 互換のプロバイダーをラップして渡してください；詳細な方法と実際のオンチェーン結果は [SDK + X402 支払いフック](https://platform.acedata.cloud/documents/sdk-x402-payment) を参照してください。
+
+## 残高を確認する方法
+
+[Ace Data Cloud コンソール - アプリケーションリスト](https://platform.acedata.cloud/console/applications) を通じて、現在のアカウントの残高を確認できます。
+
+[Ace Data Cloud コンソール - 使用履歴](https://platform.acedata.cloud/console/usages) を通じて、すべての使用履歴と課金の詳細を確認できます。
+
+## さらに詳しく
+
+- 📦 [`@acedatacloud/sdk` on npm](https://www.npmjs.com/package/@acedatacloud/sdk)
+- 🗂 [SDK ソースコード](https://github.com/AceDataCloud/SDK/tree/main/typescript)
+- 🐍 [Python SDK 接続ガイド](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Go SDK 接続ガイド](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 支払いフック](https://platform.acedata.cloud/documents/sdk-x402-payment)

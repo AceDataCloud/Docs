@@ -1,0 +1,233 @@
+---
+title: "Tutorijal za plaćanje X402 porudžbine"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Pored direktnog plaćanja po API zahtevu, Ace Data Cloud takođe podržava plaćanje porudžbina pomoću X402. Osnovni protokol za plaćanje porudžbine i API pozive je isti: prvi zahtev vraća 402, klijent potpisuje `PAYMENT-SIGNATURE`, a zatim ponavlja isti zahtev.
+
+Razlika je u tome što plaćanje porudžbine pripada platformskom API-ju i zahteva token naloga; dok AI API koji direktno poziva `x402.acedata.cloud` može koristiti samo X402, bez potrebe za API tokenom.
+
+## Priprema porudžbine
+
+Otvorite [Ace Data Cloud konzolu](https://platform.acedata.cloud/console/orders), izaberite porudžbinu koju treba platiti i zabeležite ID porudžbine.
+
+Ako još nemate porudžbinu, možete kreirati porudžbinu na čekanju za plaćanje na stranici paketa. Cena porudžbine je ona prikazana na stranici, a `amount` u X402 402 odgovoru je konačna osnova za potpisivanje.
+
+## Kreiranje tokena naloga
+
+Zahtev za plaćanje porudžbine zahteva token naloga. Otvorite [stranicu Platform Tokena](https://platform.acedata.cloud/console/platform-tokens) i kreirajte token u formatu `platform-v1-...`.
+
+Za naredne zahteve koristite:
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+Token naloga se razlikuje od običnog API tokena. Običan API token se koristi za trošenje API kredita; token naloga se koristi za upravljanje resursima platforme u ime vašeg naloga, kao što je plaćanje porudžbine.
+
+## Pokretanje 402
+
+Prvo pošaljite jedan zahtev bez `PAYMENT-SIGNATURE`:
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+Vraćeni status je 402, a odgovor sadrži `accepts`:
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+Plaćanje porudžbine koristi zvanični x402 v2: `x402Version` je `2`, `network` koristi CAIP-2 identifikator, a polje iznosa je `amount`.
+
+Rezultat izvršavanja programa za kreiranje porudžbine od 10 Credits i pokretanje 402:
+
+> Sledeći zapisi transakcija su istorijski primeri stvarnih testiranja prema staroj politici; iznos i heš transakcije zadržani su neizmenjeni. Nove X402 porudžbine više nemaju popust za način plaćanja; koristite `amount` iz ovog 402 odgovora kao osnovu za potpisivanje i plaćanje.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+Objašnjenje rezultata:
+
+- Nakon uspešnog kreiranja porudžbine, njen status je `Pending`; u ovom trenutku još nema plaćanja na lancu.
+- Prvi zahtev `pay/` ne sadrži `PAYMENT-SIGNATURE`, pa vraća HTTP 402.
+- `accepts` istovremeno pruža Base `exact` i Solana `exact`; ovaj tutorijal zatim bira Base.
+- Cena pri kreiranju porudžbine je `1.26`; tokom stare politike popusta za X402 plaćanje, stvarni potpisani i poravnati iznos bio je `1.2` USDC, što odgovara vrednosti `1200000` atomic USDC.
+
+Imajte na umu da je `resource` polje koje vraća server i koje učestvuje u potpisivanju; klijent ne treba sam da menja protokol, putanju ili ID porudžbine u njemu.
+
+## Potpisivanje i ponavljanje zahteva
+
+Plaćanje porudžbine može ponovo koristiti `@acedatacloud/x402-client` ili niskonivojske funkcije za potpisivanje iz `acedatacloud-x402`. Sledeći je TypeScript primer:
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+Rezultat izvršavanja programa nakon potpisivanja i ponavljanja zahteva za istu porudžbinu korišćenjem Base `exact`:
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+Rezultat potvrde na lancu:
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+Objašnjenje rezultata:
+
+- `status 200` označava da je API platforme za plaćanje narudžbine prihvatio ovaj `PAYMENT-SIGNATURE`.
+- `has_x_payment_response True` označava da zaglavlje odgovora sadrži Base64-kodiranu potvrdu `PAYMENT-RESPONSE`.
+- `settle_header.success=True` i `network=base` označavaju da je Facilitator završio Base settlement.
+- Konačni status narudžbine je `Finished`, `pay_way` je `X402`, a `pay_id` sadrži heš transakcije na lancu.
+- Događaj `Transfer` na BaseScan-u pokazuje da adresa platioca prenosi `1200000` atomic USDC na adresu primaoca platforme, odnosno `1.2` USDC.
+
+## Uspešan odgovor i potvrda
+
+Nakon uspešnog plaćanja narudžbine, telo odgovora sadrži informacije o narudžbini. Platforma takođe u zaglavlju odgovora `PAYMENT-RESPONSE` nosi Base64-kodirani settlement response, a uobičajena polja nakon dekodiranja uključuju:
+
+| Polje            | Objašnjenje                           |
+| ------------- | ---------------------------- |
+| `success`     | Da li je Facilitator settlement uspešan. |
+| `transaction` | Heš transakcije poravnanja na lancu.                    |
+| `network`     | Mreža plaćanja.                        |
+| `payer`       | Adresa novčanika platioca.                      |
+| `amount`      | Stvarni iznos poravnanja, koristi atomic units.      |
+
+Ako vam je potrebno usklađivanje, preporučuje se da istovremeno sačuvate ID narudžbine, adresu novčanika platioca, `transaction` i konačni status narudžbine.
+
+## Napomene
+
+- Za plaćanje narudžbine potreban je token naloga platforme; ne može se završiti samo pomoću X402 potpisa novčanika.
+- `amount` koristi USDC atomic units, `1200000` predstavlja `1.2` USDC.
+- Nemojte sami sastavljati adresu primaoca ili adresu sredstva; oslanjajte se na `accepts` u odgovoru 402.
+- Ako se isti `PAYMENT-SIGNATURE` pošalje više puta, Facilitator će koristiti nonce za zaštitu od ponavljanja.
+
+## Odgovor pri neuspešnom plaćanju
+
+Prvi HTTP 402 bez `PAYMENT-SIGNATURE` je normalan izazov za plaćanje i ne predstavlja neuspeh plaćanja. Neuspeh verifikacije ili poravnanja nakon potpisivanja i dalje zadržava standardni string `error` kao kompatibilni rezervni mehanizam, a stabilna struktura greške se vraća u `extensions.acedatacloud.paymentError`:
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+Klijent treba prvenstveno da lokalizuje prema `code`, a za nepoznat code da se vrati na opštu grešku plaćanja. `charged` je trostano polje: samo kada je plaćanje izričito odbijeno pre poravnanja vraća se `false`; odsustvo polja označava da je status naplate nepoznat i ne može se tumačiti kao „nije naplaćeno“. Nakon što trenutna narudžbina pređe u `Failed`, nije moguće ponovo pokušati sa istom narudžbinom; nakon ispravljanja problema sa novčanikom kreirajte novu narudžbinu.
+
+Nemojte beležiti ili slati kompletan `PAYMENT-SIGNATURE`, potpis novčanika, authorization payload, izvorne Facilitator dijagnostičke podatke ili RPC odgovore. Za proveru korisničke podrške dovoljni su samo ID narudžbine i javni `code` greške.

@@ -1,0 +1,308 @@
+---
+title: "Python SDK - Integraatio-opas"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`acedatacloud`](https://pypi.org/project/acedatacloud/) on Ace Data Cloudin virallinen Python SDK, joka kapseloi kaikki palvelut `api.acedata.cloud` tyypitettyihin menetelmiin, kuten `client.openai.chat.completions.create(...)`, `client.images.generate(...)`, `client.search.google(...)` jne., ja tarjoaa sekä synkroniset että asynkroniset asiakasrajapinnat.
+
+Alustana on `httpx`, joka tukee SSE-virtausta, automaattista uudelleenyritystä, tyypitettyjä poikkeuksia ja pydantic-tyyppitarkistusta.
+
+Lähdekoodi ja paketti:
+
+- SDK-repositorio: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- PyPI: [https://pypi.org/project/acedatacloud/](https://pypi.org/project/acedatacloud/)
+
+## Asennus
+
+```bash
+pip install acedatacloud
+# tai uv add / poetry add
+```
+
+Jos tarvitset X402-lohkoketjussa maksamista (ilman API Token -polkua), asenna toinen:
+
+```bash
+pip install acedatacloud-x402
+```
+
+Puhdas venv-version tarkistuksen tuloste:
+
+```text
+$ python -c "import importlib.metadata as m; print(m.version('acedatacloud'))"
+2026.4.26.1
+
+$ python -c "from acedatacloud import AceDataCloud, AsyncAceDataCloud; print('ok')"
+ok
+```
+
+Tuloksen selitys:
+
+- Paketin versio on `2026.4.26.1` (CalVer, 26. huhtikuuta 2026).
+- `AceDataCloud` on synkroninen asiakas, `AsyncAceDataCloud` on asyncio-asynkroninen asiakas.
+- Tämä SDK ei riipu `pydantic`:ista, ja vastausrunko palauttaa aina `dict`:in. Tämä eroaa `openai-python`:ista, joten siirryttäessä on syytä huomioida.
+
+## Valmistele API Token
+
+Viittaus [SDK Yleiskatsaus - Hae API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) saadaksesi tokenin, ja sitten `export` shellissä:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+Asiakasrakenteessa ei tarvitse välittää `api_token`:ia, SDK lukee automaattisesti `ACEDATACLOUD_API_TOKEN` ympäristömuuttujan. Jos ympäristössäsi on jo tallennettuna `ACEDATACLOUD_API_KEY` (projektin varasto-ehdotus), anna se eksplisiittisesti: `AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])`.
+
+## Esimerkki 1: chat.completions (synkroninen)
+
+```python
+import os, time, json
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_SDK_OK"}],
+    max_tokens=20,
+    temperature=0,
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("id", res["id"])
+print("model", res["model"])
+print("content", res["choices"][0]["message"]["content"])
+print("usage", json.dumps({k: v for k, v in res["usage"].items()
+                            if k in ("prompt_tokens","completion_tokens","total_tokens")}))
+```
+
+Ohjelman suoritus tulos:
+
+```text
+elapsed_ms 2963
+id chatcmpl-DldFdnIlhSUXINpupgsUmZL78MnBu
+model gpt-4o-mini
+content ADC_PY_SDK_OK
+usage {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+```
+
+Tuloksen selitys:
+
+- `id` on vastaus ID, jonka voi löytää [Käyttöhistoria](https://platform.acedata.cloud/console/usages) -sivulta.
+- `content ADC_PY_SDK_OK` on mallin todellinen palautettu kiinteä tunnus.
+- `res["usage"]` palauttaa `dict`:in, ei pydantic-mallia; yksi kutsu kuluttaa noin 24 tokenia.
+
+## Esimerkki 2: chat.completions (SSE-virta)
+
+`stream=True` -tilassa `create` palauttaa tavallisen generaattorin, joka yieldaa kerrallaan yhden jäsennellyn chunk dictin.
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+first_chunk_ms = None
+chunks = 0
+collected = []
+
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Count from 1 to 5, separated by single spaces, no extra text."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    if first_chunk_ms is None:
+        first_chunk_ms = int((time.time() - t0) * 1000)
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+
+print("total_elapsed_ms", int((time.time() - t0) * 1000))
+print("first_chunk_ms", first_chunk_ms)
+print("chunks", chunks)
+print("collected", "".join(collected).strip())
+```
+
+Ohjelman suoritus tulos:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+Tuloksen selitys:
+
+- Ensimmäisen kehyksen viive on 2104 ms, ja seuraavat 11 kehystä saatiin kasaan vain 7 ms:ssa - kun palvelu alkaa virrata, paikallisesti on helppo kuluttaa.
+- chunk on tavallinen dict, ja arvoja voi turvallisesti ottaa OpenAI:n SSE-muodon mukaan kerroksittain `.get()`-menetelmällä.
+- Todellisessa tuotannossa suositellaan virran antamista eteenpäin samalla kun yieldataan, jolloin kokonaisviive on lähellä 2 sekuntia.
+
+## Esimerkki 3: AsyncAceDataCloud (asynkroninen)
+
+`AsyncAceDataCloud` API on täysin symmetrinen synkronisen version kanssa, vain kaikki IO-menetelmät palauttavat coroutineja. Sopii FastAPI / aiohttp / asyncio -palveluille.
+
+```python
+import os, asyncio, time
+from acedatacloud import AsyncAceDataCloud
+
+async def main():
+    client = AsyncAceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+    t0 = time.time()
+    res = await client.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_ASYNC_OK"}],
+        max_tokens=20,
+        temperature=0,
+    )
+    print("elapsed_ms", int((time.time() - t0) * 1000))
+    print("id", res["id"])
+    print("content", res["choices"][0]["message"]["content"])
+    await client.close()
+
+asyncio.run(main())
+```
+
+Ohjelman suoritus tulos:
+
+```text
+elapsed_ms 2392
+id chatcmpl-DldFwRlrgtYDBpIr0T55aDQI4GlbF
+content ADC_PY_ASYNC_OK
+```
+
+Tuloksen selitys:
+
+- Asynkroninen versio kulkee samaa HTTP-reittiä kuin synkroninen versio, vain yhteysaltaan toteutus on erilainen (`httpx.AsyncClient`).
+- Poistuessa on eksplisiittisesti `await client.close()`, jotta yhteysallas suljetaan; pitkäikäisissä palveluissa se suljetaan vain kerran prosessin sulkeutuessa.
+- Yhden kerran viive on suunnilleen sama kuin synkronisessa versiossa, mutta rinnakkaisissa skenaarioissa asynkronisuus tuo esiin etuja - yksi tapahtumasilmukka voi samanaikaisesti käsitellä kymmeniä tai jopa satoja kesken olevia pyyntöjä.
+
+## Esimerkki 4: images.generate (NanoBanana)
+
+NanoBanana API on synkroninen kuvagenerointipalvelu, **älä lähetä `wait`** - SDK-kutsu odottaa aina palvelun palauttavan 200.
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.images.generate(
+    provider="nano-banana",
+    model="nano-banana",
+    prompt="Minimalistinen logo keltaisesta banaanista valkoisella taustalla, litteä muotoilu",
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("task_id", res.get("task_id"))
+print("trace_id", res.get("trace_id"))
+data = res.get("data") or []
+if data:
+    print("image_url", data[0].get("image_url"))
+```
+
+Ohjelman tulos:
+
+```text
+elapsed_ms 18977
+task_id 9e71f40f-1579-480d-adf4-07a95450904f
+trace_id 5aa21d7f-af84-48e6-9ce0-9c6c36c8e5d9
+image_url https://platform.cdn.acedata.cloud/nanobanana/884e92df-a497-44e0-9681-35c7a00e0a6c.png
+```
+
+Tuloksen selitys:
+
+- `image_url` on CDN:llä oleva vakaa osoite, jota voi käyttää suoraan lataamiseen tai upottamiseen verkkosivuille.
+- 18.9 sekunnista lähes kaikki on mallin päättelyä; paikallisen SDK:n kustannukset ovat vain muutama millisekunti.
+- Todellisiin asynkronisiin tehtäviin, kuten Midjourney, Sora, Veo, Suno, tarvitaan `wait=True` tai manuaalinen `TaskHandle.wait()` kysely, katso tarkemmin [SDK-tehtävien kysely ja suoratoistovastaukset](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+## Esimerkki 5: Tyyppivirheiden käsittely
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud import AuthenticationError, RateLimitError, ValidationError
+
+bad = AceDataCloud(api_token="definitely-not-a-real-token")
+
+try:
+    bad.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5,
+    )
+except AuthenticationError as err:
+    print("err_class", type(err).__name__)
+    print("status", err.status_code)
+    print("code", err.code)
+except RateLimitError as err:
+    # 429, SDK on jo automaattisesti yrittänyt eksponentiaalisesti 2 kertaa ja epäonnistunut
+    print("rate limited:", err.code)
+except ValidationError as err:
+    # 400, esimerkiksi puuttuva kenttä, mallin nimi ei ole olemassa
+    print("bad request:", err.code, err.message)
+```
+
+Poikkeuskerros on sama kuin TypeScriptissä: `AuthenticationError` (401), `TokenMismatchError` (token ei vastaa palvelua), `InsufficientBalanceError` (riittämätön saldo), `ResourceDisabledError` (palvelu on poistettu käytöstä), `ValidationError` (400), `RateLimitError` (429), `ModerationError` (403 sisällön tarkastus), `APIError` (yleinen virhe), `TimeoutError` (aikakatkaisu), `TransportError` (verkkokerros).
+
+## Konfigurointivaihtoehdot
+
+```python
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(
+    # Pakollinen: eksplisiittinen token tai ympäristömuuttuja ACEDATACLOUD_API_TOKEN
+    api_token="...",
+
+    # Alustan API:n perusosoite, oletusarvo https://api.acedata.cloud
+    base_url="https://api.acedata.cloud",
+
+    # Osa palveluista (kuten dashboardin metatiedot) käyttää alustan verkkotunnusta
+    platform_base_url="https://platform.acedata.cloud",
+
+    # Yhden pyynnön aikakatkaisu, sekunteina; oletusarvo 300.0
+    timeout=300.0,
+
+    # Automaattisten uusintayritysten määrä, oletusarvo 2; uusintakriteerit: 408 / 409 / 429 / 5xx / verkkovirhe
+    max_retries=2,
+
+    # Mukautetut pyyntöotsikot
+    headers={"x-app": "my-service/1.0"},
+)
+```
+
+> Python SDK:n `timeout` ja TaskHandle:n `poll_interval` / `max_wait` yksiköt ovat **sekunteja**, TypeScript SDK käyttää **millisekunteja**, joten siirryttäessä kielestä toiseen on syytä olla erityisen tarkka. Katso tarkemmin [SDK-tehtävien kysely ja suoratoistovastaukset](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+> SDK lukee oletusarvoisesti `ACEDATACLOUD_API_TOKEN` ympäristömuuttujan; tässä artikkelissa, jotta se olisi yhdenmukainen [Claude Code VS Code -oppaan](https://platform.acedata.cloud/documents/claude-code-vscode-integrations) ja muiden oppaiden kanssa, esimerkissä käytetään `ACEDATACLOUD_API_KEY`, joten tarvitaan `api_token=os.environ["ACEDATACLOUD_API_KEY"]` eksplisiittinen injektio.
+
+## Edistyksellinen: X402 maksuhälytin
+
+```python
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import create_x402_payment_handler
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=my_evm_signer,
+        prefer_scheme="exact",   # tai "upto"
+    )
+)
+```
+
+Koko prosessi ja todelliset tulokset lohkoketjussa löytyvät [SDK + X402 maksuhälytin](https://platform.acedata.cloud/documents/sdk-x402-payment).
+
+## Kuinka tarkistaa jäljellä oleva saldo
+
+Voit tarkistaa nykyisen tilisi jäljellä olevan saldon [Ace Data Cloud -hallintapaneelin - Sovellusluettelosta](https://platform.acedata.cloud/console/applications).
+
+Voit tarkistaa kaikki käyttöhistorian ja maksutiedot [Ace Data Cloud -hallintapaneelin - Käyttöhistoriasta](https://platform.acedata.cloud/console/usages).
+
+## Lisätietoja
+
+- 🐍 [`acedatacloud` PyPI:ssä](https://pypi.org/project/acedatacloud/)
+- 🗂 [SDK:n lähdekoodi](https://github.com/AceDataCloud/SDK/tree/main/python)
+- 📘 [TypeScript SDK:n integrointiohjeet](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🟦 [Go SDK:n integrointiohjeet](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 maksuhälytin](https://platform.acedata.cloud/documents/sdk-x402-payment)

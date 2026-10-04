@@ -1,0 +1,206 @@
+---
+title: "Tutorial de integración del SDK TypeScript X402"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+TypeScript es una de las formas más recomendadas para integrar Ace Data Cloud X402. El SDK oficial se encarga de las llamadas API comunes, la consulta de tareas, el manejo de errores y los reintentos automáticos; `@acedatacloud/x402-client` se encarga de firmar el encabezado de solicitud `PAYMENT-SIGNATURE` cuando se encuentra con `402 Payment Required`.
+
+Direcciones del código fuente y del paquete:
+
+- Repositorio del SDK: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- Repositorio del Cliente X402: [https://github.com/AceDataCloud/X402Client](https://github.com/AceDataCloud/X402Client)
+- npm SDK: [https://www.npmjs.com/package/@acedatacloud/sdk](https://www.npmjs.com/package/@acedatacloud/sdk)
+- npm Cliente X402: [https://www.npmjs.com/package/@acedatacloud/x402-client](https://www.npmjs.com/package/@acedatacloud/x402-client)
+
+## Instalación de dependencias
+
+```bash
+npm install @acedatacloud/sdk @acedatacloud/x402-client
+```
+
+Si se utiliza Base o SKALE, se necesita la capacidad de firma EVM:
+
+```bash
+npm install ethers
+```
+
+Si se utiliza Solana, se necesita el adaptador de billetera de Solana o `@solana/web3.js`:
+
+```bash
+npm install @solana/web3.js
+```
+
+Salida de verificación de instalación e importación de un proyecto npm limpio:
+
+```text
+imports_ok true true true true true
+@acedatacloud/sdk@2026.504.2
+@acedatacloud/x402-client@2026.531.3
+ethers@6.16.0
+@solana/web3.js@1.98.4
+```
+
+Descripción de los resultados:
+
+- `@acedatacloud/sdk` y `@acedatacloud/x402-client` se pueden instalar desde npm y ser importados por Node.js.
+- `ethers` se utiliza para la firma de datos tipados EVM, `@solana/web3.js` se utiliza para la construcción de transacciones de Solana.
+
+## Ejemplo de Base o SKALE
+
+Se puede usar directamente `window.ethereum` en el navegador. En Node.js, se puede envolver `ethers.Wallet` en un proveedor de estilo EIP-1193.
+
+```ts
+import { Wallet } from 'ethers';
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') {
+      throw new Error(`unsupported method: ${method}`);
+    }
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+
+console.log(result.choices[0].message.content);
+```
+
+Resultado de la ejecución del programa de este ejemplo:
+
+```text
+payer 0xd0479FA9FD8C678303d477433d24C15e3723CC1C
+elapsed_ms 6782
+content ADC_TS_SDK_X402_OK
+id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT
+```
+
+Descripción de los resultados:
+
+- El programa primero activa un 402 sin autenticación, luego el handler firma el `PAYMENT-SIGNATURE`, y finalmente reintenta con el mismo cuerpo de solicitud.
+- `content ADC_TS_SDK_X402_OK` es una cadena fija devuelta realmente por el modelo, lo que indica que la solicitud reintentada ingresó a la API objetivo.
+- `id chatcmpl-DlcVLO4PQWvmjPDQpy9yQw2QdLGAT` es el ID de respuesta de esta finalización de chat, que se puede usar para comparar con los registros de uso de la plataforma.
+- Los resultados de liquidación en la cadena se pueden ver en [Verificación E2E y solución de problemas](https://platform.acedata.cloud/documents/x402-e2e-troubleshooting).
+
+Cambia `network` a `skale` para usar SKALE. La ventaja de SKALE es que el costo de gas de las transacciones en la cadena es bajo; la ventaja de Base es la liquidez de USDC y el soporte de billeteras más maduro, y solo Base ofrece medición posterior `upto`.
+
+Nota: SKALE actualmente solo tiene `exact`. Si se pasa `preferScheme: 'upto'` bajo `network: 'skale'`, el handler no encontrará `upto` y volverá silenciosamente a `exact`, sin generar un error; esto hará que escenarios como la finalización de chat, que se miden por token, se liquiden a una tarifa fija en lugar de por el uso real. Para medición posterior, utilice Base.
+
+## Ejemplo de billetera del navegador
+
+Al usar MetaMask, Coinbase Wallet o WalletConnect en aplicaciones frontend, generalmente se pasa directamente el proveedor EIP-1193:
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' });
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider: window.ethereum,
+    evmAddress: address
+  })
+});
+
+const image = await client.images.generate({
+  provider: 'nano-banana',
+  prompt: 'a yellow banana on a white background'
+});
+```
+
+La billetera del navegador mostrará un cuadro de confirmación de firma. El usuario no firma un mensaje arbitrario, sino la solicitud de pago devuelta por la API: la dirección de recepción, el contrato USDC, el monto, la validez y el nonce están todos incluidos en la firma.
+
+## Ejemplo de Solana
+
+Solana utiliza SPL USDC `TransferChecked`. El adaptador de billetera pasado necesita exponer `publicKey` y `signAndSendTransaction`.
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+import { createX402PaymentHandler } from '@acedatacloud/x402-client';
+
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'solana',
+    solanaWallet: phantomWallet
+  })
+});
+
+const result = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Say hi in 3 words' }],
+  max_tokens: 10
+});
+```
+
+La ruta de Solana actualmente solo admite `exact`, no admite `upto`. Si la API devuelve múltiples `accepts`, el handler seleccionará el que tenga `network = 'solana'`.
+
+La ruta de Solana ha verificado que el reintento pagado puede devolver HTTP 200 y `ADC_SOLANA_E2E_OK` en la misma API pública. Las consultas RPC públicas pueden estar limitadas, por lo que este documento no incluye el hash de la transacción de Solana; si necesita conciliación en la cadena, utilice su propio RPC de Solana o registre la confirmación en la consola.
+
+## Elegir `exact` o `upto`
+
+El handler de TypeScript actual seleccionará el primer requisito de pago que coincida con la red devuelta por el servidor. La API de Ace Data Cloud generalmente coloca el `exact` de la misma red antes del `upto`, por lo que si desea claramente utilizar la medición posterior, debe pasar `preferScheme: 'upto'`.
+
+Ejemplo:
+
+```ts
+const client = new AceDataCloud({
+  paymentHandler: createX402PaymentHandler({
+    network: 'base',
+    evmProvider,
+    evmAddress: wallet.address,
+    preferScheme: 'upto'
+  })
+});
+```
+
+Si el servidor no ha devuelto el requisito `upto` para esa red, el handler volverá automáticamente al primer requisito disponible de esa red, que generalmente es `exact`.
+
+`upto` requiere autorización única de Permit2. `upto` actualmente solo se ofrece en Base, por lo que solo necesita autorizar una vez el USDC de Base:
+```bash
+npx tsx scripts/approve-permit2.ts --network base
+```
+
+Base `upto` ha completado la verificación de API pública: HTTP 402 -> HTTP 200, la transacción de liquidación posterior es `0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036`. La salida completa se puede ver en la descripción del plan de facturación.
+
+## ¿Qué hizo el SDK?
+
+El transporte de `@acedatacloud/sdk` ejecutará un manejador de pagos al recibir un 402:
+
+```ts
+type PaymentHandler = (ctx: {
+  url: string;
+  method: string;
+  body?: unknown;
+  accepts: PaymentRequirement[];
+}) => Promise<{ headers: Record<string, string> }>;
+```
+
+El manejador devuelto por `@acedatacloud/x402-client` hará:
+
+1. Seleccionará el requisito de pago de la red objetivo de `ctx.accepts`.
+2. Construirá una firma EVM EIP-712 o una transacción de transferencia de Solana según la red.
+3. Serializará el sobre en Base64.
+4. Devolverá `{ headers: { 'PAYMENT-SIGNATURE': '<base64>' } }`.
+5. El SDK automáticamente reintentará con el cuerpo de la solicitud original.
+
+Esto significa que el código de negocio solo necesita escribirse como una llamada normal al SDK, sin necesidad de manejar manualmente el reintento de 402.

@@ -1,0 +1,316 @@
+---
+title: "Managing AceDataCloud Platform Account Tokens (Account Token)"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+**Account Token (Account Token, formerly known as Platform Token)** is an "account-level key" for developers to programmatically manage AceDataCloud platform resources (service applications, API credentials, orders, call records, balance, files, etc.). Its role is similar to the user Token after frontend login, and it has no expiration time by default; regular users can only manage their own tokens, while super administrators can manage other account tokens according to permissions.
+
+Account tokens access platform APIs with the current permissions of the associated account: basic permissions, directly granted permissions, and associated user group permissions take effect together; after joining or leaving a group, the next request will be evaluated based on the new permissions. Access to specific resources such as applications and orders still requires ownership verification. Account tokens do not expire by default; please use them only in trusted environments and keep them properly secured.
+
+> ℹ️ This API belongs to the **AceDataCloud Platform Management API**, with the unified prefix `https://platform.acedata.cloud/api/v1/`. For the complete API index, see [Get AceDataCloud Platform Document List](https://platform.acedata.cloud/documents/platform-document-list).
+
+## Account Token vs API Credential
+
+These are the two types of keys that beginners most easily confuse. Please distinguish them first:
+
+| Dimension   | **Account Token** (this document)                                                               | **API Credential (Credential)**                                                                           |
+| ---- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Purpose   | Call `https://platform.acedata.cloud/**` management APIs                                | Call `https://api.acedata.cloud/**` business APIs (OpenAI, Midjourney, Suno, Veo, etc.)                             |
+| Format   | `platform-v1-` + 64 hexadecimal digits (76 characters in total)                                          | 32 hexadecimal digits                                                                                         |
+| One account | Usually 1–2 tokens                                                                    | 1–N tokens per service application                                                                                     |
+| Creation entry | [Account Token Console](https://platform.acedata.cloud/console/platform-tokens) | [Create AceDataCloud Platform API Credential](https://platform.acedata.cloud/documents/platform-credential-create) |
+| Invalidation conditions | Invalid immediately after deletion; invalid upon expiration when `expiration` is non-null                                                | Can set quota limits, expiration time, and bind source IP                                                                             |
+
+If you only want to call GPT-4.1, what you need is an **API Credential**, not an account token.
+If you want to write automation scripts to manage top-ups, view monthly bills, or distribute credentials in batches to team members, then use an account token.
+
+---
+
+## Create with One Click in the Console (Recommended)
+
+1. Log in to [https://platform.acedata.cloud](https://platform.acedata.cloud).
+2. Go to the sidebar → "Developer" → "[Account Token](https://platform.acedata.cloud/console/platform-tokens)".
+3. Click the "Create" button in the upper-right corner to immediately obtain a `platform-v1-...` token, **click the copy button and save it to your password manager**.
+
+![Account Token Console](https://cdn.acedata.cloud/6g86oz.png)
+
+> ⚠️ The current creation, list, and detail responses all return the token in plaintext. Please treat the entire response as a secret, and do not write it to logs, analytics platforms, or frontend persistence; clients should also not rely on the list to retain plaintext returns long-term.
+
+---
+
+## Create an Account Token Using the API
+
+### API Overview
+
+| Item    | Content                                                       |
+| ---- | -------------------------------------------------------- |
+| Method   | `POST`                                                   |
+| URL  | `https://platform.acedata.cloud/api/v1/platform-tokens/` |
+| Authentication   | ✅ Any existing account token or browser login JWT                                 |
+| Body | `application/json` (an empty object `{}` can be passed)                           |
+
+### Authentication Notes (Chicken-and-Egg Problem)
+
+> How do you get the first token? The answer is **through the console**—after logging in through the browser, the console calls `POST /platform-tokens/` with JWT authentication and issues the first token to you.
+> After that, you can use any existing `platform-v1-...` token to create more.
+
+Request header format:
+
+```http
+Authorization: Bearer ${PLATFORM_TOKEN}
+Content-Type: application/json
+```
+
+### Request Example
+
+```shell
+curl -X POST 'https://platform.acedata.cloud/api/v1/platform-tokens/' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}" \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+### Response (HTTP 201)
+
+```json
+{
+  "id": "3264f1aa-cbe1-4e2c-a434-95adba4f8304",
+  "token": "platform-v1-<REDACTED>",
+  "expiration": null,
+  "user_id": "89518d07-5560-4b05-92c1-667f3ddf6a4b",
+  "created_at": "2026-04-26T15:50:11.123456Z",
+  "updated_at": "2026-04-26T15:50:11.123456Z",
+  "used_at": null
+}
+```
+
+### Field Descriptions
+
+| Field           | Type                 | Description                                                   |
+| ------------ | ------------------ | ---------------------------------------------------- |
+| `id`         | UUID               | Token primary key, used when deleting / querying details                                     |
+| `token`      | string             | Account token plaintext. Format: `platform-v1-` + 64 hexadecimal digits (76 characters in total); must be treated as a secret |
+| `expiration` | int \| null        | Expiration time (second-level timestamp). `null` indicates that no expiration time has been set                         |
+| `user_id`    | UUID               | Associated user ID. This is also the value that must be passed for the `?user_id=` parameter in all subsequent list APIs               |
+| `created_at` | datetime (ISO8601) | Creation time                                                 |
+| `updated_at` | datetime (ISO8601) | Update time                                                 |
+| `used_at`    | datetime \| null   | The time it was last used for authentication. `null` if it has never been used; can be used to identify "zombie tokens"                |
+
+---
+
+## Get the Account Token List
+
+### API Overview
+
+| Item   | Content                                                       |
+| --- | -------------------------------------------------------- |
+| Method  | `GET`                                                    |
+| URL | `https://platform.acedata.cloud/api/v1/platform-tokens/` |
+| Authentication  | ✅ Account token required                                                 |
+
+### Required Query Parameter
+
+> ⚠️ **You must include `?user_id=<your_user_id>`**. Reason: the list API performs permission checks on paginated results **object by object**. When `user_id` is not included, the first object that does not belong to you will be rejected, returning `403 permission_denied`.
+
+How to obtain `user_id`:
+
+1. Open [https://auth.acedata.cloud/user/profile](https://auth.acedata.cloud/user/profile) in a browser; the full UUID is displayed at the top of the page.
+2. Or directly fill it in using the `user_id` field from the return value of `POST /platform-tokens/`.
+
+### Query Parameters
+| Parameter         | Required  | Type     | Description                    |
+| ---------- | --- | ------ | --------------------- |
+| `user_id`  | ✅   | UUID   | User ID of the current account            |
+| `limit`    | ❌   | int    | Number of items per page, default 10, maximum 100     |
+| `offset`   | ❌   | int    | Offset                    |
+| `ordering` | ❌   | string | Sorting field, default `-created_at` |
+
+### Request Example
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/platform-tokens/?user_id=89518d07-5560-4b05-92c1-667f3ddf6a4b&limit=5' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+### Response (HTTP 200)
+
+```json
+{
+  "count": 2,
+  "items": [
+    {
+      "id": "51c575a2-801c-4211-bc47-711452a8c8c9",
+      "token": "platform-v1-<REDACTED>",
+      "expiration": null,
+      "user_id": "89518d07-5560-4b05-92c1-667f3ddf6a4b",
+      "created_at": "2026-04-26T15:41:32.761705Z",
+      "updated_at": "2026-04-26T15:41:32.761726Z",
+      "used_at": null
+    }
+  ]
+}
+```
+
+> The pagination response of this API uses `count` + `items`. Other platform APIs may use different structures; please refer to the corresponding documentation and actual responses.
+
+---
+
+## Get Account Token Details
+
+| Item   | Content                                                                      |
+| --- | ----------------------------------------------------------------------- |
+| Method  | `GET`                                                                   |
+| URL | `https://platform.acedata.cloud/api/v1/platform-tokens/<id>`（**no trailing slash**） |
+| Authentication  | ✅ Only the token creator or super administrator can access                                                       |
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/platform-tokens/51c575a2-801c-4211-bc47-711452a8c8c9' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+The returned structure is consistent with the list elements, `HTTP 200`.
+
+---
+
+## Delete Account Token
+
+| Item   | Content                                                                      |
+| --- | ----------------------------------------------------------------------- |
+| Method  | `DELETE`                                                                |
+| URL | `https://platform.acedata.cloud/api/v1/platform-tokens/<id>`（**no trailing slash**） |
+| Authentication  | ✅ Only the token creator or super administrator can delete                                                       |
+
+```shell
+curl -X DELETE 'https://platform.acedata.cloud/api/v1/platform-tokens/3264f1aa-cbe1-4e2c-a434-95adba4f8304' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+- Returns `HTTP 204 No Content` upon success, with no response body.
+- After deletion, the token becomes **invalid immediately**, and all services using it will immediately receive `401`.
+- Querying this `id` again will return `404`.
+
+> ⚠️ Deletion is irreversible. If you suspect the token has been leaked, you can **first create a new one, switch the business side, and then delete the old one**.
+
+---
+
+## Unsupported Operations
+
+| Operation         | HTTP | Description                                  |
+| ---------- | ---- | ----------------------------------- |
+| `PATCH` modification | 405  | After an account token is created, **no field modifications are supported**. For purposes such as renaming, delete and recreate it |
+| `PUT` replacement   | 405  | Same as above                                  |
+
+---
+
+## Error Code Quick Reference
+
+| HTTP | `code`               | Common Cause                          |
+| ---- | -------------------- | ----------------------------- |
+| 401  | `not_authenticated`  | No `Authorization` header provided, or the token has been deleted  |
+| 403  | `permission_denied`  | The list API does not include `?user_id=`, or accessing another person's token details |
+| 404  | `not_found`          | The `id` does not exist or has been deleted                 |
+| 405  | `method_not_allowed` | Sent `PATCH`/`PUT` to the detail API         |
+
+Error responses use the following unified format:
+
+```json
+{
+  "detail": "You do not have permission to perform this action.",
+  "code": "permission_denied",
+  "trace_id": "0a88956213edf6e62b71695ee2df0eff"
+}
+```
+
+When troubleshooting, provide the `trace_id` to customer service or include it in the support ticket to quickly locate the logs.
+
+---
+
+## Complete Code Examples
+
+### Python
+
+```python
+import os
+import requests
+
+BASE = "https://platform.acedata.cloud/api/v1"
+PLATFORM_TOKEN = os.environ["PLATFORM_TOKEN"]
+USER_ID = "89518d07-5560-4b05-92c1-667f3ddf6a4b"
+
+headers = {
+    "accept": "application/json",
+    "authorization": f"Bearer {PLATFORM_TOKEN}",
+    "content-type": "application/json",
+}
+
+# 1. Create a new token
+created = requests.post(f"{BASE}/platform-tokens/", headers=headers, json={}).json()
+print("New token:", created["token"])
+print("UserID:", created["user_id"])
+
+# 2. List
+listing = requests.get(
+    f"{BASE}/platform-tokens/",
+    headers=headers,
+    params={"user_id": USER_ID, "limit": 50},
+).json()
+print(f"{listing['count']} tokens in total")
+
+# 3. Delete (note: no trailing slash)
+resp = requests.delete(f"{BASE}/platform-tokens/{created['id']}", headers=headers)
+assert resp.status_code == 204, resp.text
+```
+
+### Node.js
+
+```javascript
+const BASE = 'https://platform.acedata.cloud/api/v1'
+const PLATFORM_TOKEN = process.env.PLATFORM_TOKEN
+const USER_ID = '89518d07-5560-4b05-92c1-667f3ddf6a4b'
+
+const headers = {
+  accept: 'application/json',
+  authorization: `Bearer ${PLATFORM_TOKEN}`,
+  'content-type': 'application/json',
+}
+
+// Create
+const created = await fetch(`${BASE}/platform-tokens/`, {
+  method: 'POST',
+  headers,
+  body: '{}',
+}).then((r) => r.json())
+
+// List
+const url = new URL(`${BASE}/platform-tokens/`)
+url.searchParams.set('user_id', USER_ID)
+const listing = await fetch(url, { headers }).then((r) => r.json())
+console.log(`${listing.count} tokens in total`)
+
+// Delete (no trailing slash)
+await fetch(`${BASE}/platform-tokens/${created.id}`, { method: 'DELETE', headers })
+```
+
+---
+
+## Use in Other Platform APIs
+
+Place `platform-v1-...` directly in the `Authorization: Bearer ...` header to call any platform API that requires authentication:
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/applications/?user_id=89518d07-5560-4b05-92c1-667f3ddf6a4b' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+> It is **completely different** from the 32-digit hexadecimal API credential used by the `https://api.acedata.cloud/**` business APIs (OpenAI, Midjourney, Suno, Veo, etc.). Do not mix them up—using an account token with a business API will result in `401`, and vice versa.
+
+---
+
+## Related APIs
+- [Get AceDataCloud Platform Service Application List](https://platform.acedata.cloud/documents/platform-application-list) — Use the account token to see which services you have applied for
+- [Create AceDataCloud Platform API Credentials](https://platform.acedata.cloud/documents/platform-credential-create) — Use the account token to issue 32-character credentials for business APIs
+- [Get AceDataCloud Platform API Call Records](https://platform.acedata.cloud/documents/platform-usage-list) — Check billing and troubleshoot errors
+- [Get AceDataCloud Platform Order List](https://platform.acedata.cloud/documents/platform-order-list) — Check recharge history

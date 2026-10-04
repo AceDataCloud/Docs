@@ -1,0 +1,215 @@
+---
+title: "X402 ファシリテーター統合"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+ファシリテーターは X402 リンク内のサーバーサイド決済コンポーネントです。クライアントは署名を担当し、Gateway またはあなたのサーバーがファシリテーターの `/verify` と `/settle` を呼び出します。
+
+Ace Data Cloud の生産ファシリテーターアドレスは次の通りです：
+
+```text
+https://facilitator.acedata.cloud
+```
+
+ソースコードリポジトリ：[https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire 規約
+
+Ace Data Cloud の X402 リンクは公式の x402 v2 を全面的に使用しており、v1 の `X-Payment` リクエストヘッダーは受け付けません。接続時には以下の三点に注意が必要です：
+
+- リクエストヘッダーは `PAYMENT-SIGNATURE` で、値は base64 エンコードされた JSON envelope です。
+- envelope の最上位は `x402Version: 2` でなければならず、`accepted` オブジェクトで今回選択した `scheme` と `network` を宣言します。
+- `network` は CAIP-2 識別子を使用し（例：`eip155:8453`）、`base` のような略称は使用できません。
+
+envelope 構造：
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+402 応答は JSON ボディの他に、同一のチャレンジ内容の base64 エンコードされた `PAYMENT-REQUIRED` レスポンスヘッダーを含み、クライアントがボディを解析せずに支払い要求を読み取ることができます。
+
+## コアインターフェース
+
+### `GET /supported`
+
+サポートされているネットワークとスキームを確認します：
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+返却例：
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": ["3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"]
+  }
+}
+```
+
+結果説明：
+
+- `network` は CAIP-2 識別子を使用し、`base`、`skale` のような略称は使用しません。
+- `/supported` はファシリテーターが対応する検証と決済能力を持っていることを示します。
+- Base、SKALE、Solana はすべて `exact` をサポートしています；`upto` は現在 Base のみで提供されています。
+- `signers` はファシリテーターが決済トランザクションを提出するためのアドレスです。
+- 特定の API がこれらのオプションを許可するかどうかは、その API の 402 `accepts` に基づきます。
+
+### `POST /verify`
+
+クライアントから送信された `PAYMENT-SIGNATURE` が特定の支払い要件を満たしているかどうかを検証します。
+
+リクエストボディ：
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+v2 の `paymentRequirements` フィールドは `scheme`、`network`、`asset`、`amount`、`payTo`、`maxTimeoutSeconds`、および `extra` で構成され、金額フィールドは `amount` です。API 402 応答の `accepts[]` には、クライアントが上限を読み取るための `maxAmountRequired` が追加で返されますが、これはファシリテーターリクエストボディのフィールドには含まれません。
+
+成功応答：
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+生産注文の支払いにおける `PAYMENT-RESPONSE` レスポンスヘッダーをデコードすると、決済結果が含まれます。Base 注文の支払いのプログラム実行結果：
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+結果説明：
+
+- `success=True` はファシリテーターの決済が成功したことを示します。
+- `transaction` はチェーン上のトランザクションハッシュで、注文の `pay_id` も同じ値が書き込まれます。
+- explorer で `1200000` atomic USDC の Base USDC 転送を見ることができます。
+- `errorReason=None` は今回の決済にビジネスエラーが返されなかったことを示します。
+
+検証が失敗した場合も通常は HTTP 200 を返しますが、`isValid` は `false` になります。ビジネス側は `invalidReason` を読み取るべきであり、HTTP ステータスコードだけを確認すべきではありません。
+
+### `POST /settle`
+
+すでに検証された承認をチェーン上に決済します。
+
+リクエストボディは `/verify` と基本的に一致します。`upto` の違いは：`paymentRequirements.amount` が決済時に実際の決済金額に書き換えられ、署名上限はファシリテーターが検証段階で記録し、決済時に実際の金額がその上限を超えないことを確認します。
+
+成功応答：
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+もし `upto` の実際の金額が 0 の場合、`transaction` は空の文字列になる可能性があり、チェーン上のトランザクションを発行する必要がないことを示します。
+
+## Ace Data Cloud Gateway がファシリテーターを使用する方法
+
+Ace Data Cloud API Gateway のリンクは次の通りです：
+
+1. クライアントが最初に API をリクエストし、`Authorization` と `PAYMENT-SIGNATURE` を含めません。
+2. Gateway がリクエストの予想価格を計算し、402 と `accepts` を返します。
+3. クライアントが署名後、`PAYMENT-SIGNATURE` を付けて再試行します。
+4. Gateway が `PAYMENT-SIGNATURE` をデコードし、一致する支払い要件を選択します。
+5. Gateway がファシリテーターの `/verify` を呼び出します。
+6. `/verify` が成功した後、Gateway がリクエストをターゲット API に通します。
+7. ターゲット API が応答した後、Gateway が `/record` ステージでファシリテーターの `/settle` を呼び出します。
+8. Gateway がチェーン上のトランザクションハッシュを使用記録メタデータに書き込みます。
+`exact` はステップ 7 での決済署名金額；`upto` はステップ 7 で実際の使用量に基づいて `amount` に書き込み、実際の金額を決済します。
+
+## 自分の API の接続方法
+
+自分の API が X402 をサポートするようにするには、次の構造で実装できます：
+
+1. 各有料インターフェースのために `paymentRequirements` を準備し、ネットワーク、金額、受取先アドレス、資産アドレス、署名ドメインを含めます。
+2. リクエストに `PAYMENT-SIGNATURE` がない場合、HTTP 402 と `accepts` を返します。
+3. リクエストに `PAYMENT-SIGNATURE` がある場合、Base64 デコードして `paymentPayload` を取得します。
+4. Facilitator の `/verify` を呼び出します。
+5. 検証が成功した後、ビジネスロジックを実行します。
+6. ビジネスが成功した後、Facilitator の `/settle` を呼び出します。
+7. `payer`、`transaction`、`amount`、`network` を保存して、照合のために使用します。
+
+サーバーは自分で生成した `paymentRequirements` を使って `/verify` と `/settle` を呼び出す必要があり、クライアントから返された金額、受取先アドレス、または資産アドレスを信頼しないでください。
+
+## リプレイ保護
+
+Facilitator は nonce を記録します。同じ nonce の承認は再度検証および決済できません。
+
+これは意味します：
+
+- クライアントは毎回新しい envelope に署名する必要があります；
+- `/settle` が取引を提出したが一時的に確認されていない場合、同じ nonce を使って `/settle` を再試行して冪等性の照合を行うことができます；
+- 同じ `PAYMENT-SIGNATURE` をキャッシュして複数回の API 呼び出しに使用しないでください。
+
+## 一般的なエラー
+
+| エラー                                           | 一般的な原因                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `Authorization nonce already processed`      | 同じ `PAYMENT-SIGNATURE` を再利用しました。                                    |
+| `Authorization destination mismatch`         | クライアント署名の `to` が payment requirement の `payTo` と一致しません。                |
+| `invalid_upto_evm_payload_invalid_signature` | `upto` タイプデータの chainId、facilitator、Permit2 ドメインまたは署名アドレスが一致しません。 |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | ウォレットがまだ Permit2 に対して十分な USDC アローワンスを承認していません。                        |
+| `Payer has insufficient USDC balance`        | 支払いウォレットの USDC が不足しています。                                                    |
+| `Solana signer private key not configured`   | Facilitator が手数料支払い者として署名する必要がありますが、サーバーに Solana signer の設定が不足しています。           |

@@ -1,0 +1,289 @@
+---
+title: "Посібник з інтеграції Go SDK"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`github.com/AceDataCloud/SDK/go`](https://pkg.go.dev/github.com/AceDataCloud/SDK/go) — це офіційний Go SDK від Ace Data Cloud, який обгортає chat completions / images / video / music / search на `api.acedata.cloud` у стиль методів ланцюга `client.OpenAI().Chat().Completions().Create(...)`, має вбудовану SSE потокову (на основі каналу), автоматичне повторне спробування з відступом та типізовані помилки.
+
+Стиль узгоджується з `context.Context` + функціональними опціями, підходить для використання в будь-якому Go бекенд-сервісі або CLI.
+
+Джерела та документація:
+
+- Репозиторій SDK: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- Go модуль: [https://pkg.go.dev/github.com/AceDataCloud/SDK/go](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+
+## Встановлення
+
+```bash
+go get github.com/AceDataCloud/SDK/go
+```
+
+Вивід перевірки версії чистого Go модуля:
+
+```text
+$ go list -m github.com/AceDataCloud/SDK/go
+github.com/AceDataCloud/SDK/go v0.0.0-20260505072132-4a3d921f9bb4
+```
+
+Роз'яснення результату:
+
+- Наразі немає позначки semver, `go get` завантажує коміт псевдовершини `v0.0.0-<timestamp>-<sha>`; ця версія буде зафіксована в `go.sum`, члени команди, завантажуючи той самий код, отримають абсолютно однакові залежності.
+- Go SDK наразі стабільний в основному на `chat.completions` (синхронний + потоковий), мультимедійні ресурси (`images` / `video` / `audio`) та опитування `TaskHandle` перебувають на альфа-етапі. Для сценаріїв, які потребують цих можливостей, будь ласка, спочатку оберіть [TypeScript SDK](https://platform.acedata.cloud/documents/sdk-typescript) або [Python SDK](https://platform.acedata.cloud/documents/sdk-python).
+
+## Підготовка API Token
+
+Згідно з [Огляд SDK - Отримання API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) отримайте токен, а потім у shell `export`:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+При створенні клієнта явно впроваджуйте через опцію `WithAPIToken(...)`; Go SDK не буде автоматично зчитувати змінні середовища, потрібно, щоб бізнес-код викликав `os.Getenv`, так у сценаріях з кількома обліковими записами або самоперевіркою буде більш контрольовано.
+
+## Приклад 1: chat.completions (непотоковий)
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    res, err := client.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Reply with exactly: ADC_GO_SDK_OK"}},
+        MaxTokens: 20,
+    })
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("id", res["id"])
+    fmt.Println("model", res["model"])
+    choices := res["choices"].([]any)
+    msg := choices[0].(map[string]any)["message"].(map[string]any)
+    fmt.Println("content", msg["content"])
+    usage := res["usage"].(map[string]any)
+    fmt.Printf("usage prompt=%v completion=%v total=%v\n",
+        usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
+}
+```
+
+Результат виконання програми:
+
+```text
+elapsed_ms 6436
+id chatcmpl-89DHExvFvBc4ciIPfolZYUOy7ivxv
+model gpt-4o-mini
+content ADC_GO_SDK_OK
+usage prompt=16 completion=5 total=21
+```
+
+Роз'яснення результату:
+
+- `id` — це ID відповіді, сумісний з OpenAI, який можна знайти в консолі [історії використання](https://platform.acedata.cloud/console/usages).
+- `content ADC_GO_SDK_OK` — це реальний вихід моделі, що підтверджує, що SDK не змінив відповідь.
+- 6.4 секунди, більшість з яких витрачено на перше TLS з'єднання + генерацію моделі, після повторного використання екземпляра клієнта затримка та TS / Python однакові (приблизно 2~3 секунди).
+- Відповідь завжди є `map[string]any`, потрібно самостійно виконувати приведення типів; це поточний компроміс дизайну Go SDK — не вводити узагальнені структури, щоб уникнути сильної залежності від єдиної схеми відповіді для маршрутизації кількох моделей.
+
+## Приклад 2: chat.completions (SSE потоковий)
+
+`CreateStream` повертає два канали: `&lt;-chan map[string]any` — це поступово розібрані SSE частини, `&lt;-chan error` з'явиться лише після завершення потоку (нормально або з помилкою).
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Count from 1 to 5 separated by spaces. Just the numbers."}},
+        MaxTokens: 30,
+    })
+
+    first := int64(-1)
+    cnt := 0
+    collected := ""
+    for chunk := range chunks {
+        if first < 0 {
+            first = time.Since(t0).Milliseconds()
+        }
+        cnt++
+        if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+            if c0, ok := ch[0].(map[string]any); ok {
+                if d, ok := c0["delta"].(map[string]any); ok {
+                    if s, ok := d["content"].(string); ok {
+                        collected += s
+                    }
+                }
+            }
+        }
+    }
+    if e, ok := <-errs; ok && e != nil {
+        fmt.Println("stream_err", e)
+    }
+    fmt.Println("total_elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("first_chunk_ms", first)
+    fmt.Println("chunks", cnt)
+    fmt.Println("collected", collected)
+}
+```
+
+Результат виконання програми:
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+Роз'яснення результату:
+
+- Перша частина 1633 мс, 13 частин в цілому зайняли 1816 мс — наступні 12 частин зайняли лише 183 мс.
+- `range chunks` природно завершить цикл, коли потік закінчиться; канал `errs` завжди видасть максимум один елемент, з `ok` перевіркою можна отримати помилку.
+- Перевага цього стилю каналу полягає в тому, що його можна безпосередньо використовувати з `select` у поєднанні з `context.Context` для тайм-ауту/скасування, без необхідності додаткової упаковки.
+
+## Приклад 3: типізоване оброблення помилок
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    bad, _ := adc.NewClient(adc.WithAPIToken("definitely-not-a-real-token"))
+    _, err := bad.OpenAI().Chat().Completions().Create(context.Background(), adc.ChatCompletionRequest{
+        Model:    "gpt-4o-mini",
+        Messages: []map[string]any{{"role": "user", "content": "привіт"}},
+        MaxTokens: 5,
+    })
+    if err != nil {
+        var apiErr *adc.APIError
+        if errors.As(err, &apiErr) {
+            fmt.Println("статус:", apiErr.StatusCode)
+            fmt.Println("код:", apiErr.Code)
+            fmt.Println("повідомлення:", apiErr.Message)
+        } else {
+            fmt.Println("інша помилка:", err)
+        }
+    }
+}
+```
+
+`adc.APIError` одночасно покриває 401 / 403 / 404 / 422 / 429 / 5xx, бізнес-код використовує `errors.As`, щоб отримати структуровані поля. HTTP статус-коди, серверні `code` та `message` залишаються без змін. Помилки мережевого рівня (помилка DNS, відмова з'єднання тощо) обробляються стандартними помилками Go, такими як `context.DeadlineExceeded`, `net.OpError` і не будуть поглинуті.
+
+## Конфігураційні параметри (функціональні параметри)
+
+```go
+client, err := adc.NewClient(
+    // Обов'язково: API токен; рекомендується читати з змінної середовища
+    adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")),
+
+    // Коренева адреса API платформи, за замовчуванням https://api.acedata.cloud
+    adc.WithBaseURL("https://api.acedata.cloud"),
+
+    // Час очікування для одного запиту, за замовчуванням 5 хвилин
+    adc.WithTimeout(60*time.Second),
+
+    // Кількість автоматичних повторів, за замовчуванням 2
+    adc.WithMaxRetries(2),
+
+    // Користувацькі заголовки запиту
+    adc.WithHeader("x-app", "my-service/1.0"),
+)
+```
+
+`NewClient` повертає `(*Client, error)`: коли токен порожній **і** не передано `WithPaymentHandler` (X402), відразу виникає помилка, що дозволяє виявити відсутність конфігурації під час запуску служби.
+
+## Розширене: повторне використання Client
+
+Go SDK використовує один `*http.Client` + `http.Transport`, має вбудований пул з'єднань та повторне використання HTTP/2. **Рекомендується створювати лише один `*adc.Client` протягом життєвого циклу процесу** і ділитися ним між goroutine — всі методи є безпечними для паралельного використання.
+
+```go
+// pkg/acelearn/client.go
+var sharedClient *adc.Client
+
+func init() {
+    var err error
+    sharedClient, err = adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_TOKEN")))
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+
+func Chat(ctx context.Context, model, prompt string) (string, error) {
+    res, err := sharedClient.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:    model,
+        Messages: []map[string]any{{"role": "user", "content": prompt}},
+    })
+    if err != nil {
+        return "", err
+    }
+    return res["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string), nil
+}
+```
+
+## Обмеження та дорожня карта
+
+Поточна стабільна / рекомендована для виробництва:
+
+- ✅ `client.OpenAI().Chat().Completions().Create` синхронний нестрімовий
+- ✅ `client.OpenAI().Chat().Completions().CreateStream` SSE стрімовий
+- ✅ `errors.As` + `APIError` обробка помилок
+- ✅ Автоматичні повтори + експоненційна затримка
+
+Все ще в альфа-версії:
+
+- 🚧 `client.Images()` / `client.Video()` / `client.Audio()` — інтерфейси в процесі розвитку, рекомендується спочатку використовувати HTTP безпосередньо
+- 🚧 `TaskHandle` асинхронне опитування — ще не доступно на поверхні Go SDK
+- 🚧 `WithPaymentHandler` (X402 оплата на ланцюзі) — в планах, наразі X402 підтримується лише [TypeScript](https://platform.acedata.cloud/documents/x402-typescript-sdk) та [Python](https://platform.acedata.cloud/documents/x402-python-sdk)
+
+## Як перевірити залишок
+
+Через [консоль Ace Data Cloud - Список додатків](https://platform.acedata.cloud/console/applications) можна переглянути залишок на рахунку.
+
+Через [консоль Ace Data Cloud - Історія використання](https://platform.acedata.cloud/console/usages) можна переглянути всю історію використання та деталі витрат.
+
+## Дізнатися більше
+
+- 🟦 [`github.com/AceDataCloud/SDK/go` на pkg.go.dev](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+- 🗂 [Джерело SDK](https://github.com/AceDataCloud/SDK/tree/main/go)
+- 📘 [Посібник з інтеграції TypeScript SDK](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Посібник з інтеграції Python SDK](https://platform.acedata.cloud/documents/sdk-python)
+- 🔌 [SDK + X402 платіжні хуки](https://platform.acedata.cloud/documents/sdk-x402-payment)

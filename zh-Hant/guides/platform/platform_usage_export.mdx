@@ -1,0 +1,146 @@
+---
+title: "匯出 AceDataCloud 平台 API 呼叫紀錄"
+description: "Platform 整合指南 - Ace Data Cloud"
+---
+
+將目前帳戶的 API 呼叫明細直接下載為 CSV，適合財務對帳、離線分析或儲存大量紀錄。若只需在頁面中查看少量明細，請先使用[呼叫紀錄列表](https://platform.acedata.cloud/documents/platform-usage-list)。
+
+## 準備工作
+
+1. 登入 [AceDataCloud 平台](https://platform.acedata.cloud)。
+2. 在 [Account Token 控制台](https://platform.acedata.cloud/console/platform-tokens)建立帳戶權杖，並立即儲存至密碼管理器或 Secret Manager。
+3. 視需要從[服務申請列表](https://platform.acedata.cloud/documents/platform-application-list)、[API 憑證列表](https://platform.acedata.cloud/documents/platform-credential-list)或[API 列表](https://platform.acedata.cloud/documents/platform-api-list)取得篩選 ID。
+
+完整權杖說明請見[管理帳戶權杖](https://platform.acedata.cloud/documents/platform-token)。帳戶權杖與呼叫業務 API 的 Credential 不可混用。
+
+```shell
+export PLATFORM_TOKEN='你的账户令牌'
+```
+
+## 介面概覽
+
+| 項目          | 內容                                                         |
+| ----------- | ---------------------------------------------------------- |
+| 方法          | `GET`                                                      |
+| URL         | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| 驗證          | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope | `usage:read`（`platform:read` / `platform` 可展開包含）           |
+| 回應          | `200 text/csv; charset=utf-8`                              |
+| 檔案名稱       | `usages.csv`                                               |
+
+本介面同步串流回傳 CSV，不會建立匯出任務，也不回傳 JSON 或下載連結。只有當起訖時間都未提供時，才預設匯出目前自然月開始至目前時刻的紀錄；僅提供一側邊界時，另一側不會自動補成本月邊界。
+
+## 查詢參數
+
+| 參數                | 類型       | 必填  | 預設     | 說明                         |
+| ----------------- | -------- | --- | ------ | -------------------------- |
+| `perspective`     | string   | 否   | `both` | `billing`、`actor` 或 `both` |
+| `service_id`      | UUID     | 否   | —      | 依服務篩選；支援重複參數               |
+| `application_id`  | UUID     | 否   | —      | 依 Application 篩選；支援重複參數    |
+| `api_id`          | UUID     | 否   | —      | 依 API 篩選；支援重複參數            |
+| `credential_id`   | UUID     | 否   | —      | 依 API 憑證篩選；支援重複參數          |
+| `status_code`     | integer  | 否   | —      | 支援重複或逗號分隔值                 |
+| `created_at_from` | datetime | 否   | —      | ISO 8601 起始時間              |
+| `created_at_to`   | datetime | 否   | —      | ISO 8601 結束時間              |
+
+匯出範圍始終限制在目前帳戶作為付款主體和/或實際呼叫者可見的紀錄，不支援跨帳戶匯出。
+
+## 請求範例
+
+直接儲存目前月份 CSV：
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+依 Application、時間和狀態碼匯出：
+
+```shell
+export APPLICATION_ID='你的 Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Python 串流儲存並檢查完整性：
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("服务器没有返回 CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"导出不完整：{last_line}")
+```
+
+## CSV 欄位
+
+CSV 表頭順序固定為：
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| 欄位                | 說明                         |
+| ----------------- | -------------------------- |
+| `Usage ID`        | 呼叫紀錄 ID                    |
+| `API`             | API 標題；無法比對時可能為 API ID 或空值 |
+| `Status Code`     | HTTP 狀態碼                   |
+| `Deducted Amount` | 最終實際扣除額度                   |
+| `Original Amount` | 套用折扣前的原始額度                 |
+| `Trace ID`        | 請求追蹤識別                     |
+| `Created At`      | 紀錄建立時間，ISO 8601            |
+
+額度單位由對應 Application 的 `service.unit` 決定。
+
+## 判斷匯出是否完整
+
+單次最多輸出 1,000,000 筆資料。伺服器端已經開始回傳 CSV 後，無法再將中途錯誤改成其他 HTTP 狀態，因此用戶端必須檢查最後一行：
+
+- `# truncated:`：達到行數上限；依較小時間窗口分段匯出。
+- `# error:`：串流讀取中斷；縮小範圍後重新匯出。
+
+對帳程式看到任一 marker 都必須將檔案視為不完整，不能靜默入帳。
+
+## 錯誤與重試
+
+| 情況                          | 處理方式                                  |
+| --------------------------- | ------------------------------------- |
+| `400 usage_history_expired` | 使用回應中的 `available_from` 調整至最近 60 天範圍內 |
+| `401 not_authenticated`     | 檢查 Account Token 是否存在、正確且未刪除          |
+| 非 CSV 回應                    | 不要儲存為成功檔案；先讀取錯誤回應並修正請求                |
+| 下載中斷或 marker                | 縮小時間窗口，使用退避策略重新匯出                     |
+
+## 下一步
+
+- [查看呼叫紀錄](https://platform.acedata.cloud/documents/platform-usage-list)：線上篩選和定位單次請求。
+- [彙整呼叫量](https://platform.acedata.cloud/documents/platform-usage-aggregate)：查看依日期、API 或模型彙總的資料。
+- [查看服務申請詳情](https://platform.acedata.cloud/documents/platform-application-detail)：核對額度單位與剩餘額度。

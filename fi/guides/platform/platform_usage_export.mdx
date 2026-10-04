@@ -1,0 +1,146 @@
+---
+title: "AceDataCloud-alustan API-kutsutietojen vienti"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Lataa nykyisen tilin API-kutsujen erittelyt suoraan CSV-tiedostona; soveltuu taloudelliseen täsmäytykseen, offline-analyysiin tai suurten tietuemäärien tallentamiseen. Jos tarvitset vain pienen määrän erittelyjä tarkasteltavaksi sivulla, käytä ensin [kutsutietueluetteloa](https://platform.acedata.cloud/documents/platform-usage-list).
+
+## Valmistelut
+
+1. Kirjaudu [AceDataCloud-alustalle](https://platform.acedata.cloud).
+2. Luo tilitunnus [Account Token -konsolissa](https://platform.acedata.cloud/console/platform-tokens) ja tallenna se välittömästi salasananhallintaan tai Secret Manageriin.
+3. Hae tarvittaessa suodatus-ID:t [palveluhakemusluettelosta](https://platform.acedata.cloud/documents/platform-application-list), [API-tunnistetietoluettelosta](https://platform.acedata.cloud/documents/platform-credential-list) tai [API-luettelosta](https://platform.acedata.cloud/documents/platform-api-list).
+
+Täydelliset tunnusohjeet ovat kohdassa [tilitunnusten hallinta](https://platform.acedata.cloud/documents/platform-token). Tilitunnusta ja liiketoiminta-API:n kutsumiseen käytettävää Credentialia ei voi käyttää keskenään vaihtokelpoisesti.
+
+```shell
+export PLATFORM_TOKEN='tilitunnuksesi'
+```
+
+## Rajapinnan yleiskatsaus
+
+| Kohta       | Sisältö                                                    |
+| ----------- | ---------------------------------------------------------- |
+| Menetelmä   | `GET`                                                      |
+| URL         | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| Todennus    | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope | `usage:read` (`platform:read` / `platform` sisältää tämän) |
+| Vastaus     | `200 text/csv; charset=utf-8`                              |
+| Tiedostonimi | `usages.csv`                                              |
+
+Tämä rajapinta palauttaa CSV:n synkronisesti suoratoistona, eikä se luo vientitehtävää tai palauta JSON:ia tai latauslinkkiä. Vain silloin, kun kumpaakaan alku- tai loppuaikaa ei anneta, viedään oletuksena tietueet kuluvan kalenterikuukauden alusta nykyhetkeen; jos vain yksi raja annetaan, toista rajaa ei täydennetä automaattisesti kuluvan kuukauden rajaksi.
+
+## Kyselyparametrit
+
+| Parametri         | Tyyppi   | Pakollinen | Oletus | Kuvaus                                      |
+| ----------------- | -------- | ---------- | ------ | ------------------------------------------- |
+| `perspective`     | string   | Ei         | `both` | `billing`, `actor` tai `both`               |
+| `service_id`      | UUID     | Ei         | —      | Suodata palvelun mukaan; tukee toistuvia parametreja |
+| `application_id`  | UUID     | Ei         | —      | Suodata Applicationin mukaan; tukee toistuvia parametreja |
+| `api_id`          | UUID     | Ei         | —      | Suodata API:n mukaan; tukee toistuvia parametreja |
+| `credential_id`   | UUID     | Ei         | —      | Suodata API-tunnistetietojen mukaan; tukee toistuvia parametreja |
+| `status_code`     | integer  | Ei         | —      | Tukee toistuvia tai pilkuin eroteltuja arvoja |
+| `created_at_from` | datetime | Ei         | —      | ISO 8601 -alkuaika                          |
+| `created_at_to`   | datetime | Ei         | —      | ISO 8601 -loppuaika                         |
+
+Vientialue rajoittuu aina tietueisiin, jotka ovat nykyisen tilin nähtävissä maksavana osapuolena ja/tai todellisena kutsujana; tilien välistä vientiä ei tueta.
+
+## Pyyntöesimerkit
+
+Tallenna kuluvan kuukauden CSV suoraan:
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Vie Applicationin, ajan ja tilakoodin mukaan:
+
+```shell
+export APPLICATION_ID='Application ID:si'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Python-tallennus suoratoistona ja eheyden tarkistus:
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("服务器没有返回 CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"导出不完整：{last_line}")
+```
+
+## CSV-sarakkeet
+
+CSV-otsikon järjestys on kiinteä:
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| Sarake             | Kuvaus                                      |
+| ------------------ | ------------------------------------------- |
+| `Usage ID`         | Kutsutietueen ID                            |
+| `API`              | API:n otsikko; jos vastaavuutta ei löydy, voi olla API ID tai tyhjä arvo |
+| `Status Code`      | HTTP-tilakoodi                              |
+| `Deducted Amount`  | Lopullisesti todellisuudessa vähennetty kiintiö |
+| `Original Amount`  | Alkuperäinen kiintiö ennen sovellusalennusta |
+| `Trace ID`         | Pyynnön seurantaidentiteetti                 |
+| `Created At`       | Tietueen luontiaika, ISO 8601               |
+
+Kiintiöyksikkö määräytyy vastaavan Applicationin `service.unit`-arvon mukaan.
+
+## Viennin täydellisyyden tarkistaminen
+
+Yhdellä kertaa tulostetaan enintään 1 000 000 tietuetta. Kun palvelin on jo alkanut palauttaa CSV:tä, kesken tapahtuvaa virhettä ei voida enää muuttaa toiseksi HTTP-tilaksi, joten asiakkaan on tarkistettava viimeinen rivi:
+
+- `# truncated:`: rivimääräraja saavutettiin; vie tiedot osissa pienempiä aikaikkunoita käyttäen.
+- `# error:`: suoratoistoluku keskeytyi; pienennä aluetta ja vie uudelleen.
+
+Täsmäytysohjelman on käsiteltävä tiedosto epätäydellisenä, jos se havaitsee kumman tahansa markerin, eikä sitä saa kirjata hiljaisesti.
+
+## Virheet ja uudelleenyritykset
+
+| Tilanne                     | Käsittelytapa                                      |
+| --------------------------- | ------------------------------------------------- |
+| `400 usage_history_expired` | Säädä vastauksen `available_from`-arvon avulla viimeisten 60 päivän alueelle |
+| `401 not_authenticated`     | Tarkista, että Account Token on olemassa, oikein ja sitä ei ole poistettu |
+| Muu kuin CSV-vastaus        | Älä tallenna onnistuneena tiedostona; lue ensin virhevastaus ja korjaa pyyntö |
+| Latauksen keskeytys tai marker | Pienennä aikaikkunaa ja vie uudelleen takaisinvetostrategiaa käyttäen |
+
+## Seuraavat vaiheet
+
+- [Tarkastele kutsutietueita](https://platform.acedata.cloud/documents/platform-usage-list): suodata verkossa ja paikanna yksittäisiä pyyntöjä.
+- [Koosta kutsumäärät](https://platform.acedata.cloud/documents/platform-usage-aggregate): tarkastele päivämäärän, API:n tai mallin mukaan koottuja tietoja.
+- [Tarkastele palveluhakemuksen tietoja](https://platform.acedata.cloud/documents/platform-application-detail): tarkista kiintiöyksikkö ja jäljellä oleva kiintiö.

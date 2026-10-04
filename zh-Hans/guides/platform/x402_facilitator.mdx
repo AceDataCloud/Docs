@@ -1,0 +1,230 @@
+---
+title: "X402 Facilitator 集成"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+Facilitator 是 X402 链路中的服务端结算组件。客户端负责签名，Gateway 或你的服务端负责调用 Facilitator 的 `/verify` 和 `/settle`。
+
+Ace Data Cloud 的生产 Facilitator 地址为：
+
+```text
+https://facilitator.acedata.cloud
+```
+
+源码仓库：[https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire 约定
+
+Ace Data Cloud 的 X402 链路已全量使用官方 x402 v2，不再接受 v1 的 `X-Payment` 请求头。接入时需要注意三点：
+
+- 请求头是 `PAYMENT-SIGNATURE`，值是 base64 编码的 JSON envelope。
+- envelope 顶层必须是 `x402Version: 2`，并用 `accepted` 对象声明本次选择的 `scheme` 和 `network`。
+- `network` 使用 CAIP-2 标识（如 `eip155:8453`），不能写 `base` 这类简称。
+
+envelope 结构：
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+402 响应除 JSON body 外，还会带一个 `PAYMENT-REQUIRED` 响应头，值是同一份挑战内容的 base64 编码，便于客户端在不解析 body 的情况下读取支付要求。
+
+## 核心接口
+
+### `GET /supported`
+
+查看支持的网络和 scheme：
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+返回示例：
+
+```json
+{
+  "kinds": [
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": {
+        "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708"
+      }
+    },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "eip155:1187947933"
+    },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": {
+        "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"
+      }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": [
+      "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"
+    ]
+  }
+}
+```
+
+结果说明：
+
+- `network` 使用 CAIP-2 标识，不是 `base`、`skale` 这类简称。
+- `/supported` 表示 Facilitator 具备对应验证与结算能力。
+- Base、SKALE 和 Solana 都支持 `exact`；`upto` 目前只在 Base 上提供。
+- `signers` 是 Facilitator 用于提交结算交易的地址。
+- 某个具体 API 是否允许这些选项，仍以该 API 的 402 `accepts` 为准。
+
+### `POST /verify`
+
+验证客户端传来的 `PAYMENT-SIGNATURE` 是否满足某个 payment requirement。
+
+请求体：
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+v2 的 `paymentRequirements` 字段是 `scheme`、`network`、`asset`、`amount`、`payTo`、`maxTimeoutSeconds` 和 `extra`，金额字段是 `amount`。API 402 响应的 `accepts[]` 里还会额外返回 `maxAmountRequired` 供客户端读取上限，但它不属于 Facilitator 请求体的字段。
+
+成功响应：
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+生产订单支付的 `PAYMENT-RESPONSE` 响应头解码后包含 settlement 结果。Base 订单支付的程序运行结果：
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+结果说明：
+
+- `success=True` 表示 Facilitator settlement 成功。
+- `transaction` 是链上交易哈希，订单的 `pay_id` 也写入同一个值。
+- explorer 上可以看到 `1200000` atomic USDC 的 Base USDC 转账。
+- `errorReason=None` 表示这次 settlement 没有返回业务错误。
+
+验证失败也通常返回 HTTP 200，但 `isValid` 为 `false`。业务侧应该读取 `invalidReason`，而不是只看 HTTP 状态码。
+
+### `POST /settle`
+
+把已经验证过的授权结算到链上。
+
+请求体和 `/verify` 基本一致。`upto` 的区别是：`paymentRequirements.amount` 在 settle 时改写为实际结算金额；签名上限由 Facilitator 在 verify 阶段记录，settle 时校验实际金额不得超过该上限。
+
+成功响应：
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+如果 `upto` 实际金额为 0，`transaction` 可能为空字符串，表示无需发链上交易。
+
+## Ace Data Cloud Gateway 如何使用 Facilitator
+
+Ace Data Cloud API Gateway 的链路如下：
+
+1. 客户端第一次请求 API，不带 `Authorization` 和 `PAYMENT-SIGNATURE`。
+2. Gateway 计算请求的预估价格，返回 402 和 `accepts`。
+3. 客户端签名后带 `PAYMENT-SIGNATURE` 重试。
+4. Gateway 解码 `PAYMENT-SIGNATURE`，选择匹配的 payment requirement。
+5. Gateway 调用 Facilitator `/verify`。
+6. `/verify` 成功后，Gateway 放行请求到目标 API。
+7. 目标 API 返回后，Gateway 在 `/record` 阶段调用 Facilitator `/settle`。
+8. Gateway 把链上交易哈希写入使用记录 metadata。
+
+`exact` 在步骤 7 结算签名金额；`upto` 在步骤 7 根据真实用量写入 `amount`，再结算实际金额。
+
+## 自己的 API 如何接入
+
+如果你要让自己的 API 支持 X402，可以按这个结构实现：
+
+1. 为每个付费接口准备 `paymentRequirements`，包含网络、金额、收款地址、资产地址和签名 domain。
+2. 如果请求没有 `PAYMENT-SIGNATURE`，返回 HTTP 402 和 `accepts`。
+3. 如果请求有 `PAYMENT-SIGNATURE`，Base64 解码得到 `paymentPayload`。
+4. 调用 Facilitator `/verify`。
+5. 验证成功后执行业务逻辑。
+6. 业务成功后调用 Facilitator `/settle`。
+7. 保存 `payer`、`transaction`、`amount`、`network` 以便对账。
+
+服务端必须用自己生成的 `paymentRequirements` 调 `/verify` 和 `/settle`，不要信任客户端回传的金额、收款地址或资产地址。
+
+## 重放保护
+
+Facilitator 会记录 nonce。相同 nonce 的授权不能重复验证和结算。
+
+这意味着：
+
+- 客户端每次请求都应该签一个新的 envelope；
+- 如果 `/settle` 已提交交易但暂时没有确认，可以用相同 nonce 重试 `/settle` 做幂等对账；
+- 不要把同一个 `PAYMENT-SIGNATURE` 缓存后用于多次 API 调用。
+
+## 常见错误
+
+| 错误 | 常见原因 |
+| --- | --- |
+| `Authorization nonce already processed` | 重复使用了同一个 `PAYMENT-SIGNATURE`。 |
+| `Authorization destination mismatch` | 客户端签名中的 `to` 与 payment requirement 的 `payTo` 不一致。 |
+| `invalid_upto_evm_payload_invalid_signature` | `upto` typed data 的 chainId、facilitator、Permit2 domain 或签名地址不一致。 |
+| `PERMIT2_ALLOWANCE_REQUIRED` | 钱包还没有对 Permit2 approve 足够 USDC allowance。 |
+| `Payer has insufficient USDC balance` | 付款钱包 USDC 不足。 |
+| `Solana signer private key not configured` | Facilitator 需要作为 fee payer 签名，但服务端缺少 Solana signer 配置。 |

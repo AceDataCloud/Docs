@@ -1,0 +1,319 @@
+---
+title: "管理 AceDataCloud 平台账户令牌（Account Token）"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+**账户令牌（Account Token，旧称 Platform Token）** 是开发者通过编程方式管理 AceDataCloud 平台资源（服务申请、API 凭证、订单、调用记录、余额、文件等）的"账号级密钥"。它的作用类似前端登录后的用户 Token，默认没有过期时间；普通用户只能管理自己的令牌，超级管理员可按权限管理其他账户令牌。
+
+账户令牌以所属账号的当前权限访问平台接口：基础权限、直接授予的权限及所属用户组权限合并生效；入组或撤组后，下次请求即按新权限判断。访问具体申请、订单等资源仍需通过归属校验。账户令牌默认不过期，请只在可信环境使用并妥善保管。
+
+> ℹ️ 本接口属于 **AceDataCloud 平台管理 API**，统一前缀 `https://platform.acedata.cloud/api/v1/`。完整接口索引见[获取 AceDataCloud 平台文档列表](https://platform.acedata.cloud/documents/platform-document-list)。
+
+## 账户令牌 vs API 凭证
+
+新手最容易混淆的两类密钥，请先看清楚：
+
+| 维度     | **账户令牌**（本文档）                                         | **API 凭证（Credential）**                                                            |
+| -------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| 用途     | 调用 `https://platform.acedata.cloud/**` 管理类接口             | 调用 `https://api.acedata.cloud/**` 业务接口（OpenAI、Midjourney、Suno、Veo 等）       |
+| 格式     | `platform-v1-` + 64 位十六进制（共 76 字符）                   | 32 位十六进制                                                                          |
+| 一个账号 | 通常 1–2 枚                                                    | 每个服务申请 1–N 枚                                                                    |
+| 创建入口 | [Account Token 控制台](https://platform.acedata.cloud/console/platform-tokens) | [创建 AceDataCloud 平台 API 凭证](https://platform.acedata.cloud/documents/platform-credential-create) |
+| 失效条件 | 删除后立即失效；`expiration` 非空时到期失效                                           | 可以设额度上限、过期时间、绑定来源 IP                                                  |
+
+如果你只是想调一下 GPT-4.1，要的是 **API 凭证**，不是账户令牌。
+如果你要写自动化脚本管理充值、看每月账单、批量发凭证给团队成员，那才用账户令牌。
+
+---
+
+## 在控制台一键创建（推荐）
+
+1. 登录 [https://platform.acedata.cloud](https://platform.acedata.cloud)。
+2. 进入侧边栏 →「开发者」→「[Account Token](https://platform.acedata.cloud/console/platform-tokens)」。
+3. 点击右上角「创建」按钮，立刻得到一枚 `platform-v1-...` 令牌，**点复制按钮保存到密码管理器**。
+
+![Account Token 控制台](https://cdn.acedata.cloud/6g86oz.png)
+
+> ⚠️ 当前创建、列表和详情响应都会返回令牌明文。请把整个响应按秘密处理，不要写入日志、分析平台或前端持久化；客户端也不应依赖列表长期保持明文返回。
+
+---
+
+## 用 API 创建账户令牌
+
+### 接口概览
+
+| 项     | 内容                                                                  |
+| ------ | --------------------------------------------------------------------- |
+| 方法   | `POST`                                                                |
+| URL    | `https://platform.acedata.cloud/api/v1/platform-tokens/`              |
+| 鉴权   | ✅ 任意已有的账户令牌 或 浏览器登录态 JWT                              |
+| Body   | `application/json`（可传空对象 `{}`）                                 |
+
+### 鉴权说明（鸡生蛋问题）
+
+> 第一枚令牌怎么来？答案是**走控制台**——浏览器登录后，控制台用 JWT 鉴权调用 `POST /platform-tokens/`，把第一枚令牌发给你。
+>
+> 之后你可以用任何一枚已有的 `platform-v1-...` 令牌再创建更多。
+
+请求头格式：
+
+```http
+Authorization: Bearer ${PLATFORM_TOKEN}
+Content-Type: application/json
+```
+
+### 请求示例
+
+```shell
+curl -X POST 'https://platform.acedata.cloud/api/v1/platform-tokens/' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}" \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+### 响应（HTTP 201）
+
+```json
+{
+  "id": "3264f1aa-cbe1-4e2c-a434-95adba4f8304",
+  "token": "platform-v1-<REDACTED>",
+  "expiration": null,
+  "user_id": "89518d07-5560-4b05-92c1-667f3ddf6a4b",
+  "created_at": "2026-04-26T15:50:11.123456Z",
+  "updated_at": "2026-04-26T15:50:11.123456Z",
+  "used_at": null
+}
+```
+
+### 字段说明
+
+| 字段         | 类型               | 说明                                                                                                                         |
+| ------------ | ------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `id`         | UUID               | 令牌主键，删除 / 查询详情时用                                                                                                |
+| `token`      | string             | 账户令牌明文。格式 `platform-v1-` + 64 位十六进制（共 76 字符），必须按秘密处理                                                              |
+| `expiration` | int \| null        | 过期时间（秒级时间戳）。`null` 表示未设置到期时间                                                  |
+| `user_id`    | UUID               | 所属用户 ID。也是后续所有列表接口必须传的 `?user_id=` 参数值                                                                 |
+| `created_at` | datetime (ISO8601) | 创建时间                                                                                                                     |
+| `updated_at` | datetime (ISO8601) | 更新时间                                                                                                                     |
+| `used_at`    | datetime \| null   | 上次被用于鉴权的时间。从未使用过则为 `null`，可用来发现"僵尸令牌"                                                            |
+
+---
+
+## 获取账户令牌列表
+
+### 接口概览
+
+| 项     | 内容                                                     |
+| ------ | -------------------------------------------------------- |
+| 方法   | `GET`                                                    |
+| URL    | `https://platform.acedata.cloud/api/v1/platform-tokens/` |
+| 鉴权   | ✅ 需要账户令牌                                          |
+
+### 必传查询参数
+
+> ⚠️ **必须带 `?user_id=<your_user_id>`**。原因：列表接口对分页结果**逐对象**做权限校验，没带 `user_id` 时第一个不属于你的对象就会被拒，返回 `403 permission_denied`。
+
+如何获取 `user_id`：
+
+1. 浏览器打开 [https://auth.acedata.cloud/user/profile](https://auth.acedata.cloud/user/profile)，页面顶部显示完整 UUID。
+2. 或者用 `POST /platform-tokens/` 的返回值里的 `user_id` 字段直接回填。
+
+### 查询参数
+
+| 参数       | 必填 | 类型   | 说明                                          |
+| ---------- | ---- | ------ | --------------------------------------------- |
+| `user_id`  | ✅    | UUID   | 当前账户的用户 ID                             |
+| `limit`    | ❌    | int    | 单页条数，默认 10，最大 100                   |
+| `offset`   | ❌    | int    | 偏移                                          |
+| `ordering` | ❌    | string | 排序字段，默认 `-created_at`                  |
+
+### 请求示例
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/platform-tokens/?user_id=89518d07-5560-4b05-92c1-667f3ddf6a4b&limit=5' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+### 响应（HTTP 200）
+
+```json
+{
+  "count": 2,
+  "items": [
+    {
+      "id": "51c575a2-801c-4211-bc47-711452a8c8c9",
+      "token": "platform-v1-<REDACTED>",
+      "expiration": null,
+      "user_id": "89518d07-5560-4b05-92c1-667f3ddf6a4b",
+      "created_at": "2026-04-26T15:41:32.761705Z",
+      "updated_at": "2026-04-26T15:41:32.761726Z",
+      "used_at": null
+    }
+  ]
+}
+```
+
+> 本接口的分页响应使用 `count` + `items`。其他平台接口可能使用不同结构，请以对应文档和实际响应为准。
+
+---
+
+## 获取账户令牌详情
+
+| 项     | 内容                                                                          |
+| ------ | ----------------------------------------------------------------------------- |
+| 方法   | `GET`                                                                         |
+| URL    | `https://platform.acedata.cloud/api/v1/platform-tokens/<id>`（**末尾无斜杠**）|
+| 鉴权   | ✅ 仅令牌创建者或超级管理员可访问                                             |
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/platform-tokens/51c575a2-801c-4211-bc47-711452a8c8c9' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+返回结构与列表元素一致，`HTTP 200`。
+
+---
+
+## 删除账户令牌
+
+| 项     | 内容                                                                          |
+| ------ | ----------------------------------------------------------------------------- |
+| 方法   | `DELETE`                                                                      |
+| URL    | `https://platform.acedata.cloud/api/v1/platform-tokens/<id>`（**末尾无斜杠**）|
+| 鉴权   | ✅ 仅令牌创建者或超级管理员可删除                                             |
+
+```shell
+curl -X DELETE 'https://platform.acedata.cloud/api/v1/platform-tokens/3264f1aa-cbe1-4e2c-a434-95adba4f8304' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+- 成功返回 `HTTP 204 No Content`，无响应体。
+- 删除后该令牌**立即失效**，所有正在使用它的服务会马上收到 `401`。
+- 再次查询该 `id` 会返回 `404`。
+
+> ⚠️ 删除不可逆。如果你怀疑令牌泄露，可以**先创建一枚新的，切换业务侧，再删旧的**。
+
+---
+
+## 不支持的操作
+
+| 操作         | HTTP | 说明                                                                |
+| ------------ | ---- | ------------------------------------------------------------------- |
+| `PATCH` 修改 | 405  | 账户令牌创建后**不支持任何字段修改**。需要重命名等用途请删除后重建  |
+| `PUT` 替换   | 405  | 同上                                                                |
+
+---
+
+## 错误码速查
+
+| HTTP | `code`                | 常见原因                                                 |
+| ---- | --------------------- | -------------------------------------------------------- |
+| 401  | `not_authenticated`   | 未带 `Authorization` 头，或令牌已被删除                  |
+| 403  | `permission_denied`   | 列表接口未带 `?user_id=`，或访问别人的令牌详情           |
+| 404  | `not_found`           | `id` 不存在或已被删除                                    |
+| 405  | `method_not_allowed`  | 对详情接口发了 `PATCH`/`PUT`                             |
+
+错误响应统一格式：
+
+```json
+{
+  "detail": "You do not have permission to perform this action.",
+  "code": "permission_denied",
+  "trace_id": "0a88956213edf6e62b71695ee2df0eff"
+}
+```
+
+排查时把 `trace_id` 提供给客服或贴在工单里，可快速定位日志。
+
+---
+
+## 完整代码示例
+
+### Python
+
+```python
+import os
+import requests
+
+BASE = "https://platform.acedata.cloud/api/v1"
+PLATFORM_TOKEN = os.environ["PLATFORM_TOKEN"]
+USER_ID = "89518d07-5560-4b05-92c1-667f3ddf6a4b"
+
+headers = {
+    "accept": "application/json",
+    "authorization": f"Bearer {PLATFORM_TOKEN}",
+    "content-type": "application/json",
+}
+
+# 1. 创建新令牌
+created = requests.post(f"{BASE}/platform-tokens/", headers=headers, json={}).json()
+print("新令牌：", created["token"])
+print("UserID：", created["user_id"])
+
+# 2. 列表
+listing = requests.get(
+    f"{BASE}/platform-tokens/",
+    headers=headers,
+    params={"user_id": USER_ID, "limit": 50},
+).json()
+print(f"共 {listing['count']} 枚令牌")
+
+# 3. 删除（注意末尾无斜杠）
+resp = requests.delete(f"{BASE}/platform-tokens/{created['id']}", headers=headers)
+assert resp.status_code == 204, resp.text
+```
+
+### Node.js
+
+```javascript
+const BASE = 'https://platform.acedata.cloud/api/v1'
+const PLATFORM_TOKEN = process.env.PLATFORM_TOKEN
+const USER_ID = '89518d07-5560-4b05-92c1-667f3ddf6a4b'
+
+const headers = {
+  accept: 'application/json',
+  authorization: `Bearer ${PLATFORM_TOKEN}`,
+  'content-type': 'application/json',
+}
+
+// 创建
+const created = await fetch(`${BASE}/platform-tokens/`, {
+  method: 'POST',
+  headers,
+  body: '{}',
+}).then((r) => r.json())
+
+// 列表
+const url = new URL(`${BASE}/platform-tokens/`)
+url.searchParams.set('user_id', USER_ID)
+const listing = await fetch(url, { headers }).then((r) => r.json())
+console.log(`共 ${listing.count} 枚令牌`)
+
+// 删除（末尾无斜杠）
+await fetch(`${BASE}/platform-tokens/${created.id}`, { method: 'DELETE', headers })
+```
+
+---
+
+## 在其他平台 API 中使用
+
+把 `platform-v1-...` 直接放到 `Authorization: Bearer ...` 头即可调用任何需要鉴权的平台接口：
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/applications/?user_id=89518d07-5560-4b05-92c1-667f3ddf6a4b' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+> 与 `https://api.acedata.cloud/**` 业务接口（OpenAI、Midjourney、Suno、Veo 等）所用的 32 位十六进制 API 凭证**完全不同**。请勿混用——把账户令牌写到业务接口会得 `401`，反之亦然。
+
+---
+
+## 相关接口
+
+- [获取 AceDataCloud 平台服务申请列表](https://platform.acedata.cloud/documents/platform-application-list) — 用账户令牌看自己申请了哪些服务
+- [创建 AceDataCloud 平台 API 凭证](https://platform.acedata.cloud/documents/platform-credential-create) — 用账户令牌签发业务 API 用的 32 位凭证
+- [获取 AceDataCloud 平台 API 调用记录](https://platform.acedata.cloud/documents/platform-usage-list) — 查账与排错
+- [获取 AceDataCloud 平台订单列表](https://platform.acedata.cloud/documents/platform-order-list) — 查充值历史

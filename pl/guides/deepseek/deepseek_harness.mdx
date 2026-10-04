@@ -1,0 +1,119 @@
+---
+title: "Plan Integracji DeepSeek Harness"
+description: "DeepSeek AI API guide - Ace Data Cloud"
+---
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to agent programistyczny działający lokalnie. Odczytuje on przestrzeń roboczą, wywołuje narzędzia i wykonuje polecenia, a następnie korzysta z interfejsu OpenAI-compatible Chat Completions do wywołania modelu.
+
+> Ten dokument dotyczy `deepseek-harness-sdk==0.1.0rc6` oraz `deepseek-harness-runtime-bin==0.1.0rc6`. Po aktualizacji klienta, proszę ponownie wykonać testy plików tylko do odczytu poniżej.
+
+## Zakres wsparcia
+
+| Projekt        | Konfiguracja                             |
+| -------------- | ---------------------------------------- |
+| API Base URL   | `https://api.acedata.cloud/v1`         |
+| Model          | `deepseek-v4-pro`                       |
+| Protokół       | OpenAI-compatible Chat Completions (strumieniowe) |
+| Możliwości     | Tekst, proces wnioskowania, wywołania narzędzi funkcji, lokalna pętla narzędzi Bash, statystyki użycia |
+
+Katalog modeli może się zmieniać. Przed uruchomieniem, użyj dedykowanego klucza Coding Plan, aby sprawdzić aktualny katalog:
+
+```bash
+curl https://api.acedata.cloud/v1/models \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY"
+```
+
+Upewnij się, że odpowiedź zawiera `deepseek-v4-pro`. Nie traktuj `deepseek-v4-flash` jako równoważnego zamiennika dla trybu narzędzi opisanego w tym dokumencie; w tej wersji walidacji, jego historia wnioskowania wieloetapowego i odtwarzanie narzędzi nie przeszły.
+
+## 1. Przygotowanie dedykowanego klucza
+
+Otwórz [aplikację Coding Plan](https://platform.acedata.cloud/console/applications), przejdź do zakupionej aplikacji Coding, utwórz lub skopiuj dedykowany klucz API tej aplikacji. Coding Plan nie korzysta z ogólnego salda, klucze innych aplikacji nie mogą reprezentować uprawnień pakietu.
+
+Umieść klucz tylko w bieżącym shellu:
+
+```bash
+export ACEDATACLOUD_API_KEY="WSTAW_TUTAJ_SWÓJ_KLUCZ_CODING"
+export DEEPSEEK_BASE_URL="https://api.acedata.cloud/v1"
+export DEEPSEEK_API_KEY="$ACEDATACLOUD_API_KEY"
+```
+
+Nie zapisuj prawdziwego klucza w skryptach, repozytoriach konfiguracyjnych, zrzutach ekranu terminala ani w rejestrach sesji.
+
+## 2. Utworzenie izolowanej przestrzeni roboczej
+
+Bundlowany runtime Harness zawiera lokalne narzędzia Bash. Podczas pierwszej walidacji nie wskazuj na prawdziwe projekty ani katalog główny; utwórz jednorazowy katalog bez tajemnic:
+
+```bash
+mkdir -p /tmp/deepseek-harness-demo/workspace
+mkdir -p /tmp/deepseek-harness-demo/sessions
+printf 'kompatybilność fixture\n' > /tmp/deepseek-harness-demo/workspace/fixture.txt
+python3 -m venv /tmp/deepseek-harness-demo/venv
+/tmp/deepseek-harness-demo/venv/bin/pip install \
+  "deepseek-harness-sdk==0.1.0rc6"
+```
+
+Jeśli sieć firmowa korzysta z prywatnego obrazu PyPI, upewnij się, że w obrazie znajduje się ta sama wersja `deepseek-harness-runtime-bin`. Nie używaj `danger-full-access`, aby rozszerzyć zakres dostępu do plików; przykład w tym dokumencie przekazuje jednorazowy katalog tylko do `cwd`.
+
+## 3. Uruchomienie oficjalnego SDK Pythona
+
+Zapisz poniższy kod jako `/tmp/deepseek-harness-demo/run.py`:
+
+```python
+import os
+
+from deepseek_harness import DeepSeekHarness
+
+with DeepSeekHarness(
+    provider="deepseek-official",
+    model="deepseek-v4-pro",
+    max_tokens=160,
+    cwd="/tmp/deepseek-harness-demo/workspace",
+    session_root="/tmp/deepseek-harness-demo/sessions",
+    base_url=os.environ["DEEPSEEK_BASE_URL"],
+    api_key=os.environ["DEEPSEEK_API_KEY"],
+    request_timeout_seconds=180,
+) as harness:
+    result = harness.run(
+        "Przeczytaj fixture.txt raz, a następnie odpowiedz dokładnie: sdk-harness-ok",
+        session_id="acedatacloud-compat",
+    )
+
+print(result.final_response)
+print(result.finish_reason)
+```
+
+Uruchom:
+
+```bash
+/tmp/deepseek-harness-demo/venv/bin/python \
+  /tmp/deepseek-harness-demo/run.py
+```
+
+Oczekiwany wynik:
+
+```text
+sdk-harness-ok
+completed
+```
+
+Ten krok jednocześnie weryfikuje autoryzację Bearer, `/v1/chat/completions`, SSE, treść wnioskowania, wywołania narzędzi i zwrot wyników narzędzi. Po zakończeniu można usunąć `/tmp/deepseek-harness-demo`; jeśli katalog sesji zawiera kontekst projektu, powinien być przechowywany z takim samym poziomem wrażliwości jak repozytorium kodu.
+
+## Często zadawane pytania
+
+- **401**: Sprawdź, czy `ACEDATACLOUD_API_KEY` jest wyeksportowany do tego samego shellu, w którym uruchamiasz Pythona.
+- **403 lub komunikat o limitach**: Upewnij się, że klucz należy do bieżącej aplikacji Coding, pakiet jest nadal ważny i ma dostępne limity.
+- **Model niedostępny**: Ponownie sprawdź `/v1/models`, nie zgaduj nazwy modelu na podstawie starych zrzutów ekranu.
+- **Błąd `reasoning_content` / odtwarzania narzędzi**: Upewnij się, że SDK/runtime są w wersji opisanej w tym dokumencie i używają `deepseek-v4-pro`.
+- **Nieprawidłowa liczba wykonanych narzędzi**: Zatrzymaj uruchamianie zadań, które mogą powodować skutki uboczne, najpierw zweryfikuj bieżącą wersję usługi za pomocą tylko do odczytu fixture.
+- **Niepowodzenie instalacji**: Upewnij się, że Python 3.10+, architektura systemu operacyjnego jest wspierana przez bieżące koło, i sprawdź, czy wersje SDK/runtime są zgodne.
+
+## Granice możliwości
+
+Ten dokument weryfikuje tylko lokalne SDK Pythona do tekstu i pętli narzędzi Chat Completions. Obrazy, API plików, `/v1/responses`, `/v1/messages`, zdalne przestrzenie robocze i zarządzane sandboxy nie są objęte zakresem tego samouczka; uprawnienia przestrzeni roboczej i ryzyko lokalnych poleceń są odpowiedzialnością maszyny uruchamiającej Harness oraz konfiguracji.
+
+## Oficjalne odniesienia
+
+- [Repozytorium DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness Python SDK](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk/README.md)
+
+Powrót do [Centrum konfiguracji Coding Plan](https://platform.acedata.cloud/documents/coding-plan-integration).

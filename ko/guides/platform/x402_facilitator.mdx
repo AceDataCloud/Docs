@@ -1,0 +1,215 @@
+---
+title: "X402 Facilitator 통합"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Facilitator는 X402 링크의 서버 측 결제 구성 요소입니다. 클라이언트는 서명을 담당하고, Gateway 또는 귀하의 서버는 Facilitator의 `/verify` 및 `/settle`을 호출합니다.
+
+Ace Data Cloud의 생산 Facilitator 주소는 다음과 같습니다:
+
+```text
+https://facilitator.acedata.cloud
+```
+
+소스 코드 저장소: [https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire 약정
+
+Ace Data Cloud의 X402 링크는 공식 x402 v2를 전량 사용하며, 더 이상 v1의 `X-Payment` 요청 헤더를 수용하지 않습니다. 접속 시 주의해야 할 세 가지 사항:
+
+- 요청 헤더는 `PAYMENT-SIGNATURE`이며, 값은 base64 인코딩된 JSON envelope입니다.
+- envelope의 최상위는 반드시 `x402Version: 2`이어야 하며, `accepted` 객체를 사용하여 선택한 `scheme`과 `network`를 선언해야 합니다.
+- `network`는 CAIP-2 식별자를 사용해야 하며(예: `eip155:8453`), `base`와 같은 약어를 사용할 수 없습니다.
+
+envelope 구조:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+402 응답은 JSON 본문 외에도 `PAYMENT-REQUIRED` 응답 헤더를 포함하며, 값은 동일한 챌린지 내용의 base64 인코딩입니다. 이를 통해 클라이언트는 본문을 파싱하지 않고도 결제 요구 사항을 읽을 수 있습니다.
+
+## 핵심 인터페이스
+
+### `GET /supported`
+
+지원하는 네트워크와 scheme을 확인합니다:
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+반환 예시:
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": ["3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"]
+  }
+}
+```
+
+결과 설명:
+
+- `network`는 CAIP-2 식별자를 사용해야 하며, `base`, `skale`와 같은 약어를 사용할 수 없습니다.
+- `/supported`는 Facilitator가 해당 검증 및 결제 능력을 갖추고 있음을 나타냅니다.
+- Base, SKALE 및 Solana는 모두 `exact`를 지원하며, `upto`는 현재 Base에서만 제공됩니다.
+- `signers`는 Facilitator가 결제 거래를 제출하는 데 사용하는 주소입니다.
+- 특정 API가 이러한 옵션을 허용하는지는 여전히 해당 API의 402 `accepts`에 따라 다릅니다.
+
+### `POST /verify`
+
+클라이언트가 전달한 `PAYMENT-SIGNATURE`가 특정 결제 요구 사항을 충족하는지 검증합니다.
+
+요청 본문:
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+v2의 `paymentRequirements` 필드는 `scheme`, `network`, `asset`, `amount`, `payTo`, `maxTimeoutSeconds` 및 `extra`로 구성되며, 금액 필드는 `amount`입니다. API 402 응답의 `accepts[]`에는 클라이언트가 읽을 수 있는 상한을 제공하기 위해 `maxAmountRequired`가 추가로 반환됩니다. 그러나 이는 Facilitator 요청 본문의 필드에 포함되지 않습니다.
+
+성공 응답:
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+생산 주문 결제의 `PAYMENT-RESPONSE` 응답 헤더를 디코딩하면 결제 결과가 포함됩니다. Base 주문 결제의 프로그램 실행 결과:
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+결과 설명:
+
+- `success=True`는 Facilitator 결제가 성공했음을 나타냅니다.
+- `transaction`은 체인 상의 거래 해시이며, 주문의 `pay_id`도 동일한 값으로 기록됩니다.
+- explorer에서 `1200000` atomic USDC의 Base USDC 전송을 확인할 수 있습니다.
+- `errorReason=None`은 이번 결제에서 비즈니스 오류가 반환되지 않았음을 나타냅니다.
+
+검증 실패 시에도 일반적으로 HTTP 200을 반환하지만, `isValid`는 `false`입니다. 비즈니스 측에서는 `invalidReason`을 읽어야 하며, HTTP 상태 코드만 확인해서는 안 됩니다.
+
+### `POST /settle`
+
+이미 검증된 승인을 체인에 결제합니다.
+
+요청 본체는 `/verify`와 기본적으로 일치합니다. `upto`의 차이점은: `paymentRequirements.amount`가 결제 시 실제 결제 금액으로 변경되며; 서명 상한은 Facilitator가 검증 단계에서 기록하고, 결제 시 실제 금액이 해당 상한을 초과하지 않아야 합니다.
+
+성공 응답:
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+만약 `upto`의 실제 금액이 0이라면, `transaction`은 빈 문자열일 수 있으며, 이는 체인 상의 거래가 필요하지 않음을 나타냅니다.
+
+## Ace Data Cloud Gateway가 Facilitator를 사용하는 방법
+
+Ace Data Cloud API Gateway의 링크는 다음과 같습니다:
+
+1. 클라이언트가 처음 API를 요청할 때 `Authorization` 및 `PAYMENT-SIGNATURE`를 포함하지 않습니다.
+2. Gateway는 요청의 예상 가격을 계산하고, 402와 `accepts`를 반환합니다.
+3. 클라이언트는 서명 후 `PAYMENT-SIGNATURE`를 포함하여 재시도합니다.
+4. Gateway는 `PAYMENT-SIGNATURE`를 디코딩하고, 일치하는 결제 요구 사항을 선택합니다.
+5. Gateway는 Facilitator의 `/verify`를 호출합니다.
+6. `/verify`가 성공하면, Gateway는 요청을 목표 API로 전달합니다.
+7. 목표 API가 응답한 후, Gateway는 `/record` 단계에서 Facilitator의 `/settle`을 호출합니다.
+8. Gateway는 체인 상의 거래 해시를 사용 기록 메타데이터에 기록합니다.
+`exact`는 단계 7에서 서명 금액을 정산합니다; `upto`는 단계 7에서 실제 사용량에 따라 `amount`를 기록한 후 실제 금액을 정산합니다.
+
+## 자신의 API 어떻게 접속할까
+
+자신의 API가 X402를 지원하도록 하려면 다음 구조로 구현할 수 있습니다:
+
+1. 각 유료 인터페이스에 대해 `paymentRequirements`를 준비하고, 여기에는 네트워크, 금액, 수취 주소, 자산 주소 및 서명 도메인이 포함됩니다.
+2. 요청에 `PAYMENT-SIGNATURE`가 없으면 HTTP 402와 `accepts`를 반환합니다.
+3. 요청에 `PAYMENT-SIGNATURE`가 있으면 Base64로 디코딩하여 `paymentPayload`를 얻습니다.
+4. Facilitator의 `/verify`를 호출합니다.
+5. 검증이 성공하면 비즈니스 로직을 실행합니다.
+6. 비즈니스가 성공하면 Facilitator의 `/settle`을 호출합니다.
+7. 정산을 위해 `payer`, `transaction`, `amount`, `network`를 저장합니다.
+
+서버는 자신이 생성한 `paymentRequirements`를 사용하여 `/verify`와 `/settle`을 호출해야 하며, 클라이언트가 전달한 금액, 수취 주소 또는 자산 주소를 신뢰하지 마십시오.
+
+## 재전송 보호
+
+Facilitator는 nonce를 기록합니다. 동일한 nonce의 승인은 반복적으로 검증하거나 정산할 수 없습니다.
+
+이는 다음을 의미합니다:
+
+- 클라이언트는 매 요청마다 새로운 envelope에 서명해야 합니다;
+- `/settle`이 거래를 제출했지만 아직 확인되지 않은 경우, 동일한 nonce로 `/settle`을 재시도하여 멱등 정산을 수행할 수 있습니다;
+- 동일한 `PAYMENT-SIGNATURE`를 캐시하여 여러 번 API 호출에 사용하지 마십시오.
+
+## 일반적인 오류
+
+| 오류                                           | 일반적인 원인                                                         |
+| -------------------------------------------- | --------------------------------------------------------------- |
+| `Authorization nonce already processed`      | 동일한 `PAYMENT-SIGNATURE`를 반복 사용했습니다.                             |
+| `Authorization destination mismatch`         | 클라이언트 서명에 있는 `to`와 payment requirement의 `payTo`가 일치하지 않습니다. |
+| `invalid_upto_evm_payload_invalid_signature` | `upto` typed data의 chainId, facilitator, Permit2 도메인 또는 서명 주소가 일치하지 않습니다. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | 지갑이 아직 Permit2에 대해 충분한 USDC 허용을 승인하지 않았습니다.                |
+| `Payer has insufficient USDC balance`        | 지불 지갑의 USDC가 부족합니다.                                          |
+| `Solana signer private key not configured`   | Facilitator가 수수료 지불자로 서명해야 하지만 서버에 Solana signer 설정이 없습니다.   |

@@ -1,85 +1,160 @@
 ---
-title: "WebExtrator Vodič za integraciju API-ja za renderovanje veb stranica"
-description: "WebExtrator Web Render & Extract 集成指南 - Ace Data Cloud"
+title: "WebExtrator Vodič za integraciju API za renderovanje stranica"
+description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
 `POST https://api.acedata.cloud/webextrator/render`
 
+WebExtrator API za renderovanje stranica je usluga renderovanja stranica zasnovana na bezglavom Chromium-u. Dajte URL,
+vraća potpuno renderovani HTML (uključujući sadržaj ubačen putem JS), čisti tekst, naslov stranice i konačni URL.
+
+Render je najniži nivo interfejsa WebExtrator-a. Ako vam je potrebna **strukturirana** ekstrakcija rezultata (glavni tekst članka,
+cena proizvoda, sastojci recepta …), molimo vas da koristite
+[`/webextrator/extract`](/sr/guides/webextrator/webextrator_extract) — on pokreće celu set tipizovanih ekstrakcija na istoj osnovi renderovanja.
+
+## Proces prijave
+
+Da biste koristili WebExtrator uslugu, prvo idite na [Ace Data Cloud kontrolnu tablu](https://platform.acedata.cloud/console/applications) da dobijete svoj API Token, čuvajte ga za kasnije.
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Ako se još niste prijavili ili registrovali, automatski ćete biti preusmereni na stranicu za prijavu koja vas poziva da se registrujete i prijavite, a nakon završetka bićete automatski vraćeni na trenutnu stranicu.
+
+**Jedan API Token može pozvati sve usluge platforme, nije potrebno posebno se prijavljivati za svaku uslugu.** Prva prijava donosi besplatnu kvotu, možete besplatno isprobati; kada kvota postane nedovoljna, možete dopuniti opšti saldo na [kontrolnoj tabli](https://platform.acedata.cloud/console/coin).
+
+> 📘 Puna dokumentacija: [WebExtrator usluga →](https://platform.acedata.cloud/service/webextrator)
+
 ## Autentifikacija
 
-Dodajte u zaglavlje zahteva `Authorization: Bearer <tvoj API ključ>`.
+Svi WebExtrator interfejsi koriste standardnu Bearer Token autentifikaciju:
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
 
 ## Parametri zahteva
 
-| Polje | Tip | Obavezno | Podrazumevano | Opis |
-|-------|-----|:--------:|---------------|------|
-| `url` | string | ✅ | - | URL stranice koja se renderuje |
-| `user_agent` | string | ❌ | Sistem podrazumevano | Prilagođeni User-Agent |
-| `timeout` | number | ❌ | 30000 | Vreme isteka za jedan render (u milisekundama), maksimalno 120000 |
-| `wait_until` | string | ❌ | `load` | Događaj završetka učitavanja: `load`/`domcontentloaded`/`networkidle` |
-| `delay` | number | ❌ | 0 | Vreme čekanja nakon završetka učitavanja (u milisekundama), maksimalno 30000 |
-| `wait_for_selector` | string | ❌ | - | Čekanje na pojavu CSS selektora |
-| `block_resources` | string[] | ❌ | - | Blokiranje tipova resursa: `image`/`media`/`font`/`stylesheet` itd. |
-| `headers` | object | ❌ | - | Dodatna HTTP zaglavlja |
-| `cookies` | array | ❌ | - | Lista kolačića, elementi oblika `{name, value, domain, path}` |
-| `callback_url` | string | ❌ | - | URL za povratni poziv u asinhronom režimu; ako je naveden, odmah se vraća ID zadatka, a rezultat se šalje putem POST poziva |
+| Polje                | Tip       | Obavezno | Podrazumevano                | Objašnjenje                                                              |
+| ------------------- | -------- | :-----: | --------------------------- | ----------------------------------------------------------------------- |
+| `url`               | string   |  ✅     | —                           | URL stranice koja se renderuje, mora biti `http(s)://`.                       |
+| `user_agent`        | string   |  ❌     | Ugrađeni UA bazen rotacije | Prilagođeni User-Agent.                                                |
+| `timeout`           | number   |  ❌     | `30`                        | Vreme čekanja za pojedinačnu navigaciju (**sekunde**).                     |
+| `wait_until`        | enum     |  ❌     | `networkidle`               | Događaj završetka učitavanja: `load` / `domcontentloaded` / `networkidle` / `commit`. |
+| `delay`             | number   |  ❌     | `0`                         | **Dodatno vreme čekanja u sekundama** nakon aktivacije `wait_until` (za SPA ponovo renderovanje). |
+| `wait_for_selector` | string   |  ❌     | —                           | Čekanje na pojavu ovog CSS selektora, stabilnije od `networkidle`.         |
+| `block_resources`   | string[] |  ❌     | `["image","font","media"]` | Tipovi resursa koji se blokiraju, opcionalno: `image` / `font` / `media` / `stylesheet` / `xhr` / `fetch`. |
+| `headers`           | object   |  ❌     | —                           | Dodatni HTTP zaglavlja (na primer `{"Accept-Language": "en-US"}`).         |
+| `cookies`           | array    |  ❌     | —                           | Kolačići ubačeni pre navigacije, struktura je prikazana ispod.              |
+| `callback_url`      | string   |  ❌     | —                           | Adresa za povratni poziv u asinhronom režimu, platforma će `POST`-ovati kompletne rezultate na ovu adresu kada zadatak bude završen. |
+| `bypass_cache`      | boolean  |  ❌     | `false`                    | Preskoči čitanje iz Redis keša (ali će i dalje zapisati rezultate u keš).   |
+| `cache_ttl_seconds` | number   |  ❌     | `3600`                     | Prilagođeni TTL za keširanje ovog odgovora, prosledi `0` da ne kešira ovaj odgovor. |
+| `async`             | boolean  |  ❌     | `false`                    | Postavite na `true` da odmah vratite `task_id`, rezultati se mogu preuzeti putem `callback_url` ili Tasks API. |
 
-## Sinhroni odgovor (bez callback_url)
+> Platforma koristi **snake_case** za sve ugovore. Unutrašnje usluge renderovanja podržavaju camelCase, ali spoljašnje pozive koriste isključivo snake_case.
+
+### Struktura kolačića
+
+```json
+{
+  "name":      "string",
+  "value":     "string",
+  "domain":    "string",
+  "path":      "/",
+  "expires":   1735689600,
+  "httpOnly":  false,
+  "secure":    true,
+  "sameSite":  "Lax"
+}
+```
+
+## Sinhroni odgovor
 
 ```json
 {
   "success": true,
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "trace_id": "550e8400-e29b-41d4-a716-446655440001",
-  "started_at": "2026-05-02T10:30:00.123Z",
-  "finished_at": "2026-05-02T10:30:05.456Z",
-  "elapsed": 5.333,
+  "started_at": 1777717800.123,
+  "finished_at": 1777717801.234,
+  "elapsed": 1.111,
   "data": {
     "kind": "render",
     "url": "https://example.com",
-    "title": "Example Domain",
-    "html": "<!doctype html>...",
-    "text": "Example Domain ...",
-    "markdown": "# Example Domain\n...",
-    "screenshot": "data:image/png;base64,iVBORw0K...",
-    "links": ["https://www.iana.org/domains/example"]
+    "finalUrl": "https://example.com/",
+    "title": "Primer domena",
+    "status": 200,
+    "html": "<!DOCTYPE html><html>...</html>",
+    "text": "Primer domena\nOva domena se koristi u ilustrativnim primerima...",
+    "userAgent": "Mozilla/5.0 ...",
+    "elapsedMs": 1108
   }
 }
 ```
 
-## Asinhroni režim (sa callback_url)
+| Polje                  | Tip             | Objašnjenje                                           |
+| --------------------- | -------------- | --------------------------------------------------- |
+| `data.kind`           | string         | Fiksno `"render"`.                                   |
+| `data.url`            | string         | URL koji ste poslali.                                |
+| `data.finalUrl`       | string         | Konačni URL nakon preusmeravanja.                    |
+| `data.title`          | string         | `document.title` nakon renderovanja.                  |
+| `data.status`         | number \| null | HTTP status kod glavne navigacije.                     |
+| `data.html`           | string         | Potpuni HTML nakon renderovanja.                      |
+| `data.text`           | string         | Snimak `document.body.innerText` (za čišći tekst koristite Extract). |
+| `data.userAgent`      | string         | UA koji je zapravo korišćen.                          |
+| `data.elapsedMs`      | number         | Vreme potrebno samo za renderovanje u pretraživaču.  |
+| `data.cached`         | boolean?       | `true` kada je keš pogodjen.                          |
+| `data.cacheStoredAt`  | number?        | Unix vremenska oznaka u milisekundama kada je keš prvi put upisan. |
 
-Početni odgovor:
+## Asinhroni odgovor
+
+`async=true` (ili pružite `callback_url`) odmah vraća (HTTP 200):
 
 ```json
 {
   "success": true,
-  "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
-  "started_at": "2026-05-02T10:30:00.123Z"
+  "task_id": "550e8400-...",
+  "trace_id": "6ba7b810-...",
+  "started_at": 1777717800.123
 }
 ```
 
-Zaglavlje odgovora će sadržati `x-usage-exempt: true`, što znači da ovaj sinhroni handshake nije naplaćen. Kada zadatak bude zaista završen, platforma će poslati POST zahtev na `callback_url`, sa telom zahteva koje sadrži polje `data` iz sinhronog odgovora, zajedno sa istim poljima `task_id` / `trace_id` / `started_at` / `finished_at` / `elapsed`.
+Rezultati će biti poslati putem `POST` na `callback_url` (ako je konfigurisan), ili putem
+[`/webextrator/tasks`](/sr/guides/webextrator/webextrator_tasks) aktivno pretražiti.
 
-## Odgovor sa greškom
+### Struktura povratnog poziva
+
+Platforma `POST`-uje envelope koji je **potpuno identičan** sinhronom režimu na `callback_url`,
+`Content-Type: application/json`. Vraćanje bilo kog `2xx` se smatra potvrđenim; `5xx` će biti
+ponovo pokušano sa eksponencijalnim povratkom oko 5 minuta.
+
+## Odgovor na grešku
+| HTTP | `error.code`     | Значење                             |
+| ---- | ---------------- | --------------------------------- |
+| 400  | `bad_request`    | Тело захтева није прошло Zod верификацију (недостаје `url`, тип није исправан …).    |
+| 401  | `unauthorized`   | Недостаје или је неважећи `Authorization: Bearer …`. |
+| 402  | (x402)           | Платформа нема довољно средстава, враћа x402 захтев за плаћање.     |
+| 408  | `timeout`        | Навигација је прешла `timeout`.                   |
+| 429  | `queue_busy`     | Синхрона ред чекања је заузета, молимо покушајте поново или користите `async=true`.       |
+| 500  | `internal_error` | Изузетак који сервер није обрадио (пад прегледача итд.), Worker аутоматски покушава поново.  |
+
+Структура грешке:
 
 ```json
 {
   "success": false,
-  "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
-  "started_at": "2026-05-02T10:30:00.123Z",
-  "error": {
-    "code": "timeout",
-    "message": "page load timed out after 30000ms"
-  }
+  "task_id": "...",
+  "trace_id": "...",
+  "started_at": 1777717800.123,
+  "finished_at": 1777717800.135,
+  "elapsed": 0.012,
+  "error": { "code": "bad_request", "message": "url: Неважећи url" }
 }
 ```
 
-Kodovi grešaka: `bad_request` / `forbidden` / `too_many_requests` / `not_found` / `api_error` / `timeout` / `unknown` / `busy`.
+## Пример
 
-## Primer
+### cURL
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/render \
@@ -91,3 +166,90 @@ curl -X POST https://api.acedata.cloud/webextrator/render \
     "block_resources": ["image", "media", "font"]
   }'
 ```
+
+### Python (requests)
+
+```python
+import os, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+
+resp = requests.post(
+    "https://api.acedata.cloud/webextrator/render",
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "url": "https://example.com",
+        "wait_until": "networkidle",
+        "block_resources": ["image", "media", "font"],
+    },
+    timeout=60,
+)
+resp.raise_for_status()
+data = resp.json()["data"]
+print(data["title"], data["status"], len(data["html"]))
+```
+
+### Node.js (fetch)
+
+```js
+const apiKey = process.env.ACEDATA_API_KEY;
+
+const res = await fetch('https://api.acedata.cloud/webextrator/render', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    url: 'https://example.com',
+    wait_until: 'networkidle',
+    block_resources: ['image', 'media', 'font'],
+  }),
+});
+const { data } = await res.json();
+console.log(data.title, data.status, data.html.length);
+```
+
+### Асинхроно + повратни позиви
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/render \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "async": true,
+    "callback_url": "https://your-app.example.com/hooks/webextrator"
+  }'
+```
+
+Одмах враћа `{ "success": true, "task_id": "...", "trace_id": "...", "started_at": 1777717800.123 }`；
+Када се задатак заврши, платформа ће POST-овати комплетан резултат на ваш `callback_url`.
+
+### Принудно заобилажење кеша
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/render \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com",
+    "bypass_cache": true
+  }'
+```
+
+## Савети и замке
+
+- **Важно је правилно одабрати `wait_until`.** `networkidle` је најстабилнији али најспорији; `domcontentloaded`
+  је брз али може пропустити асинхроно инјектоване садржаје; `load` је погодан за традиционалне статичне странице.
+- **Кеш Кључ игнорише `async`.** Синхрони и асинхрони захтеви за исту URL адреси ударају у исту кеш ставку,
+  слободно прелазите неће довести до неуспеха.
+- **Кеш Кључ игнорише `bypass_cache` и `cache_ttl_seconds`.** Ова два су оперативни прекидачи,
+  не утичу на садржај одговора.
+- **`cookies` и `headers` ће бити кеширани у различитим групама.** Прилагођавање ова два ће довести до неуспеха првог истог комбинованог удара.
+- **Тешке SPA често прелазе подразумеваних 30 секунди.** Препоручује се `timeout: 60`, `wait_until: "domcontentloaded"`, `delay: 4`, уз `wait_for_selector` за чекање правих елемената.
+- **`block_resources` је најбржи пут за смањење латенције.** Подразумевано су блокиране слике / фонтови / медији;
+  ако ваша екстракција не зависи од CSS распоред, додавање `stylesheet` ће учинити још брже.

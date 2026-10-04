@@ -1,0 +1,226 @@
+---
+title: "Ace Data Cloud SDK 总览"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+Ace Data Cloud 提供 TypeScript / Python / Go 三种语言的官方客户端 SDK，把 `api.acedata.cloud` 上的 chat completions、images、video、music、search、x402 等能力封装成强类型方法，省去手写 HTTP、SSE、任务轮询、错误处理和重试退避的工作。
+
+本章按真实接入顺序组织：先在控制台拿到 API Token，再选语言看对应章节，最后看任务轮询、流式响应和 X402 链上支付的高级用法。
+
+## 仓库与包
+
+- SDK 源码（monorepo）：[https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- TypeScript：[`@acedatacloud/sdk`](https://www.npmjs.com/package/@acedatacloud/sdk)
+- Python：[`acedatacloud`](https://pypi.org/project/acedatacloud/)
+- Go：[`github.com/AceDataCloud/SDK/go`](https://pkg.go.dev/github.com/AceDataCloud/SDK/go)
+- X402 客户端（TypeScript）：[`@acedatacloud/x402-client`](https://www.npmjs.com/package/@acedatacloud/x402-client)
+- X402 客户端（Python）：[`acedatacloud-x402`](https://pypi.org/project/acedatacloud-x402/)
+
+## 三语言能力矩阵
+
+| 能力 | TypeScript | Python | Go |
+| --- | --- | --- | --- |
+| `chat.completions.create`（非流式） | ✅ | ✅ | ✅ |
+| `chat.completions.create`（SSE 流式） | ✅ | ✅ | ✅ |
+| `images.generate`（Midjourney / Flux / NanoBanana / Seedream） | ✅ | ✅ | 🚧 (alpha) |
+| `videos.generate`（Sora / Veo / Luma / Kling / Hailuo / Wan） | ✅ | ✅ | 🚧 (alpha) |
+| `audios.generate`（Suno / Producer / Fish） | ✅ | ✅ | 🚧 (alpha) |
+| `search.google`（Serp） | ✅ | ✅ | 🚧 (alpha) |
+| TaskHandle 异步轮询 | ✅（毫秒） | ✅（秒） | 🚧 |
+| 异步客户端 | ✅ (Promise) | ✅ (`AsyncAceDataCloud`) | ✅ (`context.Context`) |
+| 自动重试 + 指数退避 | ✅ | ✅ | ✅ |
+| 类型化异常（`AuthenticationError` / `RateLimitError` …） | ✅ | ✅ | ✅ |
+| X402 `paymentHandler` 钩子（无 token 链上付费） | ✅ | ✅ | ❌（计划中） |
+
+> Go SDK 的多媒体资源和任务轮询当前处于 alpha 阶段（伪版本 `v0.0.0-20260505072132-4a3d921f9bb4`），稳定的能力是 `chat.completions`。多媒体场景请优先选 TypeScript 或 Python。
+
+## 何时用 SDK / MCP / 原生 HTTP / X402
+
+| 场景 | 推荐方式 |
+| --- | --- |
+| 后端服务、CLI、自动化脚本、Agent 框架 | **SDK**（本章） |
+| Claude Desktop / Cursor / Cline 等 MCP 客户端调用 | MCP Servers |
+| 一次性 curl 验证、调试、嵌入式只支持 HTTP 的环境 | 原生 HTTP（每个服务的 快速开始） |
+| 不想创建 API Token、按调用链上付 USDC | [X402 集成指南](https://platform.acedata.cloud/documents/x402-integration) |
+
+SDK 与 X402 不互斥：SDK 同时支持「token 路径」和「`paymentHandler` 路径」，详见 [SDK + X402 支付钩子](https://platform.acedata.cloud/documents/sdk-x402-payment)。
+
+## 申请 API Token
+
+要使用 SDK，首先到 [Ace Data Cloud 控制台 - 应用列表](https://platform.acedata.cloud/console/applications) 申请一个 API Token：
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+如果你尚未登录或注册，会自动跳转到登录页面邀请你来注册和登录，登录注册之后会自动返回当前页面。
+
+在首次申请时会有免费额度赠送，可以免费体验 Ace Data Cloud 提供的各种 AI 服务。
+
+复制刚才拿到的 Token，下面统一记作 `{token}`。
+
+## 统一环境变量
+
+三种语言的 SDK 都会自动读取同一个环境变量 `ACEDATACLOUD_API_TOKEN`，推荐在 shell 里 `export`，让 SDK 自动拾取：
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+# 可选：默认 https://api.acedata.cloud
+# export ACEDATACLOUD_BASE_URL=https://api.acedata.cloud
+```
+
+也可以在构造客户端时显式传入，三种语言对应的参数名分别是：
+
+- TypeScript：`new AceDataCloud({ apiToken: '{token}' })`
+- Python：`AceDataCloud(api_token="{token}")`
+- Go：`adc.NewClient(adc.WithAPIToken("{token}"))`
+
+> 注意：AceDataCloud 项目仓库里约定俗成是 `ACEDATACLOUD_API_KEY`（在 `.env` / CI 里），但这三个 SDK 本身只识别 `ACEDATACLOUD_API_TOKEN`。如果你的环境里只有 `ACEDATACLOUD_API_KEY`，请在构造时显式传入。
+
+## 30 秒上手三例
+
+下面三段代码做的是同一件事：调用 `gpt-4o-mini`，让它只回复 `ADC_*_OK`。每段都附了**真实运行结果**，可以拿你自己的 token 复现。
+
+### TypeScript
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud({ apiToken: process.env.ACEDATACLOUD_API_KEY });
+
+const t0 = Date.now();
+const res = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Reply with exactly: ADC_TS_SDK_OK' }],
+  max_tokens: 20,
+  temperature: 0
+});
+console.log('elapsed_ms', Date.now() - t0);
+console.log('id', res.id);
+console.log('model', res.model);
+console.log('content', res.choices[0].message.content);
+console.log('usage', JSON.stringify(res.usage));
+```
+
+> SDK 当前把响应声明为 `Record<string, unknown>`，运行时是一个普通 JSON 对象，可以直接按字段访问。在严格 TS 项目里如果遇到类型报错，可以临时 `as any`，或者参考 [SDK 任务轮询与流式响应](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming) 自定义 typed wrapper。
+
+程序运行结果：
+
+```text
+elapsed_ms 2543
+id chatcmpl-DldCcLvkTFaioST8e6SjOl0wJScQA
+model gpt-4o-mini
+content ADC_TS_SDK_OK
+usage {"prompt_tokens":16,"completion_tokens":6,"total_tokens":22}
+```
+
+### Python
+
+```python
+import os, time, json
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_SDK_OK"}],
+    max_tokens=20,
+    temperature=0,
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("id", res["id"])
+print("model", res["model"])
+print("content", res["choices"][0]["message"]["content"])
+print("usage", json.dumps({k: v for k, v in res["usage"].items()
+                            if k in ("prompt_tokens","completion_tokens","total_tokens")}))
+```
+
+> Python SDK 当前返回的是 `dict`，所以用 `res["id"]` 而不是 `res.id`。这一点和 `openai-python` 不同，迁移时需要注意。
+
+程序运行结果：
+
+```text
+elapsed_ms 2963
+id chatcmpl-DldFdnIlhSUXINpupgsUmZL78MnBu
+model gpt-4o-mini
+content ADC_PY_SDK_OK
+usage {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+```
+
+### Go
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "time"
+
+    adc "github.com/AceDataCloud/SDK/go"
+)
+
+func main() {
+    client, err := adc.NewClient(adc.WithAPIToken(os.Getenv("ACEDATACLOUD_API_KEY")))
+    if err != nil {
+        panic(err)
+    }
+    ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+    defer cancel()
+
+    t0 := time.Now()
+    res, err := client.OpenAI().Chat().Completions().Create(ctx, adc.ChatCompletionRequest{
+        Model:     "gpt-4o-mini",
+        Messages:  []map[string]any{{"role": "user", "content": "Reply with exactly: ADC_GO_SDK_OK"}},
+        MaxTokens: 20,
+    })
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("elapsed_ms", time.Since(t0).Milliseconds())
+    fmt.Println("id", res["id"])
+    fmt.Println("model", res["model"])
+    choices := res["choices"].([]any)
+    msg := choices[0].(map[string]any)["message"].(map[string]any)
+    fmt.Println("content", msg["content"])
+    usage := res["usage"].(map[string]any)
+    fmt.Printf("usage prompt=%v completion=%v total=%v\n",
+        usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
+}
+```
+
+> Go SDK 的响应统一是 `map[string]any`，没有强类型 struct，需要自行类型断言。所有资源访问器都是方法链：`client.OpenAI().Chat().Completions().Create(...)`。
+
+程序运行结果：
+
+```text
+elapsed_ms 6436
+id chatcmpl-89DHExvFvBc4ciIPfolZYUOy7ivxv
+model gpt-4o-mini
+content ADC_GO_SDK_OK
+usage prompt=16 completion=5 total=21
+```
+
+三种语言的响应里 `id`、`elapsed_ms`、`usage` 来源都一致：经 PlatformGateway 鉴权 → 目标 OpenAI 兼容 API → 写入计费记录。`content` 字段是模型真实输出，用固定标识 `ADC_*_OK` 是为了证明响应没有被 SDK 篡改。
+
+## 推荐阅读顺序
+
+1. [TypeScript SDK 接入教程](https://platform.acedata.cloud/documents/sdk-typescript) —— `npm install` 之后第一段可以跑起来的代码。
+2. [Python SDK 接入教程](https://platform.acedata.cloud/documents/sdk-python) —— 同步、异步、流式三套用法。
+3. [Go SDK 接入教程](https://platform.acedata.cloud/documents/sdk-go) —— Go 风格的 `context.Context` 和 channel 流式。
+4. [SDK 任务轮询与流式响应](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming) —— TaskHandle 单位差异、SSE 实现细节、重试退避。
+5. [SDK + X402 支付钩子](https://platform.acedata.cloud/documents/sdk-x402-payment) —— 无 token，按调用上链结算。
+
+## 如何查看剩余额度
+
+通过 [Ace Data Cloud 控制台 - 应用列表](https://platform.acedata.cloud/console/applications)，即可查看当前账户的剩余额度。
+
+通过 [Ace Data Cloud 控制台 - 使用历史](https://platform.acedata.cloud/console/usages) 即可查看所有使用历史和扣费详情。
+
+## 了解更多
+
+- 📦 [SDK monorepo 源码](https://github.com/AceDataCloud/SDK)
+- 🔌 [X402 集成指南](https://platform.acedata.cloud/documents/x402-integration)
+- 🛠 MCP Servers 教程
+- 📊 [服务列表与定价](https://platform.acedata.cloud/services)

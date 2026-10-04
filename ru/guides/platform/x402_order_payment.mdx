@@ -1,0 +1,233 @@
+---
+title: "Руководство по оплате заказов X402"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Помимо прямой оплаты по API-запросам, Ace Data Cloud также поддерживает оплату заказов через X402. Основной протокол оплаты заказов и вызовов API одинаков: первый запрос возвращает 402, клиент подписывает `PAYMENT-SIGNATURE`, затем повторяет тот же запрос.
+
+Разница в том, что оплата заказов относится к API платформы и требует токен аккаунта; в то время как AI API, вызываемый напрямую через `x402.acedata.cloud`, может использовать только X402 и не требует API Token.
+
+## Подготовка заказа
+
+Перейдите в [консоль Ace Data Cloud](https://platform.acedata.cloud/console/orders), выберите заказ, который нужно оплатить, и запишите ID заказа.
+
+Если у вас ещё нет заказа, вы можете создать заказ, ожидающий оплаты, на странице тарифов. Цена заказа определяется отображением на странице, а `amount` в ответе X402 402 является окончательным основанием для подписи.
+
+## Создание токена аккаунта
+
+Запросы на оплату заказов требуют токена аккаунта. Откройте [страницу Token платформы](https://platform.acedata.cloud/console/platform-tokens) и создайте token формата `platform-v1-...`.
+
+В последующих запросах используйте:
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+Токен аккаунта отличается от обычного API Token. Обычный API Token используется для расходования API-кредитов; токен аккаунта используется для операций с ресурсами платформы от имени вашего аккаунта, например для оплаты заказов.
+
+## Вызов 402
+
+Сначала отправьте запрос без `PAYMENT-SIGNATURE`:
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+Статус ответа будет 402, а ответ содержит `accepts`:
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6e08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+Оплата заказов использует официальный x402 v2: `x402Version` равен `2`, `network` использует идентификатор CAIP-2, а поле суммы — `amount`.
+
+Результат выполнения программы по созданию заказа на 10 Credits и вызову 402:
+
+> Следующие записи транзакций являются историческими образцами фактического тестирования в рамках старой политики, суммы и хеши транзакций сохранены без изменений. Новые заказы X402 больше не получают скидку за способ оплаты; используйте `amount` из текущего ответа 402 в качестве основания для подписи и оплаты.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+Описание результата:
+
+- После успешного создания заказа его статус — `Pending`, в этот момент он ещё не оплачен в блокчейне.
+- Первый запрос `pay/` не содержит `PAYMENT-SIGNATURE`, поэтому возвращает HTTP 402.
+- `accepts` одновременно предоставляет Base `exact` и Solana `exact`; в дальнейшем в этом руководстве выбирается Base.
+- Цена при создании заказа составляет `1.26`; при оплате в период старой политики скидок X402 фактическая сумма подписи и расчёта составляет `1.2` USDC, что соответствует `1200000` atomic USDC.
+
+Обратите внимание, что `resource` здесь — это поле, возвращаемое сервером и участвующее в подписи; клиент не должен самостоятельно изменять содержащиеся в нём протокол, путь или ID заказа.
+
+## Подпись и повторная попытка
+
+Для оплаты заказов можно повторно использовать `@acedatacloud/x402-client` или низкоуровневые функции подписи `acedatacloud-x402`. Ниже приведён пример TypeScript:
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+Результат выполнения программы после подписи и повторной попытки для того же заказа с Base `exact`:
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+Результат подтверждения в блокчейне:
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+Описание результата:
+
+- `status 200` означает, что интерфейс оплаты заказа платформы принял эту `PAYMENT-SIGNATURE`.
+- `has_x_payment_response True` означает, что заголовок ответа содержит квитанцию `PAYMENT-RESPONSE` в кодировке Base64.
+- `settle_header.success=True` и `network=base` означают, что Facilitator завершил settlement в Base.
+- Итоговый статус заказа — `Finished`, `pay_way` — `X402`, а в `pay_id` записан хеш ончейн-транзакции.
+- Событие `Transfer` в BaseScan показывает, что адрес плательщика перевёл на адрес получения средств платформы `1200000` atomic USDC, то есть `1.2` USDC.
+
+## Успешный ответ и квитанция
+
+После успешной оплаты заказа тело ответа содержит информацию о заказе. Платформа также передаёт в заголовке ответа `PAYMENT-RESPONSE` ответ о settlement в кодировке Base64; после декодирования часто встречаются следующие поля:
+
+| Поле            | Описание                           |
+| ------------- | ---------------------------- |
+| `success`     | Успешно ли завершён settlement Facilitator. |
+| `transaction` | Хеш ончейн-транзакции settlement.                    |
+| `network`     | Платёжная сеть.                        |
+| `payer`       | Адрес кошелька плательщика.                      |
+| `amount`      | Фактическая сумма settlement в atomic units.      |
+
+Если вам требуется сверка, рекомендуется одновременно сохранять ID заказа, адрес кошелька плательщика, `transaction` и итоговый статус заказа.
+
+## Примечания
+
+- Для оплаты заказа требуется токен аккаунта платформы; нельзя завершить её, полагаясь только на подпись кошелька X402.
+- `amount` использует atomic units USDC, `1200000` означает `1.2` USDC.
+- Не формируйте самостоятельно адрес получения средств или адрес актива; ориентируйтесь на `accepts` в ответе 402.
+- Если одна и та же `PAYMENT-SIGNATURE` отправляется повторно, Facilitator применяет защиту от повторного воспроизведения по nonce.
+
+## Ответ при неудачной оплате
+
+Первый HTTP 402 без `PAYMENT-SIGNATURE` является обычным платёжным вызовом и не означает неудачу оплаты. При сбое проверки или settlement после подписи в качестве совместимого резерва по-прежнему сохраняется стандартная строка `error`, а стабильная структура ошибки возвращается в `extensions.acedatacloud.paymentError`:
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+Клиенту следует в первую очередь локализовать по `code`; для неизвестного code следует использовать общий сбой оплаты. `charged` — трёхсоставное поле: `false` возвращается только при явном отклонении до settlement; отсутствие поля означает, что статус списания неизвестен, и его нельзя трактовать как «средства не списаны». После перехода текущего заказа в `Failed` повторная попытка для того же заказа невозможна; после исправления проблемы с кошельком создайте новый заказ.
+
+Не записывайте и не отправляйте полную `PAYMENT-SIGNATURE`, подпись кошелька, payload авторизации, исходную диагностику Facilitator или ответы RPC. Для проверки службе поддержки достаточно ID заказа и публичного `code` ошибки.

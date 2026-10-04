@@ -1,0 +1,146 @@
+---
+title: "Esportare i record di chiamata API della piattaforma AceDataCloud"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Scarica direttamente in formato CSV i dettagli delle chiamate API dell'account corrente, ideale per la riconciliazione finanziaria, l'analisi offline o la conservazione di grandi volumi di record. Se è necessario visualizzare solo una piccola quantità di dettagli nella pagina, utilizzare prima l'[elenco dei record di chiamata](https://platform.acedata.cloud/documents/platform-usage-list).
+
+## Preparazione
+
+1. Accedi alla [piattaforma AceDataCloud](https://platform.acedata.cloud).
+2. Crea un token dell'account nella [console Account Token](https://platform.acedata.cloud/console/platform-tokens) e salvalo immediatamente nel gestore di password o nel Secret Manager.
+3. Ottieni gli ID di filtro necessari dall'[elenco delle richieste di servizio](https://platform.acedata.cloud/documents/platform-application-list), dall'[elenco delle credenziali API](https://platform.acedata.cloud/documents/platform-credential-list) o dall'[elenco delle API](https://platform.acedata.cloud/documents/platform-api-list).
+
+Per la descrizione completa dei token, consulta [gestire i token dell'account](https://platform.acedata.cloud/documents/platform-token). Il token dell'account e la Credential per chiamare le API aziendali non possono essere usati in modo intercambiabile.
+
+```shell
+export PLATFORM_TOKEN='你的账户令牌'
+```
+
+## Panoramica dell'interfaccia
+
+| Voce           | Contenuto                                                  |
+| -------------- | ---------------------------------------------------------- |
+| Metodo         | `GET`                                                      |
+| URL            | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| Autenticazione | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope    | `usage:read` (`platform:read` / `platform` possono includerlo) |
+| Risposta       | `200 text/csv; charset=utf-8`                              |
+| Nome file      | `usages.csv`                                               |
+
+Questa interfaccia restituisce sincronicamente il CSV in streaming, non crea attività di esportazione e non restituisce JSON né link di download. Solo quando non vengono forniti né l'orario di inizio né quello di fine, per impostazione predefinita vengono esportati i record dall'inizio del mese naturale corrente fino al momento corrente; quando viene fornito un solo limite, l'altro limite non viene automaticamente completato con il limite del mese corrente.
+
+## Parametri di query
+
+| Parametro         | Tipo     | Obbligatorio | Predefinito | Descrizione                                      |
+| ----------------- | -------- | ------------ | ----------- | ------------------------------------------------ |
+| `perspective`     | string   | No           | `both`      | `billing`, `actor` o `both`                      |
+| `service_id`      | UUID     | No           | —           | Filtra per servizio; supporta parametri ripetuti |
+| `application_id`  | UUID     | No           | —           | Filtra per Application; supporta parametri ripetuti |
+| `api_id`          | UUID     | No           | —           | Filtra per API; supporta parametri ripetuti      |
+| `credential_id`   | UUID     | No           | —           | Filtra per credenziale API; supporta parametri ripetuti |
+| `status_code`     | integer  | No           | —           | Supporta valori ripetuti o separati da virgole   |
+| `created_at_from` | datetime | No           | —           | Ora di inizio ISO 8601                           |
+| `created_at_to`   | datetime | No           | —           | Ora di fine ISO 8601                             |
+
+L'ambito di esportazione è sempre limitato ai record visibili per l'account corrente come soggetto pagatore e/o chiamante effettivo; non è supportata l'esportazione tra account diversi.
+
+## Esempi di richiesta
+
+Salva direttamente il CSV del mese corrente:
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Esporta per Application, orario e codice di stato:
+
+```shell
+export APPLICATION_ID='你的 Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Salvataggio in streaming e verifica dell'integrità con Python:
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("服务器没有返回 CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"导出不完整：{last_line}")
+```
+
+## Colonne CSV
+
+L'ordine dell'intestazione CSV è fisso:
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| Colonna            | Descrizione                                             |
+| ------------------ | ------------------------------------------------------- |
+| `Usage ID`         | ID del record di chiamata                               |
+| `API`              | Titolo API; se non può essere associato, potrebbe essere l'ID API o un valore vuoto |
+| `Status Code`      | Codice di stato HTTP                                    |
+| `Deducted Amount`  | Quota effettivamente detratta finale                    |
+| `Original Amount`  | Quota originale prima dello sconto dell'applicazione    |
+| `Trace ID`         | Identificatore di tracciamento della richiesta          |
+| `Created At`       | Ora di creazione del record, ISO 8601                   |
+
+L'unità di quota è determinata da `service.unit` dell'Application corrispondente.
+
+## Determinare se l'esportazione è completa
+
+Una singola esportazione produce al massimo 1.000.000 di record. Dopo che il server ha iniziato a restituire il CSV, non può più trasformare un errore intermedio in un altro stato HTTP, pertanto il client deve controllare l'ultima riga:
+
+- `# truncated:`: è stato raggiunto il limite di righe; esportare in segmenti con finestre temporali più piccole.
+- `# error:`: la lettura in streaming è stata interrotta; ridurre l'intervallo e riesportare.
+
+Quando un programma di riconciliazione rileva uno qualsiasi dei marker, deve considerare il file incompleto e non può registrarlo silenziosamente.
+
+## Errori e nuovi tentativi
+
+| Situazione                   | Modalità di gestione                                      |
+| ---------------------------- | --------------------------------------------------------- |
+| `400 usage_history_expired`  | Usa `available_from` nella risposta per adeguarti all'intervallo degli ultimi 60 giorni |
+| `401 not_authenticated`      | Verifica che l'Account Token esista, sia corretto e non sia stato eliminato |
+| Risposta non CSV             | Non salvarla come file riuscito; prima leggi la risposta di errore e correggi la richiesta |
+| Download interrotto o marker | Riduci la finestra temporale e riesporta usando una strategia di backoff |
+
+## Passi successivi
+
+- [Visualizzare i record di chiamata](https://platform.acedata.cloud/documents/platform-usage-list): filtrare online e individuare singole richieste.
+- [Aggregare il volume di chiamate](https://platform.acedata.cloud/documents/platform-usage-aggregate): visualizzare dati aggregati per data, API o modello.
+- [Visualizzare i dettagli della richiesta di servizio](https://platform.acedata.cloud/documents/platform-application-detail): verificare l'unità di quota e la quota rimanente.

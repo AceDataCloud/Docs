@@ -1,0 +1,229 @@
+---
+title: "X402 Facilitator 集成"
+description: "Platform 整合指南 - Ace Data Cloud"
+---
+
+Facilitator 是 X402 链路中的服務端結算組件。客戶端負責簽名，Gateway 或你的服務端負責調用 Facilitator 的 `/verify` 和 `/settle`。
+
+Ace Data Cloud 的生產 Facilitator 地址為：
+
+```text
+https://facilitator.acedata.cloud
+```
+
+源碼倉庫：[https://github.com/AceDataCloud/FacilitatorX402](https://github.com/AceDataCloud/FacilitatorX402)
+
+## v2 wire 約定
+
+Ace Data Cloud 的 X402 鏈路已全量使用官方 x402 v2，不再接受 v1 的 `X-Payment` 請求頭。接入時需要注意三點：
+
+- 請求頭是 `PAYMENT-SIGNATURE`，值是 base64 編碼的 JSON envelope。
+- envelope 頂層必須是 `x402Version: 2`，並用 `accepted` 對象聲明本次選擇的 `scheme` 和 `network`。
+- `network` 使用 CAIP-2 標識（如 `eip155:8453`），不能寫 `base` 這類簡稱。
+
+envelope 結構：
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": { "...": "..." }
+}
+```
+
+402 響應除 JSON body 外，還會帶一個 `PAYMENT-REQUIRED` 響應頭，值是同一份挑戰內容的 base64 編碼，便於客戶端在不解析 body 的情況下讀取支付要求。
+
+## 核心接口
+
+### `GET /supported`
+
+查看支持的網絡和 scheme：
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+返回示例：
+
+```json
+{
+  "kinds": [
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": {
+        "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708"
+      }
+    },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "eip155:1187947933"
+    },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": {
+        "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"
+      }
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "eip155:*": [
+      "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708",
+      "0xd0479FA9FD8C678303d477433d24C15e3723CC1C"
+    ],
+    "solana:*": [
+      "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq"
+    ]
+  }
+}
+```
+
+結果說明：
+
+- `network` 使用 CAIP-2 標識，不是 `base`、`skale` 這類簡稱。
+- `/supported` 表示 Facilitator 具備對應驗證與結算能力。
+- Base、SKALE 和 Solana 都支持 `exact`；`upto` 目前只在 Base 上提供。
+- `signers` 是 Facilitator 用於提交結算交易的地址。
+- 某個具體 API 是否允許這些選項，仍以該 API 的 402 `accepts` 為準。
+
+### `POST /verify`
+
+驗證客戶端傳來的 `PAYMENT-SIGNATURE` 是否滿足某個 payment requirement。
+
+請求體：
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "exact",
+      "network": "eip155:8453"
+    },
+    "payload": { "...": "..." }
+  },
+  "paymentRequirements": {
+    "scheme": "exact",
+    "network": "eip155:8453",
+    "asset": "0x...",
+    "amount": "95215",
+    "payTo": "0x...",
+    "maxTimeoutSeconds": 3600,
+    "extra": { "...": "..." }
+  }
+}
+```
+
+v2 的 `paymentRequirements` 字段是 `scheme`、`network`、`asset`、`amount`、`payTo`、`maxTimeoutSeconds` 和 `extra`，金額字段是 `amount`。API 402 響應的 `accepts[]` 裡還會額外返回 `maxAmountRequired` 供客戶端讀取上限，但它不屬於 Facilitator 請求體的字段。
+
+成功響應：
+
+```json
+{
+  "isValid": true,
+  "invalidReason": null,
+  "payer": "0x..."
+}
+```
+
+生產訂單支付的 `PAYMENT-RESPONSE` 響應頭解碼後包含 settlement 結果。Base 訂單支付的程序運行結果：
+
+```text
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order 78481793-304e-47f7-bc0c-8231aec9cc1e state Finished pay_way X402 price 1.2
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+結果說明：
+
+- `success=True` 表示 Facilitator settlement 成功。
+- `transaction` 是鏈上交易哈希，訂單的 `pay_id` 也寫入同一個值。
+- explorer 上可以看到 `1200000` atomic USDC 的 Base USDC 轉帳。
+- `errorReason=None` 表示這次 settlement 沒有返回業務錯誤。
+
+驗證失敗也通常返回 HTTP 200，但 `isValid` 為 `false`。業務側應該讀取 `invalidReason`，而不是只看 HTTP 狀態碼。
+
+### `POST /settle`
+
+把已經驗證過的授權結算到鏈上。
+
+請求體和 `/verify` 基本一致。`upto` 的區別是：`paymentRequirements.amount` 在 settle 時改寫為實際結算金額；簽名上限由 Facilitator 在 verify 階段記錄，settle 時校驗實際金額不得超過該上限。
+
+成功響應：
+
+```json
+{
+  "success": true,
+  "errorReason": null,
+  "transaction": "0x...",
+  "network": "eip155:8453",
+  "payer": "0x...",
+  "amount": "3"
+}
+```
+
+如果 `upto` 實際金額為 0，`transaction` 可能為空字符串，表示無需發鏈上交易。
+
+## Ace Data Cloud Gateway 如何使用 Facilitator
+
+Ace Data Cloud API Gateway 的鏈路如下：
+
+1. 客戶端第一次請求 API，不帶 `Authorization` 和 `PAYMENT-SIGNATURE`。
+2. Gateway 計算請求的預估價格，返回 402 和 `accepts`。
+3. 客戶端簽名後帶 `PAYMENT-SIGNATURE` 重試。
+4. Gateway 解碼 `PAYMENT-SIGNATURE`，選擇匹配的 payment requirement。
+5. Gateway 調用 Facilitator `/verify`。
+6. `/verify` 成功後，Gateway 放行請求到目標 API。
+7. 目標 API 返回後，Gateway 在 `/record` 階段調用 Facilitator `/settle`。
+8. Gateway 把鏈上交易哈希寫入使用記錄 metadata。
+`exact` 在步驟 7 結算簽名金額；`upto` 在步驟 7 根據真實用量寫入 `amount`，再結算實際金額。
+
+## 自己的 API 如何接入
+
+如果你要讓自己的 API 支持 X402，可以按這個結構實現：
+
+1. 為每個付費接口準備 `paymentRequirements`，包含網路、金額、收款地址、資產地址和簽名 domain。
+2. 如果請求沒有 `PAYMENT-SIGNATURE`，返回 HTTP 402 和 `accepts`。
+3. 如果請求有 `PAYMENT-SIGNATURE`，Base64 解碼得到 `paymentPayload`。
+4. 呼叫 Facilitator `/verify`。
+5. 驗證成功後執行業務邏輯。
+6. 業務成功後呼叫 Facilitator `/settle`。
+7. 保存 `payer`、`transaction`、`amount`、`network` 以便對帳。
+
+服務端必須用自己生成的 `paymentRequirements` 調 `/verify` 和 `/settle`，不要信任客戶端回傳的金額、收款地址或資產地址。
+
+## 重放保護
+
+Facilitator 會記錄 nonce。相同 nonce 的授權不能重複驗證和結算。
+
+這意味著：
+
+- 客戶端每次請求都應該簽一個新的 envelope；
+- 如果 `/settle` 已提交交易但暫時沒有確認，可以用相同 nonce 重試 `/settle` 做幂等對帳；
+- 不要把同一個 `PAYMENT-SIGNATURE` 快取後用於多次 API 呼叫。
+
+## 常見錯誤
+
+| 錯誤                                           | 常見原因                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `Authorization nonce already processed`      | 重複使用了同一個 `PAYMENT-SIGNATURE`。                                    |
+| `Authorization destination mismatch`         | 客戶端簽名中的 `to` 與 payment requirement 的 `payTo` 不一致。                |
+| `invalid_upto_evm_payload_invalid_signature` | `upto` typed data 的 chainId、facilitator、Permit2 domain 或簽名地址不一致。 |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | 錢包還沒有對 Permit2 approve 足夠 USDC allowance。                        |
+| `Payer has insufficient USDC balance`        | 付款錢包 USDC 不足。                                                    |
+| `Solana signer private key not configured`   | Facilitator 需要作為 fee payer 簽名，但服務端缺少 Solana signer 配置。           |

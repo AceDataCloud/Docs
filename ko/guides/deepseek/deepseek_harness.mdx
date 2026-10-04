@@ -1,0 +1,119 @@
+---
+title: "DeepSeek Harness 접속 Coding Plan"
+description: "DeepSeek AI API guide - Ace Data Cloud"
+---
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)는 로컬에서 실행되는 프로그래밍 에이전트입니다. 작업 공간을 읽고, 도구를 호출하며, 명령을 실행한 후 OpenAI 호환 Chat Completions 인터페이스를 통해 모델을 호출합니다.
+
+> 본 문서는 `deepseek-harness-sdk==0.1.0rc6` 및 `deepseek-harness-runtime-bin==0.1.0rc6`에 적합합니다. 클라이언트를 업그레이드한 후, 아래의 읽기 전용 파일 테스트를 다시 완료하십시오.
+
+## 지원 범위
+
+| 항목           | 구성                                     |
+| ------------ | -------------------------------------- |
+| API Base URL | `https://api.acedata.cloud/v1`         |
+| 모델           | `deepseek-v4-pro`                      |
+| 프로토콜       | OpenAI 호환 Chat Completions(스트리밍) |
+| 능력           | 텍스트, 추론 과정, 함수 도구 호출, 로컬 Bash 도구 루프, 사용 통계   |
+
+모델 디렉토리는 변경될 수 있습니다. 실행 전에 Coding Plan 전용 키를 사용하여 실시간 디렉토리를 조회하십시오:
+
+```bash
+curl https://api.acedata.cloud/v1/models \
+  -H "Authorization: Bearer $ACEDATACLOUD_API_KEY"
+```
+
+응답에 `deepseek-v4-pro`가 포함되어 있는지 확인하십시오. `deepseek-v4-flash`를 본 문서의 도구 모드의 동등한 대체로 사용하지 마십시오; 이번 고정 버전 검증에서, 그것의 다중 추론 이력과 도구 재생이 통과하지 않았습니다.
+
+## 1. 전용 키 준비
+
+[Coding Plan 애플리케이션](https://platform.acedata.cloud/console/applications)을 열고, 구매한 Coding Application에 들어가 전용 API Key를 생성하거나 복사하십시오. Coding Plan은 일반 잔액을 사용하지 않으며, 다른 애플리케이션의 키는 패키지 권한을 대표할 수 없습니다.
+
+키를 현재 셸에만 넣으십시오:
+
+```bash
+export ACEDATACLOUD_API_KEY="PASTE_YOUR_CODING_KEY_HERE"
+export DEEPSEEK_BASE_URL="https://api.acedata.cloud/v1"
+export DEEPSEEK_API_KEY="$ACEDATACLOUD_API_KEY"
+```
+
+실제 키를 스크립트, 구성 저장소, 터미널 스크린샷 또는 세션 기록에 작성하지 마십시오.
+
+## 2. 격리된 작업 공간 생성
+
+Harness의 번들된 런타임은 로컬 Bash 도구를 포함합니다. 첫 번째 검증에서는 실제 프로젝트나 홈 디렉토리를 가리키지 마십시오; 비밀이 없는 일회성 디렉토리를 생성하십시오:
+
+```bash
+mkdir -p /tmp/deepseek-harness-demo/workspace
+mkdir -p /tmp/deepseek-harness-demo/sessions
+printf 'compatibility fixture\n' > /tmp/deepseek-harness-demo/workspace/fixture.txt
+python3 -m venv /tmp/deepseek-harness-demo/venv
+/tmp/deepseek-harness-demo/venv/bin/pip install \
+  "deepseek-harness-sdk==0.1.0rc6"
+```
+
+회사의 네트워크가 개인 PyPI 미러를 사용하는 경우, 미러에 동일한 버전의 `deepseek-harness-runtime-bin`이 동시에 존재하는지 먼저 확인하십시오. `danger-full-access`를 사용하여 파일 접근 범위를 확대하지 마십시오; 본 문서의 예시는 일회성 디렉토리만 `cwd`에 전달합니다.
+
+## 3. 공식 Python SDK 실행
+
+아래 내용을 `/tmp/deepseek-harness-demo/run.py`로 저장하십시오:
+
+```python
+import os
+
+from deepseek_harness import DeepSeekHarness
+
+with DeepSeekHarness(
+    provider="deepseek-official",
+    model="deepseek-v4-pro",
+    max_tokens=160,
+    cwd="/tmp/deepseek-harness-demo/workspace",
+    session_root="/tmp/deepseek-harness-demo/sessions",
+    base_url=os.environ["DEEPSEEK_BASE_URL"],
+    api_key=os.environ["DEEPSEEK_API_KEY"],
+    request_timeout_seconds=180,
+) as harness:
+    result = harness.run(
+        "Read fixture.txt once, then reply with exactly: sdk-harness-ok",
+        session_id="acedatacloud-compat",
+    )
+
+print(result.final_response)
+print(result.finish_reason)
+```
+
+실행:
+
+```bash
+/tmp/deepseek-harness-demo/venv/bin/python \
+  /tmp/deepseek-harness-demo/run.py
+```
+
+예상 결과:
+
+```text
+sdk-harness-ok
+completed
+```
+
+이 단계는 Bearer 인증, `/v1/chat/completions`, SSE, 추론 내용, 도구 호출 및 도구 결과 회신을 동시에 검증합니다. 완료 후 `/tmp/deepseek-harness-demo`를 삭제할 수 있으며; 세션 디렉토리에 프로젝트 컨텍스트가 포함되어 있다면, 코드 저장소와 동일한 민감도 수준으로 보관해야 합니다.
+
+## 자주 묻는 질문
+
+- **401**: `ACEDATACLOUD_API_KEY`가 Python을 실행하는 동일한 셸에 내보내졌는지 확인하십시오.
+- **403 또는 한도 알림**: 키가 현재 Coding Application에 속하며, 패키지가 여전히 유효하고 잔여 한도가 있는지 확인하십시오.
+- **모델 사용 불가**: `/v1/models`를 다시 조회하고, 이전 스크린샷을 기반으로 모델 이름을 추측하지 마십시오.
+- **`reasoning_content` / 도구 재생 오류**: SDK/runtime가 본 문서의 고정 버전이며, `deepseek-v4-pro`를 사용하고 있는지 확인하십시오.
+- **도구 실행 횟수 이상**: 부작용을 일으킬 수 있는 작업을 중지하고, 본 문서의 읽기 전용 fixture로 현재 서비스 버전을 검증하십시오.
+- **설치 실패**: Python 3.10+, 운영 체제 아키텍처가 현재 wheel을 지원하는지 확인하고, SDK/runtime 버전이 일치하는지 확인하십시오.
+
+## 능력 경계
+
+본 문서는 로컬 Python SDK에서 Chat Completions의 텍스트 및 도구 루프만 검증합니다. 이미지, Files API, `/v1/responses`, `/v1/messages`, 원격 작업 공간 및 호스팅 샌드박스는 본 튜토리얼의 약속 범위에 포함되지 않으며; 작업 공간 권한 및 로컬 명령 위험은 Harness를 실행하는 머신과 구성에 의해 책임집니다.
+
+## 공식 참고
+
+- [DeepSeek Harness 저장소](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness Python SDK](https://github.com/deepseek-ai/deepseek-harness/blob/master/python/sdk/README.md)
+
+[Coding Plan 구성 센터](https://platform.acedata.cloud/documents/coding-plan-integration)로 돌아가기.

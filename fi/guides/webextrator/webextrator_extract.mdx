@@ -1,67 +1,398 @@
 ---
 title: "WebExtrator älykäs poiminta API -integrointiohje"
-description: "WebExtrator Web Render & Extract 集成指南 - Ace Data Cloud"
+description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
 `POST https://api.acedata.cloud/webextrator/extract`
 
-Sisällön poiminta perustuen `/webextrator/render` -rajapintaan. Kaikkien render-rajapinnan parametrien lisäksi tuetaan:
+WebExtrator älykäs poiminta API muuntaa URL-osoitteen **tyypitettyyn rakenteelliseen tulokseen** — artikkeli, tuote, resepti, video, keskustelu, rekrytointi jne., mukana puhdistettu Markdown ja pelkkä teksti. Tämä rajapinta on tarkoitettu, kun haluat "puhdasta rakenteellista dataa" eikä raakaa HTML:ää.
 
-| Kenttä | Tyyppi | Pakollinen | Oletus | Kuvaus |
-|--------|--------|:----------:|--------|--------|
-| `expected_type` | string | ❌ | `markdown` | Odotettu poiminnan tulos: `markdown` / `article` / `text` / `links` / `structured` |
-| `enable_llm` | boolean | ❌ | false | LLM-jälkikäsittelyn käyttöönottaminen (sopii `article` / `structured`) |
-| `instruction` | string | ❌ | - | LLM-poimintaohje, esim. "poimi tuotteen otsikko, hinta, tekniset tiedot" |
+Taustalla on kolmitasoinen putkisto:
+
+1. **schema.org JSON-LD -kartoitin** — deterministinen, nolla LLM-kustannusta. Kattaa Wikipedia / BestBuy / AllRecipes / YouTube / suurimman osan uutisista / suurimman osan tuotesivuista.
+2. **tyypitetty LLM-poiminta** — aktivoituu vain, jos schema.org ei osu. Valitsee skeeman sivutyypin mukaan, Zod tiukka validointi.
+3. **Readability + Markdown varmistus** — ajetaan aina, täydentää kahden ensimmäisen tason puuttuvat yläkentät.
+
+URL:n toistuvat pyynnöt tallennetaan Redis-välimuistiin, &lt;1 ms vaste.
+
+## Hakuprosessi
+
+WebExtrator-palvelun käyttämiseksi mene ensin [Ace Data Cloud -konsoliin](https://platform.acedata.cloud/console/applications) ja hae API Token, pidä se tallessa.
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Jos et ole kirjautunut sisään tai rekisteröitynyt, sinut ohjataan automaattisesti kirjautumissivulle rekisteröitymään ja kirjautumaan, jonka jälkeen palaat automaattisesti tälle sivulle.
+
+**Yhdellä API Tokenilla voit kutsua kaikkia alustan palveluita, ei tarvitse hakea erikseen jokaiselle palvelulle.** Ensimmäisellä haulla saat ilmaisen käyttöoikeuden kokeiluun; kun saldo loppuu, voit ladata yleistä saldoa [konsolista](https://platform.acedata.cloud/console/coin).
+
+> 📘 Täydellinen dokumentaatio: [WebExtrator palvelu →](https://platform.acedata.cloud/service/webextrator)
+
+## Todennus
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+## Pyyntöparametrit
+
+Extract hyväksyy **kaikki** [Render API](/fi/guides/webextrator/webextrator_render) parametrit  
+(`url`, `user_agent`, `timeout`, `wait_until`, `delay`, `wait_for_selector`,  
+`block_resources`, `headers`, `cookies`, `callback_url`, `bypass_cache`,  
+`cache_ttl_seconds`, `async`), sekä kaksi Extract-spesifistä kenttää:
+
+| Kenttä           | Tyyppi   | Pakollinen | Oletus     | Kuvaus                                                                                   |
+| --------------- | -------- | :--------: | --------- | --------------------------------------------------------------------------------------- |
+| `expected_type` | enum     |     ❌     | Automaattinen | Sivun tyyppi vihjeenä: `product` / `article` / `general`. Ohittaa URL / tekstin heuristiikan ja käyttää suoraan vastaavaa haaraa. |
+| `enable_llm`    | boolean  |     ❌     | `false`   | Sallii LLM-poiminnan, jos schema.org ei osu. Tarvitaan Amazon / HN / Greenhouse kaltaisilla sivuilla, joissa ei ole JSON-LD:tä, jotta saadaan tyypitetty tulos. |
+
+> Jos sivulla on schema.org JSON-LD, `enable_llm` on tehoton — deterministinen kartoitin antaa tuloksen suoraan,  
+> LLM-kutsuja ei koskaan tuhlata. Saat **ilmaiseksi** tyypitetyn tuloksen.
 
 ## Synkroninen vastaus
 
 ```json
 {
   "success": true,
-  "task_id": "550e8400-...",
-  "trace_id": "550e8400-...",
-  "started_at": "2026-05-02T10:30:00.123Z",
-  "finished_at": "2026-05-02T10:30:08.789Z",
-  "elapsed": 8.666,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+  "started_at": 1777717800.123,
+  "finished_at": 1777717802.535,
+  "elapsed": 2.412,
   "data": {
     "kind": "extract",
-    "expected_type": "article",
-    "url": "https://example.com/post/1",
-    "title": "示例文章",
-    "author": "张三",
-    "published_at": "2026-05-01",
-    "content": "# 示例文章\n\n正文 ...",
-    "summary": "本文介绍 ..."
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "finalUrl": "https://en.wikipedia.org/wiki/Diffbot",
+    "contentType": "article",
+    "title": "Diffbot",
+    "description": "American machine learning and knowledge management company",
+    "byline": "Contributors to Wikimedia projects",
+    "language": "en",
+    "siteName": "Wikipedia",
+    "publishedAt": "2007-08-08T05:47:27Z",
+    "images": ["https://en.wikipedia.org/static/images/icons/enwiki-25.svg"],
+    "links": ["https://en.wikipedia.org/wiki/Machine_learning"],
+    "markdown": "# Diffbot\n\nDiffbot is a developer of machine learning ...",
+    "text": "Diffbot is a developer of machine learning algorithms ...",
+    "structured": {
+      "schemaOrg": { "primary": { /* tyypitetty entiteetti */ }, "breadcrumbs": [], "all": [] },
+      "openGraph": { "title": "...", "description": "...", "image": "...", "type": "..." },
+      "jsonLd": [ /* alkuperäinen JSON-LD */ ]
+    },
+    "rawSignals": {
+      "hasJsonLd": true,
+      "title": "Diffbot - Wikipedia",
+      "metaDescription": null,
+      "pageStatus": 200,
+      "textLength": 11473
+    },
+    "elapsedMs": 2412
   }
 }
 ```
 
-Asynkroninen tila, virhekoodit ja hinnoittelusäännöt ovat täysin samat kuin `/webextrator/render` -rajapinnassa.
+### Ylätason kentät
 
-## Esimerkki: artikkelin tekstin poiminta (LLM käytössä)
+| Kenttä           | Tyyppi    | Kuvaus                                                                                   |
+| --------------- | --------- | --------------------------------------------------------------------------------------- |
+| `kind`          | string    | Kiinteä `"extract"`.                                                                     |
+| `url`           | string    | Lähettämäsi URL.                                                                         |
+| `finalUrl`      | string    | Uudelleenohjauksen jälkeinen lopullinen URL.                                            |
+| `contentType`   | enum      | `product` / `article` / `general`, määrittyy `expected_type` → schema.org primary → heuristiikka. |
+| `title`         | string    | Readability `<title>` tai renderöity `document.title`.                                  |
+| `description`   | string?   | Prioriteetti: `<meta name="description" />` → `og:description` → schema.org / LLM-poiminta → leikatun ensimmäisen kappaleen teksti. |
+| `byline`        | string?   | Tekijä / kanava / yritys. Lähde `<meta name="author" />` → schema.org / LLM.               |
+| `language`      | string?   | `<html lang>`.                                                                          |
+| `siteName`      | string?   | `og:site_name`.                                                                         |
+| `publishedAt`   | string?   | ISO 8601. Prioriteetti: `article:published_time` → `<time datetime>` → schema.org / LLM. |
+| `images`        | string[]  | Enintään 50 `<img src />`, absoluuttiset URL:t, duplikaatit poistettu, `data:` URI:t hylätty. |
+| `links`         | string[]  | Enintään 100 ulkoista linkkiä, suodatettu fragmentit / `javascript:` / `mailto:` / `tel:`. |
+| `markdown`      | string    | Turndownilla tuotettu Markdown.                                                        |
+| `text`          | string    | Mozilla Readabilityllä poimittu `textContent`.                                         |
+| `structured`    | object    | Täydellinen rakenteellinen tulos, katso alla.                                          |
+| `rawSignals`    | object    | Debuggausdiagnostiikkaa.                                                                |
+| `cached`        | boolean?  | `true`, jos osui välimuistiin.                                                         |
+| `cacheStoredAt` | number?   | Välimuistimerkinnän ensimmäisen tallennuksen Unix millisekuntiaikaleima.                |
+
+### `data.structured` alikentät
+| Alakenttä      | Milloin ilmestyy         | Selitys                                                                 |
+| -------------- | ----------------------- | ---------------------------------------------------------------------- |
+| `schemaOrg`    | Aina                   | `{ primary, breadcrumbs, all }`. `primary` on korkein prioriteetti tyypitetylle entiteetille; jos ei löydy, niin `null`. |
+| `openGraph`    | Aina                   | `{ title, description, image, type }`, peräisin `<meta property="og:*" />`.   |
+| `jsonLd`       | Aina                   | Kaikki `<script type="application/ld+json">` lohkot alkuperäisenä JSON-taulukkona.               |
+| `llm`          | Kun LLM on suoritettu ja onnistunut | `{ kind, data, model, promptCharCount }`, Zod validoitu tyypitetty tulos.              |
+| `llmError`     | Kun LLM on suoritettu mutta epäonnistunut | `{ kind, error, model }`, pyyntö ei kaadu tämän vuoksi, heuristiset tulokset palautuvat silti.                         |
+| `amazon`       | Kun URL on `amazon.*`  | Vanhojen amazon-erityisten kaappaustulosten tulokset (tulee vähitellen poistumaan).                                            |
+
+## schema.org -kartoituksen kattavuus
+
+Prioriteettijärjestyksessä (osuu `structured.schemaOrg.primary`):
+
+| schema.org -tyyppi                                                                                          | Kartoitus kind | Tulostuskentät                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Product`                                                                                                  | tuote          | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]`                                 |
+| `Recipe`                                                                                                   | resepti        | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
+| `VideoObject`                                                                                              | video          | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount`                                                                                 |
+| `JobPosting`                                                                                               | työ            | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType`                                                                              |
+| `Event` (mukaan lukien `*Event`)                                                                          | tapahtuma      | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}`                                                                                  |
+| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | artikkeli      | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]`                                                                                 |
+| `FAQPage`                                                                                                  | faq            | `questions[{question, answer}]`                                                                                                                                                          |
+| `BreadcrumbList`                                                                                           | (liitetty sisarukseen) | Aina tulostuu `structured.schemaOrg.breadcrumbs[]`, ei toimi primäärinä.                                                                                                                                 |
+
+Kartoitin käsittelee:
+
+- `@graph` säiliö (rekursiivinen laajennus);
+- `@type` taulukko (kuten `["Recipe", "NewsArticle"]` — molemmat tunnistetaan, prioriteetti voittaa);
+- `http://schema.org/` etuliitevariantit;
+- Sisäkkäiset `Offer` ja `AggregateOffer` (jälkimmäinen lukee `lowPrice`);
+- Suhteelliset kuvien URL-osoitteet (ratkaistaan `finalUrl` absoluuttiseksi).
+
+## LLM-tyypitetty Schema
+
+Kun `enable_llm: true` **ja** schema.org ei ole primääristä, kaappaaja käyttää URL-heuristiikkaa
+(tai `expected_type` vihje) valitakseen alla olevista Zod Schema -validoituista mallin tuloksista:
+
+| Kind         | URL-heuristiikka                                                                         | Pakolliset kentät | Valinnaiset kentät                                                                                                                                                                         |
+| ------------ | -------------------------------------------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `article`    | Teksti ≥400 sanaa ja muut eivät osuneet                                                  | `headline`       | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]`                                                                                                   |
+| `product`    | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*`                   | `name`           | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]`                                                               |
+| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs`                                       | `title`          | `author, postedAt, points, commentCount, body, url`                                                                                                                                   |
+| `recipe`     | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes`   | `name`           | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]`                                                       |
+| `video`      | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video`                  | `name`           | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript`                                                                                          |
+| `job`        | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr`             | `title`          | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
+
+LLM onnistuneena täyttää myös ylimmät kentät "viimeisenä keinona":
+
+- `article` → `description` / `byline` / `publishedAt` / `language`
+- `product` → `description`
+- `discussion` → `description` (= body ensimmäiset 280 sanaa) / `byline` (= author) / `publishedAt` (= postedAt)
+- `recipe` → `description` / `byline` (= author)
+- `video` → `description` / `byline` (= channel) / `publishedAt` (= uploadDate)
+- `job` → `description` / `byline` (= company) / `publishedAt` (= datePosted)
+
+Täyttö tapahtuu vain, kun varma tietolähde **ei ole täyttänyt** vastaavia kenttiä — LLM on aina viimeinen turva.
+
+## Välimuisti
+
+Samat pyynnöt hashataan samaan Redis-avaimeen:
+`webextrator:cache:extract:<sha256(canonical-json)>`. Välimuistiavain **ohittaa** `async`,
+`bypass_cache`, `cache_ttl_seconds` (tämä on toimintakytkin, ei vaikuta vastaukseen). `cookies` /
+`headers` **jaetaan** välimuistiin.
+
+| Kenttä                     | Vaikutus                       |
+| ------------------------- | ----------------------------- |
+| `bypass_cache: true`      | Ohita lukeminen; tämän kerran tulos kirjoitetaan silti välimuistiin, seuraava sama pyyntö voi osua. |
+| `cache_ttl_seconds: 0`    | Tämä vastaus **ei välimuistita**.               |
+| `cache_ttl_seconds: N`    | Mukautettu tämän kohteen TTL (oletus 3600 sekuntia).    |
+
+Välimuistissa osuvat vastaukset sisältävät `data.cached: true` ja `data.cacheStoredAt: <unix-ms>`.
+
+## Asynkroninen tila ja palautus
+
+Aseta `async: true` siirtyäksesi asynkroniseen tilaan (tarjoamalla `callback_url` siirrytään myös automaattisesti). Alusta palauttaa heti (HTTP 200):
+
+```json
+{
+  "success": true,
+  "task_id": "550e8400-...",
+  "trace_id": "6ba7b810-...",
+  "started_at": 1777717800.123
+}
+```
+
+Tehtävän valmistuttua koko envelope `POST` lähetetään sinun `callback_url` (jos on määritetty). Voit myös jälkikäteen kysyä aktiivisesti [`/webextrator/tasks`](/fi/guides/webextrator/webextrator_tasks).
+
+## Esimerkki
+
+### 1. Wikipedia-artikkeli (schema.org osuu, ei tarvitse LLM)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://example.com/news/1",
-    "expected_type": "article",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "expected_type": "article"
+  }'
+```
+
+`data.structured.schemaOrg.primary` avainkentät:
+```json
+{
+  "kind": "artikkeli",
+  "subtype": "Artikkeli",
+  "headline": "Amerikkalainen koneoppimisen ja tietämyksen hallinnan yritys",
+  "datePublished": "2007-08-08T05:47:27Z",
+  "dateModified": "2025-07-10T20:42:45Z",
+  "author": { "name": "Wikimedia-projektien osallistujat", "type": "Organisaatio" },
+  "publisher": { "name": "Wikimedia Foundation, Inc." }
+}
+```
+
+### 2. BestBuy tuotesivu (schema.org osuma)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.bestbuy.com/product/apple-airpods-pro-2nd-generation-white/JJ8ZH6TPSW",
+    "expected_type": "tuote"
+  }'
+```
+
+schema.org poiminta:
+
+```json
+{
+  "kind": "tuote",
+  "name": "Apple - Kunnostettu Erinomainen - AirPods Pro (2. sukupolvi) - Valkoinen",
+  "sku": "10845412",
+  "model": "MQD83AM/A",
+  "color": "Valkoinen",
+  "brand": "Apple",
+  "offer": { "price": 159.99, "currency": "USD", "availability": "https://schema.org/InStock", "seller": "Best Buy" },
+  "rating": { "value": 4.4, "count": 8 }
+}
+```
+
+### 3. AllRecipes reseptisivu (sisältäen ravintoarvot ja vaiheet)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.allrecipes.com/recipe/16354/easy-meatloaf/"
+  }'
+```
+
+schema.org poiminta:
+
+```json
+{
+  "kind": "resepti",
+  "name": "Helppo lihamureke",
+  "cookTime": "PT60M",
+  "totalTime": "PT75M",
+  "recipeYield": "8 / 1 (9x5-tuumainen) lihamureke",
+  "ingredients": ["1 1/2 paunaa jauhelihaa", "..."],
+  "instructions": [{ "text": "Esilämmitä uuni 350°F ..." }, "..."],
+  "rating": { "value": 4.7, "count": 9348 }
+}
+```
+
+### 4. HN keskustelusivu (ilman JSON-LD —— LLM:n aktivointi tarpeen)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://news.ycombinator.com/item?id=37000000",
     "enable_llm": true
   }'
 ```
 
-## Esimerkki: asynkroninen + mukautettu rakenteinen poiminta
+`data.structured.llm.data`:
+
+```json
+{
+  "kind": "keskustelu",
+  "title": "Show HN: Uusi tapa poimia verkkosivuja",
+  "author": "alice",
+  "points": 173,
+  "commentCount": 42,
+  "body": "Hei HN, rakensimme itse isännöidyn vaihtoehdon Diffbotin Analyze API:lle ..."
+}
+```
+
+Ylätason kentät on myös täytetty: `byline = "alice"`、`publishedAt = "..."`。
+
+### 5. Amazon tuotesivu (Amazon ei JSON-LD —— LLM:n aktivointi tarpeen)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://shop.example.com/item/123",
-    "expected_type": "structured",
-    "enable_llm": true,
-    "instruction": "poimi tuotteen otsikko, hinta, varastosaldo, 3 pääkuvan URL-osoitetta",
-    "callback_url": "https://your-domain.com/wbx-callback"
+    "url": "https://www.amazon.com/dp/B0BSHF7WHW",
+    "expected_type": "tuote",
+    "enable_llm": true
   }'
 ```
+
+`data.structured.llm.data` (tyypitetty `tuote`):
+
+```json
+{
+  "kind": "tuote",
+  "name": "Apple 2023 MacBook Pro M2 Pro 14-tuumainen",
+  "brand": "Apple",
+  "price": 1799,
+  "currency": "USD",
+  "bullets": ["Apple M2 Pro -sirun 10-ytiminen CPU", "..."],
+  "specifications": [{ "name": "Näytön koko", "value": "14.2 tuumaa" }, "..."]
+}
+```
+
+### Python (requests)
+
+```python
+import os, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+
+resp = requests.post(
+    "https://api.acedata.cloud/webextrator/extract",
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "url": "https://en.wikipedia.org/wiki/Diffbot",
+        "expected_type": "artikkeli",
+    },
+    timeout=120,
+)
+resp.raise_for_status()
+data = resp.json()["data"]
+
+primary = (data.get("structured") or {}).get("schemaOrg", {}).get("primary")
+print("contentType:", data["contentType"])
+print("title:      ", data["title"])
+print("byline:     ", data.get("byline"))
+print("publishedAt:", data.get("publishedAt"))
+if primary and primary["kind"] == "artikkeli":
+    print("headline:    ", primary["headline"])
+    print("dateModified:", primary.get("dateModified"))
+```
+
+### Node.js (fetch)
+
+```js
+const apiKey = process.env.ACEDATA_API_KEY;
+
+const res = await fetch('https://api.acedata.cloud/webextrator/extract', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    url: 'https://www.allrecipes.com/recipe/16354/easy-meatloaf/',
+  }),
+});
+const { data } = await res.json();
+const recipe = data?.structured?.schemaOrg?.primary;
+console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, 'aineksia');
+```
+
+## Vinkkejä ja sudenkuoppia
+
+- **Jos voi, lähetä `expected_type`.** Ilmainen vinkki, ohita heuristinen arviointi, erityisesti URL-malleille, jotka eivät ole sisäänrakennetussa luettelossa.
+- **`enable_llm: true` schema.org osumilla on ilmainen.** LLM kutsutaan vain, jos schema.org:lla ei ole primarya, joten oletusarvoisesti se on myös turvallista.
+- **Vianetsinnässä tarkista ensin `rawSignals.hasJsonLd`.** Jos se on `true`, mutta `structured.schemaOrg.primary` on `null`, se tarkoittaa, että sivu on käyttänyt tyyppiä, jota emme ole vielä kattaneet - ilmoita asiasta, niin lisäämme sen.
+- **`structured.llmError` on informatiivinen.** Pyyntö onnistuu silti, heuristinen tulos palautuu. Tarkista `llmError.error` syyn paikallistamiseksi (aika loppui, JSON-parsinta epäonnistui, Zod-validointi epäonnistui).
+- **Ei-artikkelisivujen `links[]` ei järjestetä relevanssin mukaan.** Vain "yli 100 rajoitusta + virheellisten protokollien suodatus" yritetään puhdistaa.
+- **Välimuistiosumat lasketaan myös maksuksi.** Välimuisti on tarkoitettu viiveen vähentämiseen ja selainaltaan suojaamiseen, ei säästämiseen.

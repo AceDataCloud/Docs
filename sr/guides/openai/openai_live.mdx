@@ -1,0 +1,46 @@
+---
+title: "GPT-Live razgovor glasom u realnom vremenu"
+description: "OpenAI generation API guide - Ace Data Cloud"
+---
+
+GPT-Live podržava istovremeno slušanje i govor, dvosmerne titlove i pozadinske zadatke. ChatGPT glasovni pozivi u Studio-u koriste `gpt-live-1` za obradu glasa, dok složena pitanja i dalje obrađuje trenutno izabrani model za ćaskanje.
+
+## Povezivanje
+
+Koristite API Token platforme za povezivanje na `wss://realtime.acedata.cloud/v1/live/sessions`. Studio ili akreditivi usluge za ćaskanje koriste `wss://realtime.acedata.cloud/aichat2/live`. Server vrši autentifikaciju putem `Authorization: Bearer <token>`; pregledač prosleđuje akreditive putem WebSocket potprotokola, kako bi se izbeglo njihovo upisivanje u URL:
+
+```javascript
+const socket = new WebSocket('wss://realtime.acedata.cloud/aichat2/live', [
+  'live', `acedata-token.${token}`
+]);
+socket.onopen = () => socket.send(JSON.stringify({
+  type: 'session.start',
+  session: {
+    model: 'gpt-live-1',
+    instructions: '简洁友好地回答，使用用户的语言。复杂问题交给后台处理。',
+    audio: { format: { type: 'audio/pcm', rate: 24000 }, output: { voice: 'marin' } },
+    delegation: { type: 'client' },
+    store: false
+  }
+}));
+```
+
+Nakon čekanja na `session.started`, neprekidno šaljite `session.input_audio.append`, pri čemu je `audio` Base64 sirovog audio zapisa u 24 kHz, mono, 16-bitnom PCM formatu sa malim redosledom bajtova, bez WAV zaglavlja. Šaljite audio prema stvarnoj brzini uzorkovanja, a segmenti tišine takođe treba da ostanu neprekidni.
+
+Reprodukujte `session.output_audio.delta.delta` redom. Titlovi korisnika i asistenta dolaze iz `session.input_transcript.delta` odnosno `session.output_transcript.delta`; zadržite `delta`, `start_ms` i `end_ms` svakog segmenta; titlovi obe strane mogu rasti istovremeno. Live nema događaj završetka svakog pojedinačnog glasovnog odgovora, pa status „odgovara“ treba ažurirati na osnovu lokalnog reda za reprodukciju.
+
+## Pozadinski zadaci
+
+Trenutno je podržan režim delegiranja `client`. Nakon prijema `session.delegation.created`, aplikacija poziva sopstveni pozadinski sistem na osnovu glasovnih titlova i sačuvanog konteksta, a rezultate vraća putem `session.thinking.append` ili `session.commentary.append`, uz odgovarajući `delegation_id` i običan tekstualni `content` od najviše 500 tokena. Rezultati treba da potiču iz završenih pozadinskih operacija; prekid glasa ne znači da je pozadinski zadatak otkazan.
+
+Delegiranje upravljanih Responses-a, skladištenje snimaka, `session.update`, obnova sesije ili automatsko ponovno povezivanje za sada nisu podržani. Model je fiksiran na `gpt-live-1`, audio je fiksiran na 24 kHz PCM16, a glas se bira pri započinjanju poziva. Stari Realtime API se i dalje može koristiti.
+
+## Naplata i završavanje poziva
+
+Glas se naplaćuje prema trajanju aktivne sesije: **0.01 Credits/sekundi, odnosno 0.6 Credits/minuti**, bez zaokruživanja naviše na pune minute. Vreme tokom kojeg korisnik govori, asistent govori, vlada tišina, obe strane ćute ili se čeka pozadinski zadatak, sve se naplaćuje. Pozadinski modeli ili pozivi alata naplaćuju se zasebno prema odgovarajućem API-ju. Cena Credits-a u dolarima zavisi od paketa dopune, a važeća cena na konzoli je merodavna.
+
+`session.usage.updated.usage.seconds` predstavlja kumulativnu potrošnju. Na primer, ako prvo primite 12 sekundi, a zatim 15 sekundi, ukupan zbir je 15 sekundi. Platforma naplaćuje samo dodatno trajanje i ne sabira snimke više puta.
+
+Pri završetku pošaljite `session.close`, nastavite da primate podatke dok ne dobijete `session.closed`, zatim zatvorite vezu i oslobodite mikrofon. Prisilni prekid može dovesti do toga da konačna potrošnja nije potvrđena, što interfejs treba jasno da prikaže. Veza će se završiti kada nema dovoljno sredstava, naplata ne uspe ili se dostigne ograničenje sesije. Podrazumevano, jedan poziv može trajati najviše 30 minuta.
+
+Greške parametara vraćaju se putem događaja `error`; `error.client_event_id` odgovara neuspešnoj komandi. Ako pokretanje ne uspe, treba zaustaviti snimanje i prikazati grešku, bez automatske promene modela ili ponovnog pokušaja koji stvara nove troškove.

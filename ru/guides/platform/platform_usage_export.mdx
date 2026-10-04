@@ -1,0 +1,146 @@
+---
+title: "Экспорт записей вызовов API платформы AceDataCloud"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Скачайте сведения о вызовах API текущего аккаунта напрямую в CSV, что подходит для финансовой сверки, офлайн-анализа или сохранения большого объёма записей. Если нужно просмотреть только небольшое количество сведений на странице, сначала используйте [список записей вызовов](https://platform.acedata.cloud/documents/platform-usage-list)。
+
+## Подготовка
+
+1. Войдите на [платформу AceDataCloud](https://platform.acedata.cloud)。
+2. Создайте токен аккаунта в [консоли Account Token](https://platform.acedata.cloud/console/platform-tokens) и сразу сохраните его в менеджере паролей или Secret Manager。
+3. При необходимости получите ID для фильтрации из [списка заявок на сервис](https://platform.acedata.cloud/documents/platform-application-list)、[списка учётных данных API](https://platform.acedata.cloud/documents/platform-credential-list) или [списка API](https://platform.acedata.cloud/documents/platform-api-list)。
+
+Полное описание токенов см. в разделе [управление токенами аккаунта](https://platform.acedata.cloud/documents/platform-token)。Токен аккаунта и Credential для вызова бизнес-API нельзя использовать взаимозаменяемо。
+
+```shell
+export PLATFORM_TOKEN='你的账户令牌'
+```
+
+## Обзор интерфейса
+
+| Пункт           | Содержимое                                                 |
+| --------------- | ---------------------------------------------------------- |
+| Метод           | `GET`                                                      |
+| URL             | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| Аутентификация  | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope     | `usage:read`（`platform:read` / `platform` включают его）  |
+| Ответ           | `200 text/csv; charset=utf-8`                              |
+| Имя файла       | `usages.csv`                                               |
+
+Этот интерфейс синхронно возвращает CSV в потоковом режиме, не создаёт задачу экспорта и не возвращает JSON или ссылку для скачивания. Только если не указаны обе даты — начала и конца, по умолчанию экспортируются записи от начала текущего календарного месяца до текущего момента; если указана только одна граница, другая граница не будет автоматически дополнена границей текущего месяца。
+
+## Параметры запроса
+
+| Параметр          | Тип      | Обязательный | По умолчанию | Описание                                      |
+| ----------------- | -------- | ------------ | ------------ | --------------------------------------------- |
+| `perspective`     | string   | Нет          | `both`       | `billing`、`actor` или `both`                 |
+| `service_id`      | UUID     | Нет          | —            | Фильтрация по сервису; поддерживает повторные параметры |
+| `application_id`  | UUID     | Нет          | —            | Фильтрация по Application; поддерживает повторные параметры |
+| `api_id`          | UUID     | Нет          | —            | Фильтрация по API; поддерживает повторные параметры |
+| `credential_id`   | UUID     | Нет          | —            | Фильтрация по учётным данным API; поддерживает повторные параметры |
+| `status_code`     | integer  | Нет          | —            | Поддерживает повторные значения или значения, разделённые запятыми |
+| `created_at_from` | datetime | Нет          | —            | Начальное время ISO 8601                      |
+| `created_at_to`   | datetime | Нет          | —            | Конечное время ISO 8601                       |
+
+Диапазон экспорта всегда ограничен записями, доступными текущему аккаунту как плательщику и/или фактическому вызывающему лицу; экспорт между аккаунтами не поддерживается。
+
+## Примеры запросов
+
+Непосредственно сохранить CSV за текущий месяц：
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Экспорт по Application, времени и коду состояния：
+
+```shell
+export APPLICATION_ID='你的 Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Потоковое сохранение и проверка целостности в Python：
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("服务器没有返回 CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"导出不完整：{last_line}")
+```
+
+## Столбцы CSV
+
+Порядок заголовков CSV фиксирован：
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| Столбец            | Описание                                      |
+| ------------------ | --------------------------------------------- |
+| `Usage ID`         | ID записи вызова                              |
+| `API`              | Название API; при невозможности сопоставления может быть ID API или пустое значение |
+| `Status Code`      | Код состояния HTTP                            |
+| `Deducted Amount`  | Фактически окончательно списанный объём       |
+| `Original Amount`  | Исходный объём до применения скидки Application |
+| `Trace ID`         | Идентификатор трассировки запроса             |
+| `Created At`       | Время создания записи, ISO 8601               |
+
+Единица объёма определяется `service.unit` соответствующего Application。
+
+## Как определить, завершён ли экспорт полностью
+
+За один раз может быть выведено не более 1 000 000 записей. После того как сервер начал возвращать CSV, он не может изменить промежуточную ошибку на другой HTTP-статус, поэтому клиент должен проверить последнюю строку：
+
+- `# truncated:`：достигнут лимит количества строк; экспортируйте частями с меньшими временными окнами。
+- `# error:`：потоковое чтение прервано; уменьшите диапазон и экспортируйте повторно。
+
+При обнаружении любого marker программа сверки должна считать файл неполным и не может молча проводить его в учёте。
+
+## Ошибки и повторные попытки
+
+| Ситуация                    | Способ обработки                                                |
+| --------------------------- | --------------------------------------------------------------- |
+| `400 usage_history_expired` | Используйте `available_from` из ответа, чтобы скорректировать диапазон до последних 60 дней |
+| `401 not_authenticated`     | Проверьте, существует ли Account Token, корректен ли он и не удалён ли |
+| Ответ не в формате CSV      | Не сохраняйте как успешный файл; сначала прочитайте ответ с ошибкой и исправьте запрос |
+| Прерывание скачивания или marker | Уменьшите временное окно и повторите экспорт с использованием стратегии задержки |
+
+## Следующие шаги
+
+- [Просмотр записей вызовов](https://platform.acedata.cloud/documents/platform-usage-list)：онлайн-фильтрация и поиск отдельного запроса。
+- [Агрегация объёма вызовов](https://platform.acedata.cloud/documents/platform-usage-aggregate)：просмотр данных, агрегированных по дате, API или модели。
+- [Просмотр сведений о заявке на сервис](https://platform.acedata.cloud/documents/platform-application-detail)：проверка единицы объёма и оставшегося объёма。

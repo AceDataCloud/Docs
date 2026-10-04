@@ -1,67 +1,399 @@
 ---
-title: "WebExtrator Vodič za integraciju inteligentnog izvlačenja API-ja"
-description: "WebExtrator Web Render & Extract 集成指南 - Ace Data Cloud"
+title: "WebExtrator Интелигентни API за извлачење"
+description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
 `POST https://api.acedata.cloud/webextrator/extract`
 
-Izvlačenje sadržaja na osnovu `/webextrator/render`. Osim svih parametara render interfejsa, dodatno podržava:
+WebExtrator Интелигентни API претвара URL у **типизоване структуриране резултате** — чланке, производе, рецепте, видео, дискусије, запошљавање и сл., уз чисти Markdown и чист текст. Када желите "чисте структуриране податке" уместо оригиналног HTML-а, ово је интерфејс који треба користити.
 
-| Polje | Tip | Obavezno | Podrazumevano | Opis |
-|-------|-----|:--------:|---------------|------|
-| `expected_type` | string | ❌ | `markdown` | Očekivani rezultat izvlačenja: `markdown` / `article` / `text` / `links` / `structured` |
-| `enable_llm` | boolean | ❌ | false | Omogući LLM postprocesiranje (pogodno za `article` / `structured`) |
-| `instruction` | string | ❌ | - | LLM instrukcije za izvlačenje, na primer „izvuci naslov proizvoda, cenu, specifikacije“ |
+Основна структура је трослојна:
 
-## Sinhroni odgovor
+1. **schema.org JSON-LD мапер** — детерминистички, нулти LLM трошак. Покрива Wikipedia / BestBuy / AllRecipes / YouTube / већину вести / већину страница производа.
+2. **Типизовано LLM извлачење** — активира се само када schema.org није покривен. Изаберите Schema по типу странице, Zod строга валидација.
+3. **Readability + Markdown резервна опција** — увек ради, попуњава горње поља која нису попуњена у прве две слоја.
+
+Понављајући захтеви за URL ће бити кеширани у Redis резултатима, &lt;1 ms повратак.
+
+## Процес пријаве
+
+Да бисте користили WebExtrator услугу, прво идите на [Ace Data Cloud контролна табла](https://platform.acedata.cloud/console/applications) да добијете ваш API токен, за резерву.
+
+![](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Ако се нисте пријавили или регистровали, аутоматски ћете бити преусмерени на страницу за пријаву која вас позива да се региструјете и пријавите, а након тога ћете бити аутоматски враћени на тренутну страницу.
+
+**Један API токен је довољан за позивање свих услуга платформе, без потребе за посебном пријавом за сваку услугу.** При првом захтеву добијате бесплатан кредит, можете бесплатно испробати; када вам кредит недостаје, можете допунити општи баланс на [контролној табли](https://platform.acedata.cloud/console/coin).
+
+> 📘 Пуна документација: [WebExtrator услужна страница →](https://platform.acedata.cloud/service/webextrator)
+
+## Аутентификација
+
+```
+Authorization: Bearer YOUR_API_KEY
+Content-Type:  application/json
+```
+
+## Параметри захтева
+
+Extract прихвата **све** [Render API](/sr/guides/webextrator/webextrator_render) параметре
+(`url`, `user_agent`, `timeout`, `wait_until`, `delay`, `wait_for_selector`,
+`block_resources`, `headers`, `cookies`, `callback_url`, `bypass_cache`,
+`cache_ttl_seconds`, `async`), плус два поља специфична за Extract:
+
+| Поље              | Тип      | Обавезно  | Подразумевано      | Објашњење                                                                                      |
+| --------------- | ------- | :-: | ------- | --------------------------------------------------------------------------------------- |
+| `expected_type` | enum    |  ❌  | аутоматска процена    | Индикација типа странице: `product` / `article` / `general`. Прескочи URL / текстуалну хеуристику, директно иде на одговарајућу грана.                        |
+| `enable_llm`    | boolean |  ❌  | `false` | Дозволите LLM извлачење када schema.org није покривен. На страницама без JSON-LD као што су Amazon / HN / Greenhouse, потребно је укључити да бисте добили типизоване резултате. |
+
+> Када страница има schema.org JSON-LD, `enable_llm` је неефикасан — детерминистички мапер директно даје резултате,
+> никада неће потрошити LLM позив. Ви **бесплатно** добијате типизоване резултате.
+
+## Синхроно одговарање
+
+```json
+{
+  "success": true,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "trace_id": "550e8400-e29b-41d4-a716-446655440001",
+  "started_at": 1777717800.123,
+  "finished_at": 1777717802.535,
+  "elapsed": 2.412,
+  "data": {
+    "kind": "extract",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "finalUrl": "https://en.wikipedia.org/wiki/Diffbot",
+    "contentType": "article",
+    "title": "Diffbot",
+    "description": "Америчка компанија за машинско учење и управљање знањем",
+    "byline": "Доприносиоци пројектима Wikimedia",
+    "language": "en",
+    "siteName": "Wikipedia",
+    "publishedAt": "2007-08-08T05:47:27Z",
+    "images": ["https://en.wikipedia.org/static/images/icons/enwiki-25.svg"],
+    "links": ["https://en.wikipedia.org/wiki/Machine_learning"],
+    "markdown": "# Diffbot\n\nDiffbot је развијач алгоритама машинског учења ...",
+    "text": "Diffbot је развијач алгоритама машинског учења ...",
+    "structured": {
+      "schemaOrg": { "primary": { /* типизовани ентитет */ }, "breadcrumbs": [], "all": [] },
+      "openGraph": { "title": "...", "description": "...", "image": "...", "type": "..." },
+      "jsonLd": [ /* оригинални JSON-LD */ ]
+    },
+    "rawSignals": {
+      "hasJsonLd": true,
+      "title": "Diffbot - Wikipedia",
+      "metaDescription": null,
+      "pageStatus": 200,
+      "textLength": 11473
+    },
+    "elapsedMs": 2412
+  }
+}
+```
+
+### Горно поље
+
+| Поље              | Тип       | Објашњење                                                                                   |
+| --------------- | -------- | ------------------------------------------------------------------------------------ |
+| `kind`          | string   | Фиксно `"extract"`。                                                                      |
+| `url`           | string   | URL који сте поднели.                                                                            |
+| `finalUrl`      | string   | Коначни URL након преусмеравања.                                                                         |
+| `contentType`   | enum     | `product` / `article` / `general`, одређује се редом: `expected_type` → schema.org primary → хеуристика. |
+| `title`         | string   | Readability `<title>` или рендерисани `document.title`.                                        |
+| `description`   | string?  | Приоритет: `<meta name="description" />` → `og:description` → schema.org / LLM извлачење → први део текста.   |
+| `byline`        | string?  | Аутор / канал / компанија. Извор `<meta name="author" />` → schema.org / LLM.                           |
+| `language`      | string?  | `<html lang>`。                                                                       |
+| `siteName`      | string?  | `og:site_name`。                                                                      |
+| `publishedAt`   | string?  | ISO 8601. Приоритет: `article:published_time` → `<time datetime>` → schema.org / LLM.        |
+| `images`        | string[] | Максимум 50 `<img src />`, распоређени у апсолутне URL, без дупликата, одбацивање `data:` URI.                                    |
+| `links`         | string[] | Максимум 100 спољних линкова, филтрирани фрагменти / `javascript:` / `mailto:` / `tel:`.                               |
+| `markdown`      | string   | Markdown изведен из Turndown.                                                               |
+| `text`          | string   | `textContent` извучен из Mozilla Readability.                                               |
+| `structured`    | object   | Пуни структурирани резултати, види испод.                                                                          |
+| `rawSignals`    | object   | Дијагностичке информације за дебаговање.                                                                            |
+| `cached`        | boolean? | Када се кешира, `true`.                                                                       |
+| `cacheStoredAt` | number?  | Unix временски жиг у милисекундама када је кеш ставка први пут написана.                                                                |
+
+### `data.structured` подпоља
+| Подполе         | Када се појављује               | Објашњење                                                                   |
+| ----------- | ------------------ | -------------------------------------------------------------------- |
+| `schemaOrg` | Увек                 | `{ primary, breadcrumbs, all }`. `primary` је типизовани ентитет највишег приоритета; ако није пронађен, враћа `null`. |
+| `openGraph` | Увек                 | `{ title, description, image, type }`, потиче из `<meta property="og:*" />`.   |
+| `jsonLd`    | Увек                 | Сви оригинални JSON низови из `<script type="application/ld+json">` блокова.               |
+| `llm`       | Када LLM успешно ради         | `{ kind, data, model, promptCharCount }`, типизовани резултати проверени Zod-ом.              |
+| `llmError`  | Када LLM не успе         | `{ kind, error, model }`, захтев неће пропасти, хеуристички резултати ће и даље бити враћени.                         |
+| `amazon`    | Када је URL `amazon.*` | Резултати старог amazon специјализованог извлакача (постепено ће бити укинут).                                            |
+
+## schema.org мапер покриће
+
+Поређано по приоритету (када се погоди, служи као `structured.schemaOrg.primary`):
+
+| schema.org тип                                                                                              | Мапирање врста      | Излазна поља                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Product`                                                                                                  | производ      | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]`                                 |
+| `Recipe`                                                                                                   | рецепт       | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
+| `VideoObject`                                                                                              | видео        | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount`                                                                                 |
+| `JobPosting`                                                                                               | посао          | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType`                                                                              |
+| `Event`（укључује `*Event`）                                                                                        | догађај        | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}`                                                                                  |
+| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | чланак      | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]`                                                                                 |
+| `FAQPage`                                                                                                  | често питање          | `questions[{question, answer}]`                                                                                                                                                          |
+| `BreadcrumbList`                                                                                           | （прикључен на sibling） | Увек се излаже у `structured.schemaOrg.breadcrumbs[]`, неће бити као primary.                                                                                                                                 |
+
+Обрада мапера:
+
+- `@graph` контејнер (рекурзивно распаковање)；
+- `@type` низ (као `["Recipe", "NewsArticle"]` —— оба се препознају, по приоритету побеђује)；
+- варијанте са префиксом `http://schema.org/`；
+- угнездене `Offer` и `AggregateOffer` (други чита `lowPrice`)；
+- релативни URL-ови слика (разрешење у `finalUrl` као апсолутне).
+
+## LLM типизовани Schema
+
+Када је `enable_llm: true` **и** schema.org нема primary, извлакач по URL хеуристички
+(или `expected_type` наговештај) бира један од Zod Schema проверених модела излаза:
+
+| Врста         | URL хеуристика                                                                            | Обавезна поља       | Опционална поља                                                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `article`    | Текст ≥400 речи и остало није погодио                                                                    | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]`                                                                                          |
+| `product`    | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*`                | `name`     | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]`                                                      |
+| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs`                                    | `title`    | `author, postedAt, points, commentCount, body, url`                                                                                                                          |
+| `recipe`     | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes` | `name`     | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]`                                              |
+| `video`      | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video`               | `name`     | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript`                                                                                 |
+| `job`        | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr`          | `title`    | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
+
+Када LLM успешно ради, такође ће попунити "last-resort" на врховним пољима:
+
+- `article` → `description` / `byline` / `publishedAt` / `language`
+- `product` → `description`
+- `discussion` → `description`（= body првих 280 речи）/ `byline`（= author）/ `publishedAt`（= postedAt）
+- `recipe` → `description` / `byline`（= author）
+- `video` → `description` / `byline`（= channel）/ `publishedAt`（= uploadDate）
+- `job` → `description` / `byline`（= company）/ `publishedAt`（= datePosted）
+
+Попуњавање се активира само када **није попуњено** одређено поље из извора података —— LLM је увек последња линија одбране.
+
+## Кеширање
+
+Исти захтеви ће бити хеширани у исти Redis Кључ:
+`webextrator:cache:extract:<sha256(canonical-json)>`. Кеш Кључ **игнорише** `async`、
+`bypass_cache`、`cache_ttl_seconds`（ово је оперативни прекидач, не утиче на одговоре）。`cookies` /
+`headers` **ће** бити кеширани у различитим групама.
+
+| Поље                     | Ефекат                         |
+| ---------------------- | -------------------------- |
+| `bypass_cache: true`   | Прескочи читање; резултат овог пута ће се и даље написати у кеш, следећи исти захтев ће погодити. |
+| `cache_ttl_seconds: 0` | Овај одговор **неће бити кеширан**.               |
+| `cache_ttl_seconds: N` | Прилагодите TTL за ову ставку (подразумевано 3600 секунди).    |
+
+Одговори који погоде кеш ће имати `data.cached: true` и `data.cacheStoredAt: <unix-ms>`.
+
+## Асинхрони режим и повратни позив
+
+Поставите `async: true` да уђете у асинхрони режим (пружање `callback_url` ће такође аутоматски ући у режим). Платформа одмах враћа (HTTP 200):
 
 ```json
 {
   "success": true,
   "task_id": "550e8400-...",
-  "trace_id": "550e8400-...",
-  "started_at": "2026-05-02T10:30:00.123Z",
-  "finished_at": "2026-05-02T10:30:08.789Z",
-  "elapsed": 8.666,
-  "data": {
-    "kind": "extract",
-    "expected_type": "article",
-    "url": "https://example.com/post/1",
-    "title": "Primer članka",
-    "author": "Zhang San",
-    "published_at": "2026-05-01",
-    "content": "# Primer članka\n\nGlavni tekst ...",
-    "summary": "Ovaj članak predstavlja ..."
-  }
+  "trace_id": "6ba7b810-...",
+  "started_at": 1777717800.123
 }
 ```
 
-Asinhroni režim, kodovi grešaka i pravila naplate su potpuno isti kao kod `/webextrator/render`.
+Када се задатак заврши, целокупни пакет `POST` на ваш `callback_url` (ако је конфигурисан). Такође можете
+касније активно проверити преко [`/webextrator/tasks`](/sr/guides/webextrator/webextrator_tasks).
 
-## Primer: izvlačenje teksta članka (omogućeno LLM)
+## Пример
+
+### 1. Wikipedia чланак（schema.org погодио, не треба LLM）
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://example.com/news/1",
-    "expected_type": "article",
+    "url": "https://en.wikipedia.org/wiki/Diffbot",
+    "expected_type": "article"
+  }'
+```
+
+`data.structured.schemaOrg.primary` кључна поља：
+```json
+{
+  "kind": "članak",
+  "subtype": "Članak",
+  "headline": "Američka kompanija za mašinsko učenje i upravljanje znanjem",
+  "datePublished": "2007-08-08T05:47:27Z",
+  "dateModified": "2025-07-10T20:42:45Z",
+  "author": { "name": "Doprinosioci Wikimedia projektima", "type": "Organizacija" },
+  "publisher": { "name": "Wikimedia Foundation, Inc." }
+}
+```
+
+### 2. BestBuy proizvodna stranica (schema.org pogodak)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.bestbuy.com/product/apple-airpods-pro-2nd-generation-white/JJ8ZH6TPSW",
+    "expected_type": "proizvod"
+  }'
+```
+
+schema.org ekstrakt:
+
+```json
+{
+  "kind": "proizvod",
+  "name": "Apple - Obnovljeno odlično - AirPods Pro (2. generacija) - Bela",
+  "sku": "10845412",
+  "model": "MQD83AM/A",
+  "color": "Bela",
+  "brand": "Apple",
+  "offer": { "price": 159.99, "currency": "USD", "availability": "https://schema.org/InStock", "seller": "Best Buy" },
+  "rating": { "value": 4.4, "count": 8 }
+}
+```
+
+### 3. AllRecipes stranica sa receptima (uključujući nutritivne vrednosti i korake)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.allrecipes.com/recipe/16354/easy-meatloaf/"
+  }'
+```
+
+schema.org ekstrakt:
+
+```json
+{
+  "kind": "recept",
+  "name": "Laki mesni hleb",
+  "cookTime": "PT60M",
+  "totalTime": "PT75M",
+  "recipeYield": "8 / 1 (9x5-inčni) mesni hleb",
+  "ingredients": ["1 1/2 funte mlevenog mesa", "..."],
+  "instructions": [{ "text": "Zagrijte rernu na 350°F ..." }, "..."],
+  "rating": { "value": 4.7, "count": 9348 }
+}
+```
+
+### 4. HN stranica za diskusiju (bez JSON-LD — potrebno omogućiti LLM)
+
+```bash
+curl -X POST https://api.acedata.cloud/webextrator/extract \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://news.ycombinator.com/item?id=37000000",
     "enable_llm": true
   }'
 ```
 
-## Primer: asinhrono + prilagođeno strukturirano izvlačenje
+`data.structured.llm.data`:
+
+```json
+{
+  "kind": "diskusija",
+  "title": "Pokaži HN: Novi način za ekstrakciju web stranica",
+  "author": "alice",
+  "points": 173,
+  "commentCount": 42,
+  "body": "Zdravo HN, napravili smo alternativu za Diffbot-ov Analyze API ..."
+}
+```
+
+Gornji podaci su takođe popunjeni: `byline = "alice"`, `publishedAt = "..."`.
+
+### 5. Amazon proizvodna stranica (Amazon bez JSON-LD — potrebno omogućiti LLM)
 
 ```bash
 curl -X POST https://api.acedata.cloud/webextrator/extract \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://shop.example.com/item/123",
-    "expected_type": "structured",
-    "enable_llm": true,
-    "instruction": "izvuci naslov proizvoda, cenu, stanje zaliha, URL-ove 3 glavne slike",
-    "callback_url": "https://your-domain.com/wbx-callback"
+    "url": "https://www.amazon.com/dp/B0BSHF7WHW",
+    "expected_type": "proizvod",
+    "enable_llm": true
   }'
 ```
+
+`data.structured.llm.data` (tipiziran `proizvod`):
+
+```json
+{
+  "kind": "proizvod",
+  "name": "Apple 2023 MacBook Pro M2 Pro 14-inčni",
+  "brand": "Apple",
+  "price": 1799,
+  "currency": "USD",
+  "bullets": ["Apple M2 Pro čip sa 10-jezgrenim CPU", "..."],
+  "specifications": [{ "name": "Veličina ekrana", "value": "14.2 inča" }, "..."]
+}
+```
+
+### Python (requests)
+
+```python
+import os, requests
+
+API_KEY = os.environ["ACEDATA_API_KEY"]
+
+resp = requests.post(
+    "https://api.acedata.cloud/webextrator/extract",
+    headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "url": "https://en.wikipedia.org/wiki/Diffbot",
+        "expected_type": "članak",
+    },
+    timeout=120,
+)
+resp.raise_for_status()
+data = resp.json()["data"]
+
+primary = (data.get("structured") or {}).get("schemaOrg", {}).get("primary")
+print("contentType:", data["contentType"])
+print("title:      ", data["title"])
+print("byline:     ", data.get("byline"))
+print("publishedAt:", data.get("publishedAt"))
+if primary and primary["kind"] == "članak":
+    print("headline:    ", primary["headline"])
+    print("dateModified:", primary.get("dateModified"))
+```
+
+### Node.js (fetch)
+
+```js
+const apiKey = process.env.ACEDATA_API_KEY;
+
+const res = await fetch('https://api.acedata.cloud/webextrator/extract', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    url: 'https://www.allrecipes.com/recipe/16354/easy-meatloaf/',
+  }),
+});
+const { data } = await res.json();
+const recipe = data?.structured?.schemaOrg?.primary;
+console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, 'vrsta sastojaka');
+```
+
+## Saveti i zamke
+
+- **Ako možete, prosledite `expected_type`.** Besplatan savet, preskočite heurističko određivanje, posebno korisno za stranice čiji URL obrasci nisu u ugrađenoj listi.
+- **`enable_llm: true` na stranicama sa schema.org pogodkom je besplatno.** LLM se poziva samo kada schema.org nema primarni, tako da je podrazumevano uključeno i prilično sigurno.
+- **Tokom debagovanja prvo proverite `rawSignals.hasJsonLd`.** Ako je `true`, ali `structured.schemaOrg.primary` je `null`, to znači da je stranica koristila naš mapirač koji još nije pokrio `@type` — otvorite issue, dodajemo.
+- **`structured.llmError` je informativan.** Zahtev je i dalje uspešan, heuristički rezultati se i dalje vraćaju. Pogledajte `llmError.error` da locirate uzrok (timeout, greška u JSON analizi, Zod provera neuspešna).
+- **Nisu članske stranice `links[]` neće raditi relevantno sortiranje.** Samo prema "gornjoj granici od 100 stavki + filtriranje nevažećih protokola" se trudi da očisti.
+- **Pogodak u keširanju se takođe naplaćuje.** Keširanje je za smanjenje latencije i zaštitu browser pool-a, nije za uštedu novca.

@@ -1,0 +1,236 @@
+---
+title: "Integracija „Prijava putem Ace Data Cloud-a“ (OAuth 2.0)"
+---
+
+Omogućite svom proizvodu „Prijavu putem Ace Data Cloud-a“ i, nakon autorizacije korisnika, **u ime korisnika** čitajte i pišite njegove Ace Data Cloud resurse (profil, API Token, pretplate, korišćenje, porudžbine itd.). U osnovi se koristi standardni **OAuth 2.0 Authorization Code režim (Authorization Code) + PKCE**, potpuno isto kao integracija prijave putem GitHub-a / Google-a — možete direktno koristiti bilo koju OAuth klijentsku biblioteku koju već imate.
+
+> **Pogodni scenariji**: Pravite aplikaciju treće strane / Agent / MCP klijent / automatizovani radni tok i želite da se korisnici jednim klikom prijave putem Ace Data Cloud naloga, te da po potrebi pristupate njihovim resursima na platformi, bez potrebe da korisnici ručno kopiraju i lepe API Key.
+
+## Brzi pregled termina i krajnjih tačaka
+
+Sve krajnje tačke su na `https://auth.acedata.cloud`, a najnovije adrese možete uvek dobiti putem krajnje tačke za otkrivanje (Discovery):
+
+```bash
+curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
+```
+
+| Namena                 | Krajnja tačka                                                |
+| ------------------ | ------------------------------------------------- |
+| Dokument za otkrivanje (Discovery)    | `GET /.well-known/oauth-authorization-server`     |
+| Stranica za autorizaciju korisnika (preusmeravanje pregledača)       | `GET https://auth.acedata.cloud/oauth2/authorize` |
+| Krajnja tačka za tokene (zamena / osvežavanje tokena) | `POST https://auth.acedata.cloud/oauth2/token`    |
+| Opoziv tokena               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
+| Informacije o korisniku (UserInfo)     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
+| Upravljanje registracijom aplikacija (samostalno)         | `https://auth.acedata.cloud/user/oauth-apps`      |
+
+Podržane mogućnosti: `response_type=code`, `grant_types=authorization_code, refresh_token`, `code_challenge_methods=S256, plain`, metode autentifikacije klijenta `client_secret_post` (poverljivi klijent) / `none` (PKCE javni klijent).
+
+## Opseg dozvola (Scope)
+
+Zatražite prema principu „najmanjih privilegija“; korisnik će na stranici za autorizaciju videti svaku dozvolu koju zatražite.
+
+**Identitetske (OIDC kompatibilne)**
+
+| Scope     | Značenje      | Polja koja vraća `/users/me`                                           |
+| --------- | ------- | ---------------------------------------------------------- |
+| `openid`  | Jedinstveni identifikator korisnika  | `id`                                                       |
+| `profile` | Osnovni podaci    | `username`、`nickname`、`avatar`、`is_verified`、`date_joined` |
+| `email`   | E-mail      | `email`                                                    |
+| `phone`   | Broj mobilnog telefona (osetljivo) | `phone`、`region`                                           |
+
+**Resursi platforme**
+
+| Scope                                      | Značenje                     |
+| ------------------------------------------ | ---------------------- |
+| `applications:read` / `applications:write` | Čitanje / izmena korisničkih pretplata na usluge i kvota       |
+| `credentials:read` / `credentials:write`   | Čitanje / kreiranje i opoziv korisničkih API Token-a |
+| `usage:read`                               | Čitanje istorije korisničkih poziva               |
+| `orders:read` / `orders:write`             | Čitanje porudžbina / naručivanje i pokretanje plaćanja          |
+
+**Agregirani (automatsko proširivanje)**
+
+| Scope            | Proširuje se u                                                                     |
+| ---------------- | ----------------------------------------------------------------------- |
+| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
+| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
+| `platform`       | `platform:read` + `platform:write`                                      |
+
+**Posebno**
+
+| Scope            | Značenje                                                 |
+| ---------------- | -------------------------------------------------- |
+| `offline_access` | Izdaje **Refresh Token** (ako se ne zatraži, izdaje se samo Access Token; po isteku je potrebna ponovna autorizacija) |
+
+> Tipične kombinacije: prijava treće strane „jednim klikom“ =`openid profile`; MCP / IDE klijentu je potrebno automatsko podešavanje Key-a =`openid profile credentials:read credentials:write`; kompletna upravljačka konzola =`openid profile email platform offline_access`.
+
+## Korak 1: Registrujte OAuth aplikaciju
+
+Otvorite [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) → „Kreiraj aplikaciju“, pa popunite:
+
+1. **Naziv / opis / logo aplikacije**: biće prikazani na korisnikovoj stranici za davanje saglasnosti za autorizaciju.
+2. **Tip klijenta (Client Type)**:
+   - **Poverljivi (confidential)** — imate backend i možete bezbedno čuvati `client_secret` (Web usluge, backend usluge).
+   - **Javni (public)** — čisti frontend / desktop / CLI / mobilni uređaji, **ne mogu** čuvati tajnu i moraju koristiti **PKCE**.
+3. **Povratne adrese (Redirect URIs)**: adrese na koje se korisnik preusmerava nakon završene autorizacije; **moraju biti potpuno iste kao `redirect_uri` koji prosleđujete prilikom pokretanja autorizacije**; možete uneti više njih.
+4. **Opsezi dozvola (Scopes)**: označite scope-ove koji su vam potrebni iz prethodnog odeljka.
+
+Nakon čuvanja dobićete **`client_id`**; poverljivi klijenti će takođe **jednokratno** prikazati **`client_secret`** — odmah ga sačuvajte, jer se nakon zatvaranja više ne može ponovo videti (možete ga ponovo generisati putem „Rotiraj tajnu / Rotate Secret“ na stranici detalja; stara tajna odmah postaje nevažeća).
+
+> Svaki nalog može kreirati najviše **20** OAuth aplikacija.
+
+## Korak 2: Preusmerite korisnika na stranicu za autorizaciju
+
+U svojoj aplikaciji preusmerite korisnikov pregledač na stranicu za autorizaciju, uz parametre upita:
+
+```
+https://auth.acedata.cloud/oauth2/authorize
+  ?response_type=code
+  &client_id=<你的 client_id>
+  &redirect_uri=<你注册的回调地址>
+  &scope=openid%20profile%20credentials:read
+  &state=<随机防 CSRF 串>
+  &code_challenge=<PKCE 挑战值>          # 公开客户端必填
+  &code_challenge_method=S256            # 公开客户端必填
+```
+
+- `state`: sami generišite nasumičan niz; pri povratnom pozivu se vraća neizmenjen i služi za zaštitu od CSRF-a; **obavezno ga proverite**.
+- **PKCE (obavezno za javne klijente, preporučeno i za poverljive klijente)**: prvo generišite nasumični `code_verifier`, zatim izračunajte
+  `code_challenge = BASE64URL( SHA256( code_verifier ) )`, stavite `code_challenge` u URL za autorizaciju,
+  a `code_verifier` zadržite kod sebe za korišćenje u koraku 4.
+
+Nakon što se korisnik prijavi i klikne „Saglasan sam“, pregledač će biti preusmeren nazad na:
+
+```
+<redirect_uri>?code=<授权码>&state=<原样返回的 state>
+```
+
+Ako korisnik odbije: `<redirect_uri>?error=access_denied&error_description=...&state=...`.
+
+> Autorizacioni kod važi **10 minuta** i **može se koristiti samo jednom**.
+
+## Korak 3: Zamenite autorizacioni kod za token
+
+Na svom **backend-u** (poverljivi klijent) ili klijentu (PKCE javni klijent), pozovite krajnju tačku za tokene koristeći `code`.
+
+**Poverljivi klijent (sa client_secret):**
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<上一步拿到的 code> \
+  -d client_id=<你的 client_id> \
+  -d client_secret=<你的 client_secret> \
+  -d redirect_uri=<和第 2 步完全一致的回调地址>
+```
+
+**Javni klijent (PKCE, bez client_secret):**
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=authorization_code \
+  -d code=<code> \
+  -d client_id=<你的 client_id> \
+  -d code_verifier=<第 2 步生成的 code_verifier> \
+  -d redirect_uri=<回调地址>
+```
+
+Uspešan odgovor (`refresh_token` se pojavljuje samo kada je zatražen `offline_access`):
+
+```json
+{
+  "access_token": "<JWT>",
+  "token_type": "Bearer",
+  "expires_in": 1296000,
+  "scope": "openid profile credentials:read",
+  "refresh_token": "<JWT，仅 offline_access 时>"
+}
+```
+
+`access_token` je JWT koji sadrži deklaraciju `scope`; važi **15 dana** (broj sekundi u `expires_in`). Refresh Token važi **30 dana**.
+
+## Korak 4: Pozivanje interfejsa pomoću Access Tokena
+
+Jednostavno stavite token u zaglavlje `Authorization: Bearer`.
+
+**Čitanje korisničkih informacija (UserInfo, polja se filtriraju prema odobrenom scope-u):**
+
+```bash
+curl https://auth.acedata.cloud/api/v1/users/me \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**Pozivanje interfejsa resursa platforme** (`platform.acedata.cloud`, autentifikacija prema scope-u). Na primer, ako je dobijen `credentials:read`:
+
+```bash
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<UserInfo返回的id>" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Backend platforme će proveriti deklaraciju `scope` u JWT-u — token može pristupati samo resursima koje je korisnik odobrio. Ako se pristupi neodobrenom resursu, biće vraćen `403`.
+
+## Osvežavanje tokena
+
+Nakon isteka Access Tokena, koristite Refresh Token da zamenite za novi par tokena (potrebno je da je prvobitno zatražen `offline_access`):
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/token \
+  -d grant_type=refresh_token \
+  -d refresh_token=<你的 refresh_token>
+```
+
+Struktura odgovora je ista kao u koraku 3; scope će biti **zadržan neizmenjen** iz prvobitnog odobrenja. Nakon osvežavanja, stari Refresh Token postaje nevažeći (rotacija), sačuvajte novi.
+
+## Opozivanje tokena
+
+```bash
+curl -X POST https://auth.acedata.cloud/oauth2/revoke \
+  -d token=<access_token 或 refresh_token>
+```
+
+## Stvarni primer: naši sopstveni MCP serveri su povezani upravo ovako
+
+15+ MCP servera kompanije Ace Data Cloud (NanoBanana, Midjourney, Suno, Seedance, Kling…) koriste upravo ovaj proces za povezivanje „Sign in with Ace Data Cloud” koje se pojavljuje u Claude Desktop / Cursor-u: svi su registrovani kao OAuth aplikacije tipa **javno (PKCE)**, zahtevaju scope-ove povezane sa `credentials`, a nakon korisničkog odobrenja MCP serveri mogu u ime korisnika pozivati `api.acedata.cloud` — bez potrebe da korisnik ručno nalepi API Key. Vaš način povezivanja je potpuno isti kao njihov.
+
+## Česte greške
+
+Odgovori na greške imaju jedinstveni format `{ "error": "<code>", "error_description": "<ljudski čitljivo objašnjenje>" }`:
+
+| error                    | Značenje / provera                                                         |
+| ------------------------ | ------------------------------------------------------------------------- |
+| `invalid_request`        | Nedostajući ili nevažeći parametar (na primer, nije prosleđen `code` / `client_id`) |
+| `invalid_client`         | `client_id` ne postoji, aplikacija je onemogućena ili `client_secret` nije ispravan |
+| `invalid_grant`          | Autorizacioni kod ne postoji / istekao je (>10 minuta) / već je korišćen / PKCE provera nije uspela / `redirect_uri` se ne podudara sa onim tokom autorizacije |
+| `access_denied`          | Korisnik je kliknuo „Odbij” na stranici za autorizaciju                   |
+| `unsupported_grant_type` | `grant_type` nije `authorization_code` ili `refresh_token`                |
+
+## Brzi pregled ograničenja
+
+| Stavka                 | Vrednost                               |
+| ---------------------- | -------------------------------------- |
+| Maksimalan broj OAuth aplikacija po nalogu | 20                       |
+| Važenje autorizacionog koda | 10 minuta, jednokratna upotreba       |
+| Važenje Access Tokena  | 15 dana                                |
+| Važenje Refresh Tokena | 30 dana (rotacija)                     |
+| `redirect_uri`         | Mora se precizno podudarati sa registrovanom vrednošću |
+| `client_secret`        | Prikazuje se samo jednom pri kreiranju / rotaciji, server ga čuva kao SHA-256 heš |
+
+## Ugrađivanje OAuth aplikacije treće strane na Studio početnu stranicu
+
+U Studio sekciji „Podešavanja → Početna stranica → Komponente veb-sajta” možete uključiti OAuth i konfigurisati `client_id` aplikacije treće strane i registrovanu adresu za povratni poziv.
+Veb-sajt i povratni poziv moraju koristiti HTTPS, imati isto poreklo (protokol, domen i port) i koristiti poreklo različito od Studio-a.
+U konfiguraciji se ne sme navesti `client_secret`; tajna aplikacije može se čuvati samo na backend-u treće strane.
+
+Komponenta zahteva dozvole `profile:read credentials:read`. Svaki posetilac mora pojedinačno dati saglasnost; konfiguracija komponente od strane vlasnika sajta ne predstavlja autorizaciju posetilaca.
+Stranica treće strane generiše nasumični `state` i PKCE verifier, a zatim šalje S256 challenge Studio-u. Studio u oblasti komponente prikazuje zvaničnu stranicu za autorizaciju,
+a nakon korisnikove saglasnosti, treća strana prima jednokratni autorizacioni kod i poziva token endpoint radi dobijanja OAuth access tokena, nakon čega pristupa
+`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;用户ID>` radi čitanja postojećeg API Key-a.
+Korisnički ID dolazi iz `id` vraćenog u prethodnom koraku putem `GET https://auth.acedata.cloud/api/v1/users/me`; interfejs liste kredencijala ne prihvata `user_id=me`.
+Studio ne šalje trećoj strani sopstveni token za prijavu niti direktno čita i ubacuje korisnikov Key.
+
+Javni klijenti moraju koristiti **S256 PKCE**. Prilikom zamene za token, mora se proslediti `redirect_uri` koji je potpuno identičan onom iz zahteva za autorizaciju.
+Autorizacioni kod može se zameniti samo jednom. Pre autorizacije proverava se da li je adresa za povratni poziv registrovana.
+
+Stranica treće strane mora implementirati protokol za poruke; bilo koja postojeća veb-stranica ne može se automatski povezati samo unosom URL-a.
+Kompletan primer pogledajte u [vodiču za integraciju Studio OAuth komponente](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
+
+**Autorizacija za čitanje API Key-a znači dozvolu trećoj strani da sačuva i koristi taj Key. Opozivanje OAuth autorizacije neće učiniti nevažećim Key koji je treća strana već kopirala;
+korisnik mora zasebno opozvati ili rotirati Key.**

@@ -1,0 +1,185 @@
+---
+title: "X402 價格說明"
+description: "Platform 整合指南 - Ace Data Cloud"
+---
+
+這篇文檔說明用 X402 調用 Ace Data Cloud API 時，價格是怎麼定的，以及它和平台普通 **Credits**（額度）價格是什麼關係。
+
+## 核心結論
+
+X402 不是一套獨立的價格體系。每個 API 調用本來就有一個以 **Credits** 計的成本，這是所有計費方式（API Token 扣額度、帳戶餘額、X402 鏈上支付）共用的唯一價格來源。X402 只是把這個 Credits 成本按一個固定匯率換算成鏈上 USDC：
+
+> **1 Credit = 0.095215 USDC**（即 `95215` atomic USDC，USDC 為 6 位小數）
+
+也就是說：
+
+```text
+X402 價格 (USDC) = 該次調用的 Credits 成本 × 0.095215
+```
+
+這個匯率不是憑空設定的，它等於平台 **最優檔（大額）Credits 單價**。所以用 X402 付費 ≈ 用最優檔單價買 Credits 再消費，**沒有 X402 溢價**，反而直接享受最便宜的 Credits 單價，且無需預充值、無需 API Token。
+
+## 計價基準
+
+| 項目        | 值                              | 說明                                                    |
+| --------- | ------------------------------ | ----------------------------------------------------- |
+| 換算匯率      | `1 Credit = 0.095215 USDC`     | 平台統一設定的固定匯率                                           |
+| atomic 單位 | `1 Credit = 95215 atomic USDC` | USDC 6 位小數，`atomic = floor(credits × 0.095215 × 1e6)` |
+| 最小扣費      | `1 atomic USDC`（$0.000001）     | 即使成本極低，也至少結算 1 atomic                                 |
+| 計價幣種      | USDC                           | Base / SKALE 為 ERC-20 USDC，Solana 為 SPL USDC          |
+
+換算由平台統一完成，金額對所有支持的網絡（Base、SKALE、Solana）一致；不同網絡只是資產合約和簽名方式不同，價格相同。
+
+### 和普通 Credits 單價的關係
+
+平台 Credits 按「用量越大、單價越低」的階梯出售。X402 按調用計費時，統一使用階梯最優檔單價：
+
+| 購買/支付方式        | 大致 Credits 單價            | 說明                   |
+| -------------- | ------------------------ | -------------------- |
+| 入門 / 小額充值      | 約 `$0.13 / Credit`       | 列表價，小額買 Credits 時的單價 |
+| 大額 / 最優檔       | `$0.095215 / Credit`     | 最便宜的單價               |
+| **X402 按調用付費** | **`$0.095215 / Credit`** | **始終等於最優檔單價**        |
+
+換句話說，X402 把每次調用都按最優檔 Credits 單價結算。小額充值買 Credits 的用戶，單價會高於 X402；大額充值用戶的單價才和 X402 一致。
+
+## 兩種價格形態：`exact` 與 `upto`
+
+X402 的 402 響應裡，`maxAmountRequired` 就是你要簽名的金額。它有兩種形態：
+
+- **`exact`（固定價）**：請求處理前價格就能確定（圖片、視頻、音樂、搜索、訂單支付）。`maxAmountRequired = 該調用 Credits 成本 × 0.095215`，即該次調用的應付金額（與成功響應裡的 `cost.amount` 一致）。
+- **`upto`（用量後置計量）**：聊天補全這類「響應結束才知道用了多少 token」的接口。`maxAmountRequired` 是一個**上限**（按該模型設定的上限額度換算：上限 Credits × 0.095215），實際按真實用量結算，且不超過上限。
+
+關於這兩種 scheme 的協議細節見 [`exact` 與 `upto` 計費方案](https://platform.acedata.cloud/documents/x402-metered-upto)。下面只講價格。
+
+## Chat（聊天補全）價格
+
+聊天補全是 `upto` 計量：按 prompt / completion token 實際用量計費。每百萬（1M）token 的價格 = `該模型每 1M token 的 Credits 成本 × 0.095215`，與平台公開模型目錄（`/api/v1/models?with_pricing=true`）展示的 USD 單價完全一致。
+
+下表為真實價格（取自模型目錄，按 X402 匯率計），單位 USD / 1M token：
+
+| 模型                | 輸入 / 1M | 輸出 / 1M  | `upto` 上限             |
+| ----------------- | ------- | -------- | --------------------- |
+| gpt-4o-mini       | $0.0796 | $0.3183  | 1 Credit（$0.095215）   |
+| gemini-2.5-flash  | $0.1591 | $1.3262  | 5 Credits（$0.476074）  |
+| gpt-5 / gpt-5.1   | $0.6631 | $5.3050  | 20 Credits（$1.904299） |
+| gemini-2.5-pro    | $0.6631 | $5.3050  | 50 Credits（$4.760750） |
+| gpt-4.1           | $1.0610 | $4.2440  | 20 Credits（$1.904299） |
+| claude-sonnet-4-5 | $0.6006 | $3.0028  | 50 Credits（$4.760750） |
+| grok-4            | $1.5915 | $7.9574  | 10 Credits（$0.952149） |
+| claude-opus-4-1   | $3.0028 | $15.0140 | 50 Credits（$4.760750） |
+
+說明：
+
+- 表中為按 token 計量的單價；一次請求費用 = 輸入 token × 輸入單價 + 輸出 token × 輸出單價。
+- `upto` 上限是該模型一次請求允許簽名的最大金額；它不是實際扣款，絕大多數請求遠低於上限。
+- 上限只決定「最多可能扣多少」，真實結算按 token 用量計算。
+
+### 示例：報價與扣費一致（`exact`）
+
+下面是用官方 X402Client 對 `serp/google` 發起的一次**真實付費調用**（Base `exact`）。它演示了三者一致：402 報價、簽名金額、以及成功響應裡返回的 `cost`。
+
+```text
+# 1) 未支付請求 -> 402，拿到報價（不扣費）
+POST /serp/google  ->  402
+base/exact maxAmountRequired = 952 atomic = $0.000952 = 0.01 Credit
+# 0.01 × 0.095215 = 0.00095215，向下取整到 atomic = 952
+
+# 2) 用錢包簽名 952 atomic 的 PAYMENT-SIGNATURE，重試
+POST /serp/google (PAYMENT-SIGNATURE) -> 200
+body.cost = {"amount": 0.000952, "currency": "usdc", "settlement": "authorized"}
+```
+响应返回的 `cost.amount`（0.000952 USDC）与 402 报价、与 `Credits × 0.095215` 完全一致。`settlement` 字段是该笔支付的结算状态（`authorized` = 已授权）；链上结算由平台处理，机制见 [`exact` 与 `upto` 计费方案](https://platform.acedata.cloud/documents/x402-metered-upto)。
+
+### `upto` 报价计算（聊天）
+
+聊天按 token 计量。某次请求的报价（不是上限）按下式计算（以 gpt-4o-mini 为例）：
+
+```text
+Credits = 1e-6 × (0.835733 × prompt_tokens + 3.342933 × completion_tokens)
+USDC    = Credits × 0.095215
+```
+
+一次 500 prompt + 200 completion token 的请求：
+
+```text
+Credits = 1e-6 × (0.835733 × 500 + 3.342933 × 200) ≈ 0.001086 Credits
+报价 USDC ≈ 0.001086 × 0.095215 ≈ $0.0001034
+```
+
+客户端按 `upto` 上限（gpt-4o-mini 为 1 Credit = `95215` atomic）签名，这只是**最多可能扣多少**；该次请求的真实报价（上例约 $0.0001）远低于上限，按 token 用量结算。`upto` 的链上结算机制见 [`exact` 与 `upto` 计费方案](https://platform.acedata.cloud/documents/x402-metered-upto)。
+
+## 其他服务价格（固定价 `exact`）
+
+图片、视频、音乐、搜索这类接口在请求时价格即可确定，使用 `exact`。下表为真实价格，取自线上接口对未支付请求返回的 402 `maxAmountRequired`（查询报价不会产生扣费）：
+
+| 服务   | 示例模型 / 参数                   | Credits | USDC      | atomic  |
+| ---- | --------------------------- | ------- | --------- | ------- |
+| 网页搜索 | serp/google，≤10 条结果         | 0.01    | $0.000952 | 952     |
+| 图片   | nano-banana                 | 0.14    | $0.013330 | 13330   |
+| 图片   | gpt-image-1，1024×1024       | 0.20    | $0.019043 | 19043   |
+| 图片   | flux-dev                    | 0.24    | $0.022851 | 22851   |
+| 图片   | midjourney imagine          | 0.27    | $0.025708 | 25708   |
+| 图片   | seedream-4                  | 0.32    | $0.030468 | 30468   |
+| 音乐   | suno generate               | 0.55    | $0.052368 | 52368   |
+| 音乐   | producer generate           | 0.68    | $0.064746 | 64746   |
+| 视频   | luma                        | 1.19    | $0.113305 | 113305  |
+| 视频   | hailuo（minimax-hailuo-2-3）  | 1.72    | $0.163769 | 163769  |
+| 视频   | kling-v2-6 std              | 2.10    | $0.199951 | 199951  |
+| 视频   | kling-v3 std                | 4.20    | $0.399903 | 399903  |
+| 视频   | veo-3 text→video            | 5.00    | $0.476074 | 476074  |
+| 视频   | seedance-1-0-pro，1080p / 5s | 5.60    | $0.533204 | 533204  |
+| 视频   | wan2.6-t2v                  | 13.50   | $1.285402 | 1285402 |
+
+说明：
+
+- 同一服务的价格随**模型、分辨率、时长、动作**变化（尤其是视频）。上表是某一组参数下的真实取值，仅供量级参考。
+- 这类固定价（`exact`）接口，该请求 402 响应里的 `maxAmountRequired` 即该次应付金额（与成功响应的 `cost.amount` 一致，上节已实测）。
+- 每个价格都由 `Credits × 0.095215` 向下取整到 atomic 单位得到（见上文计价基准），与聊天用的是同一套换算。因浮点表示与取整，个别值可能与朴素乘积相差 1 atomic（$0.000001），一律以 402 返回值为准。
+
+## 订单支付价格
+
+用 X402 支付控制台订单（购买套餐 / 充值 Credits）时，价格以订单页面显示为准，402 的 `amount` 为最终签名依据。订单支付走平台 API、需要账户令牌，详见 [订单支付教程](https://platform.acedata.cloud/documents/x402-order-payment)。
+
+订单支付教程中的一个真实例子（购买 10 Credits）：
+
+```text
+description Ace Data Cloud Credits x 10.0
+created price 1.26          # 订单创建价（USD）
+settled    1.20 USDC        # 最终签名/结算金额（= 402 amount）
+            = 1200000 atomic USDC
+```
+
+注意：**按调用付费**（上文 Chat / 其他服务）和**订单支付**是两条不同路径。按调用付费统一用 `0.095215`/Credit 的最优档单价；订单支付按套餐定价，其创建价与最终结算金额的差异以 [订单支付教程](https://platform.acedata.cloud/documents/x402-order-payment) 为准。
+
+## 如何实时获取价格
+
+价格随模型和参数变化，请用程序实时获取，不要硬编码：
+
+- **按调用价格**：对目标 API 发一次**不带** `PAYMENT-SIGNATURE`（也不带 `Authorization`）的请求，读取返回的 402 `accepts[].maxAmountRequired`。这一步不会扣费。对 `exact` 接口它是最终价格；对 `upto` 接口（聊天）它是上限，实际按用量结算。
+- **聊天每 token 单价**：`GET https://platform.acedata.cloud/api/v1/models?with_pricing=true&type=chat`，读取每个模型的 `pricing.input_usd` / `pricing.output_usd`（已按 `credit_usd_rate` 计算）。
+- **换算校验**：`atomic = floor(Credits × 0.095215 × 1e6)`，`USDC = atomic / 1e6`（即 `USDC ≈ Credits × 0.095215`）。
+
+获取价格的最小请求示例：
+
+```bash
+curl -sS -X POST https://x402.acedata.cloud/midjourney/imagine \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "a cat"}'
+# 返回 402，accepts[].maxAmountRequired 即为该次（exact）调用价格
+```
+
+## 小结
+- X402 價格 = 該次調用的 Credits 成本 × `0.095215`，和普通 Credits 計費是**同一個價格**，只是用鏈上 USDC 結算。
+- `0.095215`/Credit 是平台**最優檔**（大額）Credits 單價；小額充值買 Credits 單價更高，所以 X402 等於自動拿到最優單價。
+- `exact` 接口（圖片 / 視頻 / 音樂 / 搜索 / 訂單）簽名金額即該次應付金額；`upto` 接口（聊天）簽名的是上限，按真實用量結算。
+- 權威價格以 402 返回的 `maxAmountRequired` 為準：`exact` 是應付金額（與成功響應的 `cost.amount` 一致，已實測）；`upto` 是上限，成功響應的 `cost.amount` 才是按用量結算的真實金額（≤ 上限）。
+
+## 相關文檔
+
+| 文檔                    | 連結                                                                     |
+| --------------------- | ---------------------------------------------------------------------- |
+| X402 集成指南（總覽）         | [X402 集成指南](https://platform.acedata.cloud/documents/x402-integration) |
+| 快速開始                  | [X402 快速開始](https://platform.acedata.cloud/documents/x402-quickstart)  |
+| `exact` 與 `upto` 計費方案 | [計費方案說明](https://platform.acedata.cloud/documents/x402-metered-upto)   |
+| 網絡與支付方式               | [網絡與支付方式](https://platform.acedata.cloud/documents/x402-networks)      |
+| 訂單支付教程                | [訂單支付教程](https://platform.acedata.cloud/documents/x402-order-payment)  |

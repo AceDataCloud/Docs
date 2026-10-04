@@ -1,0 +1,233 @@
+---
+title: "X402-tilauksen maksun opas"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+API-pyyntöjen maksamisen lisäksi Ace Data Cloud tukee myös tilausten maksamista X402-maksukonsolilla. Tilausmaksun ja API-kutsujen ydinprotokolla on sama: ensimmäinen pyyntö palauttaa 402:n, asiakas allekirjoittaa `PAYMENT-SIGNATURE`-allekirjoituksen ja yrittää sitten uudelleen samalla pyynnöllä.
+
+Erona on, että tilausmaksu kuuluu alustan API:in ja vaatii tilitunnuksen; kun taas `x402.acedata.cloud`-palvelun AI API:a voidaan kutsua suoraan pelkällä X402:lla ilman API Tokenia.
+
+## Tilauksen valmistelu
+
+Siirry [Ace Data Cloud -konsoliin](https://platform.acedata.cloud/console/orders), valitse maksettava tilaus ja merkitse tilauksen ID.
+
+Jos sinulla ei vielä ole tilausta, voit luoda maksua odottavan tilauksen pakettisivulla. Tilauksen hinta määräytyy sivulla näkyvän hinnan mukaan, ja X402 402 -vastauksen `amount` on lopullinen allekirjoituksen peruste.
+
+## Tilitunnuksen luominen
+
+Tilausmaksupyyntö vaatii tilitunnuksen. Avaa [alustan Token-sivu](https://platform.acedata.cloud/console/platform-tokens) ja luo `platform-v1-...`-muotoinen token.
+
+Käytä seuraavissa pyynnöissä:
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+Tilitunnus eroaa tavallisesta API Tokenista. Tavallista API Tokenia käytetään API-kiintiön kuluttamiseen; tilitunnusta käytetään edustamaan tiliäsi alustan resurssien, kuten tilausmaksujen, käsittelyssä.
+
+## Käynnistä 402
+
+Lähetä ensin pyyntö ilman `PAYMENT-SIGNATURE`-allekirjoitusta:
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+Palautettu tila on 402, ja vastaus sisältää `accepts`-kentän:
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+Tilausmaksu käyttää virallista x402 v2:ta: `x402Version` on `2`, `network` käyttää CAIP-2-tunnistetta ja summakenttä on `amount`.
+
+Ohjelman ajotulos 10 Credits -tilauksen luomisesta ja 402:n käynnistämisestä:
+
+> Seuraavat tapahtumatiedot ovat vanhan käytännön mukaisia historiallisia todellisia testiesimerkkejä; summat ja tapahtumahajautukset on säilytetty muuttumattomina. Uusissa X402-tilauksissa ei enää ole maksutapa-alennuksia; käytä tämän 402-vastauksen `amount`-arvoa allekirjoituksen ja maksun perusteena.
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+Tulosten selitys:
+
+- Tilauksen onnistuneen luomisen jälkeen tila on `Pending`, eikä ketjussa ole vielä maksua.
+- Ensimmäinen `pay/`-pyyntö ei sisällä `PAYMENT-SIGNATURE`-allekirjoitusta, joten se palauttaa HTTP 402:n.
+- `accepts` tarjoaa samanaikaisesti Base `exact`- ja Solana `exact` -vaihtoehdot; tässä oppaassa valitaan myöhemmin Base.
+- Tilauksen luontihinta on `1.26`, ja vanhan X402-maksualennuskäytännön aikana maksettaessa todellinen allekirjoitus- ja selvityssumma oli `1.2` USDC, mikä vastaa arvoa `1200000` atomic USDC.
+
+Huomaa, että `resource` on palvelimen palauttama ja allekirjoitukseen osallistuva kenttä; asiakkaan ei tule itse muuttaa siinä olevaa protokollaa, polkua tai tilauksen ID:tä.
+
+## Allekirjoita ja yritä uudelleen
+
+Tilausmaksussa voidaan käyttää uudelleen `@acedatacloud/x402-client`- tai `acedatacloud-x402`-paketin alemman tason allekirjoitusfunktioita. Alla on TypeScript-esimerkki:
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+Ohjelman ajotulos saman tilauksen allekirjoittamisesta Base `exact` -vaihtoehdolla ja uudelleen yrittämisestä:
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+Ketjun vahvistuksen tulos:
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+Tulosten selitys:
+
+- `status 200` osoittaa, että alustan tilausmaksurajapinta hyväksyi tämän `PAYMENT-SIGNATURE`-allekirjoituksen.
+- `has_x_payment_response True` osoittaa, että vastausotsikko sisältää Base64-koodatun `PAYMENT-RESPONSE`-kuitin.
+- `settle_header.success=True` ja `network=base` osoittavat, että Facilitator on suorittanut Base-settlementin.
+- Tilauksen lopullinen tila on `Finished`, `pay_way` on `X402`, ja `pay_id`-kenttään on kirjoitettu ketjun transaktiohash.
+- BaseScanin `Transfer`-tapahtuma osoittaa, että maksajan osoite siirsi alustan vastaanotto-osoitteeseen `1200000` atomic USDC:tä eli `1.2` USDC:tä.
+
+## Onnistunut vastaus ja kuitti
+
+Kun tilausmaksu onnistuu, vastausrungossa on tilaustiedot. Alusta sisällyttää myös vastausotsikkoon `PAYMENT-RESPONSE` Base64-koodatun settlement-responsen, jonka dekoodauksen jälkeen tavallisia kenttiä ovat:
+
+| Kenttä            | Selitys                           |
+| ------------- | ---------------------------- |
+| `success`     | Onnistuiko Facilitator settlement. |
+| `transaction` | Ketjun settlement-transaktiohash.                    |
+| `network`     | Maksuverkko.                        |
+| `payer`       | Maksajan lompakko-osoite.                      |
+| `amount`      | Todellinen settlement-summa atomic units -muodossa.      |
+
+Jos tarvitset täsmäytystä, on suositeltavaa tallentaa samanaikaisesti tilauksen ID, maksajan lompakko-osoite, `transaction` ja tilauksen lopullinen tila.
+
+## Huomioitavaa
+
+- Tilausmaksu vaatii alustan tilitunnuksen, eikä sitä voi suorittaa pelkällä X402-lompakon allekirjoituksella.
+- `amount` käyttää USDC atomic units -yksiköitä, ja `1200000` tarkoittaa `1.2` USDC:tä.
+- Älä muodosta vastaanotto-osoitetta tai omaisuusosoitetta itse, vaan käytä 402-vastauksen `accepts`-kenttää.
+- Jos sama `PAYMENT-SIGNATURE` lähetetään toistuvasti, Facilitator käyttää noncea uudelleentoiston suojaukseen.
+
+## Maksun epäonnistumisvastaus
+
+Ensimmäinen HTTP 402 ilman `PAYMENT-SIGNATURE`-allekirjoitusta on normaali maksupyynnön haaste, eikä se tarkoita maksun epäonnistumista. Allekirjoituksen jälkeisessä vahvistuksen tai settlementin epäonnistumisessa säilytetään edelleen standardi merkkijono `error` yhteensopivuuden varmistavana vararatkaisuna, ja vakaa virherakenne palautetaan kohdassa `extensions.acedatacloud.paymentError`:
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+Asiakkaan tulee ensisijaisesti lokalisoida `code`-arvon mukaan ja käyttää tuntemattomille code-arvoille yleistä maksun epäonnistumista. `charged` on kolmitilainen kenttä: `false` palautetaan vain, kun maksu hylätään selvästi ennen settlementia; kentän puuttuminen tarkoittaa, että veloituksen tila on tuntematon, eikä sitä voi tulkita ”ei veloitettu” -merkityksessä. Kun nykyinen tilaus siirtyy tilaan `Failed`, samaa tilausta ei voi yrittää uudelleen. Korjaa lompakko-ongelma ja luo uusi tilaus.
+
+Älä tallenna tai lähetä täydellistä `PAYMENT-SIGNATURE`-allekirjoitusta, lompakon allekirjoitusta, valtuutus-payloadia, Facilitatorin alkuperäisiä diagnostiikkatietoja tai RPC-vastauksia. Asiakaspalvelun selvitystä varten tarvitaan vain tilauksen ID ja julkinen virhe-`code`.

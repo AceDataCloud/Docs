@@ -1,0 +1,316 @@
+---
+title: "Hantera AceDataCloud-plattformens kontotoken (Account Token)"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+**Kontotoken (Account Token, tidigare kallat Platform Token)** är den "nyckel på kontonivå" som utvecklare använder för att programmatiskt hantera AceDataCloud-plattformens resurser (tjänsteansökningar, API-autentiseringsuppgifter, beställningar, anropshistorik, saldo, filer osv.). Dess funktion liknar användarens Token efter inloggning i frontend och har som standard ingen utgångstid; vanliga användare kan endast hantera sina egna token, medan superadministratörer kan hantera andra kontons token enligt behörigheter.
+
+Kontotoken använder plattformens gränssnitt med det tillhörande kontots aktuella behörigheter: grundbehörigheter, direkt tilldelade behörigheter och behörigheter från tillhörande användargrupper gäller tillsammans; efter att ha lagts till i eller tagits bort från en grupp bedöms nästa begäran enligt de nya behörigheterna. Åtkomst till specifika resurser såsom ansökningar och beställningar kräver fortfarande kontroll av tillhörighet. Kontotoken upphör som standard inte att gälla, använd det endast i betrodda miljöer och förvara det säkert.
+
+> ℹ️ Detta gränssnitt tillhör **AceDataCloud plattformshanterings-API**, med det gemensamma prefixet `https://platform.acedata.cloud/api/v1/`. Se det fullständiga gränssnittsindexet i [Hämta AceDataCloud-plattformens dokumentlista](https://platform.acedata.cloud/documents/platform-document-list).
+
+## Kontotoken vs API-autentiseringsuppgifter
+
+De två typer av nycklar som nybörjare lättast blandar ihop, se först skillnaden tydligt:
+
+| Dimension   | **Kontotoken** (detta dokument)                                                               | **API-autentiseringsuppgifter (Credential)**                                                                           |
+| ---- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Användning   | Anropa `https://platform.acedata.cloud/**`-hanteringsgränssnitt                                | Anropa `https://api.acedata.cloud/**`-verksamhetsgränssnitt (OpenAI, Midjourney, Suno, Veo osv.)                             |
+| Format   | `platform-v1-` + 64-siffrig hexadecimal kod (totalt 76 tecken)                                          | 32-siffrig hexadecimal kod                                                                                         |
+| Ett konto | Vanligtvis 1–2 stycken                                                                    | 1–N stycken per tjänsteansökan                                                                                     |
+| Skapa via | [Account Token-konsolen](https://platform.acedata.cloud/console/platform-tokens) | [Skapa AceDataCloud-plattformens API-autentiseringsuppgifter](https://platform.acedata.cloud/documents/platform-credential-create) |
+| Villkor för ogiltighet | Upphör att gälla omedelbart efter borttagning; upphör vid utgång om `expiration` inte är tom                                                | Kan ange kvotgräns, utgångstid och binda käll-IP                                                                             |
+
+Om du bara vill anropa GPT-4.1 behöver du **API-autentiseringsuppgifter**, inte kontotoken.
+Om du vill skriva automatiseringsskript för att hantera påfyllningar, se månatliga fakturor eller utfärda autentiseringsuppgifter i batch till teammedlemmar, använder du kontotoken.
+
+---
+
+## Skapa med ett klick i konsolen (rekommenderas)
+
+1. Logga in på [https://platform.acedata.cloud](https://platform.acedata.cloud).
+2. Gå till sidofältet →「Utvecklare」→「[Account Token](https://platform.acedata.cloud/console/platform-tokens)」.
+3. Klicka på knappen 「Skapa」 uppe till höger för att omedelbart få ett `platform-v1-...`-token, **klicka på kopieringsknappen och spara det i lösenordshanteraren**.
+
+![Account Token-konsolen](https://cdn.acedata.cloud/6g86oz.png)
+
+> ⚠️ Nuvarande svar för skapande, listor och detaljer returnerar alla token i klartext. Behandla hela svaret som en hemlighet, skriv inte till loggar, analysplattformar eller frontend-beständig lagring; klienter bör inte heller förlita sig på att listor långsiktigt returnerar klartext.
+
+---
+
+## Skapa kontotoken med API
+
+### Gränssnittsöversikt
+
+| Punkt    | Innehåll                                                       |
+| ---- | -------------------------------------------------------- |
+| Metod   | `POST`                                                   |
+| URL  | `https://platform.acedata.cloud/api/v1/platform-tokens/` |
+| Autentisering   | ✅ Valfritt befintligt kontotoken eller webbläsarens inloggnings-JWT                                 |
+| Body | `application/json` (ett tomt objekt `{}` kan skickas)                           |
+
+### Autentiseringsbeskrivning (hönan och ägget-problemet)
+
+> Hur får man det första tokenet? Svaret är **via konsolen**——efter inloggning i webbläsaren använder konsolen JWT-autentisering för att anropa `POST /platform-tokens/` och utfärdar det första tokenet till dig.
+> Därefter kan du använda vilket befintligt `platform-v1-...`-token som helst för att skapa fler.
+
+Format för begärandehuvud:
+
+```http
+Authorization: Bearer ${PLATFORM_TOKEN}
+Content-Type: application/json
+```
+
+### Exempel på begäran
+
+```shell
+curl -X POST 'https://platform.acedata.cloud/api/v1/platform-tokens/' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}" \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+### Svar (HTTP 201)
+
+```json
+{
+  "id": "3264f1aa-cbe1-4e2c-a434-95adba4f8304",
+  "token": "platform-v1-<REDACTED>",
+  "expiration": null,
+  "user_id": "89518d07-5560-4b05-92c1-667f3ddf6a4b",
+  "created_at": "2026-04-26T15:50:11.123456Z",
+  "updated_at": "2026-04-26T15:50:11.123456Z",
+  "used_at": null
+}
+```
+
+### Fältbeskrivning
+
+| Fält           | Typ                 | Beskrivning                                                   |
+| ------------ | ------------------ | ---------------------------------------------------- |
+| `id`         | UUID               | Tokenets primärnyckel, används vid borttagning / hämtning av detaljer                                     |
+| `token`      | string             | Kontotoken i klartext. Formatet är `platform-v1-` + 64-siffrig hexadecimal kod (totalt 76 tecken), måste behandlas som en hemlighet |
+| `expiration` | int \| null        | Utgångstid (tidsstämpel i sekunder). `null` betyder att ingen utgångstid har angetts                         |
+| `user_id`    | UUID               | Tillhörande användar-ID. Detta är även det `?user_id=`-parametervärde som måste skickas till alla efterföljande listgränssnitt               |
+| `created_at` | datetime (ISO8601) | Skapandetid                                                 |
+| `updated_at` | datetime (ISO8601) | Uppdateringstid                                                 |
+| `used_at`    | datetime \| null   | Tidpunkt då det senast användes för autentisering. Om det aldrig har använts är värdet `null`, vilket kan användas för att upptäcka "zombie-token"                |
+
+---
+
+## Hämta lista över kontotoken
+
+### Gränssnittsöversikt
+
+| Punkt   | Innehåll                                                       |
+| --- | -------------------------------------------------------- |
+| Metod  | `GET`                                                    |
+| URL | `https://platform.acedata.cloud/api/v1/platform-tokens/` |
+| Autentisering  | ✅ Kontotoken krävs                                                 |
+
+### Obligatorisk frågeparameter
+
+> ⚠️ **Du måste ange `?user_id=<your_user_id>`**. Orsak: listgränssnittet utför behörighetskontroll **objekt för objekt** på sidindelningsresultaten. Om `user_id` saknas avvisas det första objektet som inte tillhör dig och returnerar `403 permission_denied`.
+
+Så här hämtar du `user_id`:
+
+1. Öppna [https://auth.acedata.cloud/user/profile](https://auth.acedata.cloud/user/profile) i webbläsaren; hela UUID visas högst upp på sidan.
+2. Eller fyll direkt i fältet `user_id` från returvärdet för `POST /platform-tokens/`.
+
+### Frågeparametrar
+| Parameter         | Required  | Type     | Description                    |
+| ---------- | --- | ------ | --------------------- |
+| `user_id`  | ✅   | UUID   | User ID for the current account            |
+| `limit`    | ❌   | int    | Items per page, default 10, maximum 100     |
+| `offset`   | ❌   | int    | Offset                    |
+| `ordering` | ❌   | string | Sort field, default `-created_at` |
+
+### Request example
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/platform-tokens/?user_id=89518d07-5560-4b05-92c1-667f3ddf6a4b&limit=5' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+### Response (HTTP 200)
+
+```json
+{
+  "count": 2,
+  "items": [
+    {
+      "id": "51c575a2-801c-4211-bc47-711452a8c8c9",
+      "token": "platform-v1-<REDACTED>",
+      "expiration": null,
+      "user_id": "89518d07-5560-4b05-92c1-667f3ddf6a4b",
+      "created_at": "2026-04-26T15:41:32.761705Z",
+      "updated_at": "2026-04-26T15:41:32.761726Z",
+      "used_at": null
+    }
+  ]
+}
+```
+
+> Detta gränssnitts sidindelade svar använder `count` + `items`. Andra plattformsgränssnitt kan använda en annan struktur, se motsvarande dokumentation och faktiska svar.
+
+---
+
+## Hämta kontotokeninformation
+
+| Fält   | Innehåll                                                                      |
+| --- | ----------------------------------------------------------------------- |
+| Metod  | `GET`                                                                   |
+| URL | `https://platform.acedata.cloud/api/v1/platform-tokens/<id>`（**utan avslutande snedstreck**） |
+| Autentisering  | ✅ Endast tokenskaparen eller superadministratören har åtkomst                                                       |
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/platform-tokens/51c575a2-801c-4211-bc47-711452a8c8c9' \
+  -H 'accept: application/json' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+Svarsstrukturen är densamma som för listelementet, `HTTP 200`.
+
+---
+
+## Ta bort kontotoken
+
+| Fält   | Innehåll                                                                      |
+| --- | ----------------------------------------------------------------------- |
+| Metod  | `DELETE`                                                                |
+| URL | `https://platform.acedata.cloud/api/v1/platform-tokens/<id>`（**utan avslutande snedstreck**） |
+| Autentisering  | ✅ Endast tokenskaparen eller superadministratören kan ta bort den                                                       |
+
+```shell
+curl -X DELETE 'https://platform.acedata.cloud/api/v1/platform-tokens/3264f1aa-cbe1-4e2c-a434-95adba4f8304' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+- Vid lyckat resultat returneras `HTTP 204 No Content`, utan svarskropp.
+- Efter borttagning blir tokenen **omedelbart ogiltig**, och alla tjänster som använder den får genast `401`.
+- Att fråga efter detta `id` igen returnerar `404`.
+
+> ⚠️ Borttagning kan inte ångras. Om du misstänker att tokenen har läckt kan du **först skapa en ny, byta på verksamhetssidan och sedan ta bort den gamla**.
+
+---
+
+## Åtgärder som inte stöds
+
+| Åtgärd         | HTTP | Beskrivning                                  |
+| ---------- | ---- | ----------------------------------- |
+| `PATCH` ändring | 405  | Kontotokenen stöder **inte ändring av något fält** efter skapande. För användningsområden som namnbyte, ta bort och skapa om den |
+| `PUT` ersättning   | 405  | Samma som ovan                                  |
+
+---
+
+## Snabböversikt över felkoder
+
+| HTTP | `code`               | Vanlig orsak                          |
+| ---- | -------------------- | ----------------------------- |
+| 401  | `not_authenticated`  | Saknar `Authorization`-huvud, eller tokenen har tagits bort  |
+| 403  | `permission_denied`  | Listgränssnittet saknar `?user_id=`, eller åtkomst till någon annans tokeninformation |
+| 404  | `not_found`          | `id` finns inte eller har tagits bort                 |
+| 405  | `method_not_allowed` | `PATCH`/`PUT` har skickats till informationsgränssnittet         |
+
+Enhetligt format för felsvar:
+
+```json
+{
+  "detail": "You do not have permission to perform this action.",
+  "code": "permission_denied",
+  "trace_id": "0a88956213edf6e62b71695ee2df0eff"
+}
+```
+
+Vid felsökning kan du ge `trace_id` till kundtjänst eller klistra in det i ärendet för att snabbt hitta loggarna.
+
+---
+
+## Komplett kodexempel
+
+### Python
+
+```python
+import os
+import requests
+
+BASE = "https://platform.acedata.cloud/api/v1"
+PLATFORM_TOKEN = os.environ["PLATFORM_TOKEN"]
+USER_ID = "89518d07-5560-4b05-92c1-667f3ddf6a4b"
+
+headers = {
+    "accept": "application/json",
+    "authorization": f"Bearer {PLATFORM_TOKEN}",
+    "content-type": "application/json",
+}
+
+# 1. 创建新令牌
+created = requests.post(f"{BASE}/platform-tokens/", headers=headers, json={}).json()
+print("新令牌：", created["token"])
+print("UserID：", created["user_id"])
+
+# 2. 列表
+listing = requests.get(
+    f"{BASE}/platform-tokens/",
+    headers=headers,
+    params={"user_id": USER_ID, "limit": 50},
+).json()
+print(f"共 {listing['count']} 枚令牌")
+
+# 3. 删除（注意末尾无斜杠）
+resp = requests.delete(f"{BASE}/platform-tokens/{created['id']}", headers=headers)
+assert resp.status_code == 204, resp.text
+```
+
+### Node.js
+
+```javascript
+const BASE = 'https://platform.acedata.cloud/api/v1'
+const PLATFORM_TOKEN = process.env.PLATFORM_TOKEN
+const USER_ID = '89518d07-5560-4b05-92c1-667f3ddf6a4b'
+
+const headers = {
+  accept: 'application/json',
+  authorization: `Bearer ${PLATFORM_TOKEN}`,
+  'content-type': 'application/json',
+}
+
+// 创建
+const created = await fetch(`${BASE}/platform-tokens/`, {
+  method: 'POST',
+  headers,
+  body: '{}',
+}).then((r) => r.json())
+
+// 列表
+const url = new URL(`${BASE}/platform-tokens/`)
+url.searchParams.set('user_id', USER_ID)
+const listing = await fetch(url, { headers }).then((r) => r.json())
+console.log(`共 ${listing.count} 枚令牌`)
+
+// 删除（末尾无斜杠）
+await fetch(`${BASE}/platform-tokens/${created.id}`, { method: 'DELETE', headers })
+```
+
+---
+
+## Användning i andra plattforms-API:er
+
+Lägg `platform-v1-...` direkt i huvudet `Authorization: Bearer ...` för att anropa valfritt plattformsgränssnitt som kräver autentisering:
+
+```shell
+curl 'https://platform.acedata.cloud/api/v1/applications/?user_id=89518d07-5560-4b05-92c1-667f3ddf6a4b' \
+  -H "authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+> Helt annorlunda än de 32-siffriga hexadecimala API-autentiseringsuppgifter som används av verksamhetsgränssnittet `https://api.acedata.cloud/**` (OpenAI, Midjourney, Suno, Veo osv.). Blanda inte ihop dem — om du skriver kontotokenen till verksamhetsgränssnittet får du `401`, och vice versa.
+
+---
+
+## Relaterade gränssnitt
+- [Hämta listan över tjänsteansökningar på AceDataCloud-plattformen](https://platform.acedata.cloud/documents/platform-application-list) — använd kontotoken för att se vilka tjänster du har ansökt om
+- [Skapa API-autentiseringsuppgifter för AceDataCloud-plattformen](https://platform.acedata.cloud/documents/platform-credential-create) — använd kontotoken för att utfärda 32-siffriga autentiseringsuppgifter för affärs-API:er
+- [Hämta API-anropsloggar för AceDataCloud-plattformen](https://platform.acedata.cloud/documents/platform-usage-list) — kontrollera fakturor och felsök
+- [Hämta orderlistan för AceDataCloud-plattformen](https://platform.acedata.cloud/documents/platform-order-list) — kontrollera påfyllningshistorik

@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` i `upto` tarifni plan"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 trenutno koristi dva tipa shema: `exact` i `upto`. Oni rešavaju različite probleme naplate.
+
+## `exact`
+
+`exact` označava da se cena može odrediti pre nego što zahtev uđe u ciljani API. Iznos koji potpisuje klijent je konačni iznos koji će biti naplaćen.
+
+Pogodno za:
+
+- Fiksne cene generisanja slika;
+- Fiksne cene kreiranja video zadataka;
+- Fiksne cene pretrage ili alata API;
+- Plaćanje narudžbina.
+
+EVM `exact` koristi USDC EIP-3009 `TransferWithAuthorization`:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+Facilitator u fazi `/verify` verifikuje potpis i iznos, a u fazi `/settle` podnosi ovu autorizaciju na lanac.
+
+## `upto`
+
+`upto` označava da klijent odobrava maksimalni limit, Ace Data Cloud obračunava na osnovu stvarne potrošnje nakon završetka zahteva, a stvarna naplata ne može premašiti limit.
+
+Pogodno za:
+
+- Dovršavanje razgovora: konačna cena zavisi od prompt tokens i completion tokens;
+- Tok odgovora: stvarna dužina izlaza se saznaje tek nakon završetka;
+- Budući API sa post-metrikom.
+
+`upto` koristi Permit2 `PermitWitnessTransferFrom`. Klijent ne potpisuje fiksni transfer, već autorizaciju sa svedokom:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount` je limit, ne mora biti konačna naplata. Gateway u fazi `/record` će pretvoriti stvarnu potrošnju u `amount` i proslediti Facilitatoru. Facilitator dozvoljava obračun samo za `amount &lt;= permitted.amount`.
+
+Osnovni `upto` rezultati programa:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+Objašnjenje:
+
+- 402 u vraćenoj autorizaciji limit je `95215` atomic USDC, klijent potpisuje prema ovom limitu.
+- Model zapravo obračunava samo `3` atomic USDC, transakcija na lancu može se proveriti na BaseScan.
+- Ovaj rezultat može pokazati ključnu razliku `upto`: potpisani iznos je limit, obračun na lancu može biti manji od limita.
+- Ako stvarna potrošnja premaši limit, Facilitator treba da odbije obračun, klijent treba ponovo da odobri prema višem limitu.
+
+`upto` trenutno je dostupan samo na Base. SKALE nudi samo `exact`, ako vam je potrebna post-metrika, koristite Base.
+
+## Zašto je potrebna Permit2 odobrenja
+
+`upto` na kraju koristi x402 proxy da povuče USDC iz novčanika za plaćanje putem Permit2. Prvi put korišćenja, novčanik za plaćanje treba da da Permit2 jednom ERC-20 dozvolu.
+
+Python CLI:
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+Programski način:
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+Nakon završetka autorizacije, svaki zahtev i dalje zahteva potpisivanje novog `upto` envelope, jer se nonce, deadline, svedok i limit iznosa razlikuju.
+
+## Nulta naplata
+
+`upto` podržava situacije kada je stvarni iznos 0. Na primer, ako ciljani API nije uspeo da generiše merljive količine, Gateway može proslediti `amount = "0"`. Facilitator će vratiti uspeh, ali neće izvršiti transakciju na lancu.
+
+To može sprečiti problem "zahtev nije uspeo, ali se i dalje naplaćuje na lancu".
+
+## Preporuke za izbor
+
+| Scenarij                | Preporuka                     |
+| ---------------------- | ---------------------------- |
+| Fiksni cenovni API         | Koristite `exact`, logika je jednostavna.     |
+| Plaćanje narudžbina         | Koristite `exact`.          |
+| Dovršavanje razgovora, obračun po tokenima | Koristite Base `upto`.      |
+| Još niste uradili Permit2 odobrenje | Prvo koristite `exact`, a zatim pređite na `upto`. |
+| Potrebna post-metrika na SKALE | Trenutno nije podržano, SKALE nudi samo `exact`.  |
+
+Ako niste sigurni šta da izaberete, prvo koristite podrazumevano ponašanje SDK; SDK će izabrati mrežni zahtev za plaćanje koji se podudara sa onim što server vraća.
+
+## Base `upto` kontrolna lista
+
+Prilikom povezivanja ili rešavanja problema, molimo vas da potvrdite da su sledeći parametri iz iste 402 odgovora i da ostanu dosledni prilikom potpisivanja na klijentu:
+
+| Parametar                     | Provera                                          |
+| ---------------------------- | ---------------------------------------------- |
+| `network`                    | Mora biti `eip155:8453`.                       |
+| `scheme`                     | Mora biti `upto`.                              |
+| `extra.chainId`              | Base chain id je `8453`.                       |
+| `asset`                      | Koristite adresu Base USDC ugovora iz 402 odgovora. |
+| `extra.facilitatorAddress`   | Mora učestvovati kao svedok i biti u skladu sa Facilitator `/supported`. |
+| Permit2 dozvola              | Novčanik za plaćanje treba prvo da odobri Permit2 za Base USDC. |
+
+Uobičajene greške i načini rešavanja:
+
+| Greška                                         | Način rešavanja                                                                      |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `invalid_upto_evm_payload_invalid_signature`  | Proverite chain id, adresu facilitatora, Permit2 domen, spender, potpisani nalog i svedoka da li se podudaraju sa 402 odgovorom. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                  | Izvršite Permit2 odobrenje za USDC na ciljanom lancu, a zatim ponovo pošaljite zahtev. |
+| `amount exceeds permitted amount`              | Stvarna potrošnja premašuje potpisani limit, potrebno je ponovo potpisati prema višem limitu. |

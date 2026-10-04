@@ -1,0 +1,119 @@
+---
+title: "Использование Ace Data Cloud в LibreChat"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[LibreChat](https://www.librechat.ai/) — это высоконастраиваемый открытый AI-клиент, который использует `librechat.yaml` для описания провайдеров, моделей и правил маршрутизации. Он поддерживает настраиваемые конечные точки, совместимые с OpenAI, что позволяет подключать Ace Data Cloud. В этой статье описан процесс настройки.
+
+## Процесс получения
+
+Чтобы подключить Ace Data Cloud в LibreChat, сначала перейдите в [консоль Ace Data Cloud](https://platform.acedata.cloud/console/applications), чтобы получить ваш API Token и сохранить его на всякий случай.
+
+![Получение Ace Data Cloud API Key](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Если вы еще не вошли в систему или не зарегистрированы, вы будете автоматически перенаправлены на страницу входа, где вас пригласят зарегистрироваться и войти. После входа или регистрации вы будете автоматически возвращены на текущую страницу.
+
+При первом запросе предоставляется бесплатный лимит, чтобы вы могли бесплатно протестировать модельные услуги Ace Data Cloud.
+
+## Развертывание LibreChat
+
+LibreChat разворачивается с помощью Docker Compose, сначала подготовьте каталог и загрузите официальную конфигурацию:
+
+```bash
+mkdir -p ~/librechat && cd ~/librechat
+curl -O https://raw.githubusercontent.com/danny-avila/LibreChat/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/danny-avila/LibreChat/main/.env.example
+mv .env.example .env
+```
+
+В файле `.env` с помощью `openssl rand -hex 32` сгенерируйте `JWT_SECRET`, `JWT_REFRESH_SECRET`, `CREDS_KEY`, `CREDS_IV` и другие безопасные ключи, а также настройте `ALLOW_REGISTRATION` по мере необходимости.
+
+## Настройка Ace Data Cloud
+
+Создайте `librechat.yaml`, добавив Ace Data Cloud в качестве настраиваемой конечной точки, совместимой с OpenAI (полное описание полей смотрите в официальной [документации по настраиваемым конечным точкам](https://www.librechat.ai/docs/quick_start/custom_endpoints), заменив `{token}` на ваш токен):
+
+```yaml
+version: 1.0.5
+cache: true
+
+endpoints:
+  custom:
+    - name: "Ace Data Cloud"
+      apiKey: "{token}"
+      baseURL: "https://api.acedata.cloud/v1"
+      models:
+        default:
+          - "MODEL_ID"
+        fetch: true
+      titleConvo: true
+      titleModel: "MODEL_ID"
+      modelDisplayLabel: "Ace Data Cloud"
+```
+
+В файле `docker-compose.yml` под сервисом `api` подключите этот файл в контейнер, затем запустите `docker compose up -d`:
+
+```yaml
+    volumes:
+      - type: bind
+        source: ./librechat.yaml
+        target: /app/librechat.yaml
+```
+
+Обратите внимание на правила пути для `baseURL`:
+
+| baseURL                               | Фактический запрос                                          | Результат                  |
+| ------------------------------------- | ------------------------------------------------------ | ------------------------ |
+| `https://api.acedata.cloud/v1`        | `https://api.acedata.cloud/v1/chat/completions`        | Верно                     |
+| `https://api.acedata.cloud/openai`    | `https://api.acedata.cloud/openai/chat/completions`    | Также доступно            |
+| `https://api.acedata.cloud/openai/v1` | `https://api.acedata.cloud/openai/v1/chat/completions` | 404 (нет `/v1` под `/openai`) |
+| `https://api.acedata.cloud`           | `https://api.acedata.cloud/chat/completions`           | 404 (отсутствует `/v1`)  |
+
+## Выбор модели
+
+Каталог моделей будет постоянно обновляться. Предпочитайте использовать список моделей, автоматически загружаемых клиентом; если необходимо заполнить вручную, сначала запросите `GET https://api.acedata.cloud/v1/models`, чтобы получить текущий ID модели, а затем выберите в зависимости от поддерживаемых клиентом контекста, изображений и возможностей вызова инструментов.
+
+## Проверка интеграции
+
+Если вы не уверены, проблема в LibreChat или в сети, вы можете сначала проверить конечную точку с помощью curl (замените `{token}` на ваш токен):
+
+```bash
+curl -X POST 'https://api.acedata.cloud/v1/chat/completions' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+Возврат объекта `chat.completion`, совместимого с OpenAI, указывает на то, что токен и конечная точка готовы; если возвращается `HTTP 403 used_up`, это означает, что токен действителен, но баланс недостаточен, пополните его в [консоли](https://platform.acedata.cloud/console/applications).
+
+## Продвинутые: советы по настройке yaml
+
+`librechat.yaml` поддерживает несколько групп конечных точек, вы можете использовать `apiKey: "user_provided"`, чтобы каждый пользователь мог ввести свой ключ; `titleModel` указывает модель для генерации заголовка диалога; `dropParams` позволяет удалить параметры, которые не поддерживаются целевым API. Подробности смотрите в [подробном описании конфигурации librechat.yaml](https://www.librechat.ai/docs/configuration/librechat_yaml).
+
+## Часто задаваемые вопросы
+
+### После запуска не видно конечной точки Ace Data Cloud
+
+Обычно это связано с тем, что yaml не был подключен в контейнер или есть ошибка отступов. Проверьте `volumes` в `docker-compose.yml` и проверьте отступы в yaml.
+
+### Ошибка 404
+
+`baseURL` написан как `.../openai/v1` или отсутствует `/v1`. Измените на `https://api.acedata.cloud/v1`.
+
+### Выпадающий список моделей пуст
+
+`fetch: true`, но если `/v1/models` не удалось, измените на `fetch: false` и вручную укажите `default`.
+
+### Изменения в yaml не вступили в силу
+
+Необходимо перезапустить контейнер: `docker compose restart api`.
+
+## Узнать больше
+
+- [Официальный сайт LibreChat](https://www.librechat.ai/) ｜ [LibreChat GitHub](https://github.com/danny-avila/LibreChat) ｜ [Подробное описание конфигурации librechat.yaml](https://www.librechat.ai/docs/configuration/librechat_yaml)
+- [Официальная документация по настраиваемым конечным точкам LibreChat](https://www.librechat.ai/docs/quick_start/custom_endpoints)
+- [Документация по API OpenAI Chat Completions Ace Data Cloud](https://platform.acedata.cloud/documents/openai-chat-completions)
+- [Список услуг Ace Data Cloud](https://platform.acedata.cloud/documents)
+- [Консоль Ace Data Cloud](https://platform.acedata.cloud/console)

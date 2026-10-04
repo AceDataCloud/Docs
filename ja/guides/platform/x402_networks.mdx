@@ -1,0 +1,190 @@
+---
+title: "X402 ネットワークと支払い方法"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 は現在 USDC 決済を中心としており、EVM と Solana の2種類のチェーンをサポートしています。ネットワークごとに署名方式、資産アドレス、gas の挙動、および適用シナリオが異なるため、統合前にネットワークを選択する必要があります。
+
+## ネットワーク識別子には CAIP-2 を使用
+
+x402 v2 の `accepts[].network` は CAIP-2 識別子であり、`base`、`skale` のような略称ではありません。クライアントがネットワークを照合する際は、CAIP-2 文字列で比較する必要があります：
+
+| ネットワーク             | CAIP-2 識別子                                 |
+| -------------- | ----------------------------------------- |
+| Base           | `eip155:8453`                             |
+| SKALE Base     | `eip155:1187947933`                       |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` |
+
+## サポートマトリクス
+
+| ネットワーク     | scheme  | 資産                  | 署名方式                                 | 適用シナリオ                        |
+| ------ | ------- | ------------------- | ------------------------------------ | --------------------------- |
+| Base   | `exact` | Base USDC           | EIP-3009 `TransferWithAuthorization` | デフォルトで推奨、ウォレットと流動性のサポートが成熟。            |
+| Base   | `upto`  | Base USDC + Permit2 | Permit2 `PermitWitnessTransferFrom`  | チャット、モデルなどの後払い計量 API。             |
+| SKALE  | `exact` | SKALE bridged USDC  | EIP-3009 `TransferWithAuthorization` | 低 gas コスト、EVM 支払い検証と低コスト呼び出しに適している。 |
+| Solana | `exact` | Solana USDC         | SPL `TransferChecked`                | Solana ウォレット、Agent またはオンチェーンアプリケーションのシナリオ。    |
+
+`upto` は現在 Base でのみ提供されています。実際に利用可能な項目は API が返す `accepts` に準拠します。Facilitator も確認できます：
+
+```bash
+curl https://facilitator.acedata.cloud/supported
+```
+
+Facilitator `/supported` の返却値：
+
+```json
+{
+  "kinds": [
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:8453" },
+    {
+      "x402Version": 2,
+      "scheme": "upto",
+      "network": "eip155:8453",
+      "extra": { "facilitatorAddress": "0xd019238EAA8a9Ca13C5792Ca10B4029D6ce25708" }
+    },
+    { "x402Version": 2, "scheme": "exact", "network": "eip155:1187947933" },
+    {
+      "x402Version": 2,
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "extra": { "feePayer": "3SPm6qbgsDkj24MuR8Ss4sH97fziqyCiqFKDyeVU2igq" }
+    }
+  ]
+}
+```
+
+結果の説明：
+
+- Base、SKALE、Solana の `exact` は固定金額支払いパスです。
+- `upto` の後払い計量パスを提供しているのは Base のみであり、Permit2 approve に依存します。
+- `upto` エントリー内の `extra.facilitatorAddress` は、クライアントが署名時に witness に書き込むアドレスであり、サーバー側の返却値と一致している必要があります。
+
+## Base
+
+Base は公式 USDC コントラクトを使用します：
+
+```text
+0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+```
+
+`exact` スキームでは、クライアントは EIP-712 `TransferWithAuthorization` に署名します。署名内容には以下が含まれます：
+
+- `from`：支払いウォレットアドレス
+- `to`：Ace Data Cloud の受取アドレス
+- `value`：今回の支払い金額
+- `validAfter` / `validBefore`：署名の有効時間ウィンドウ
+- `nonce`：32バイトのランダム nonce
+
+Facilitator は署名を検証した後、オンチェーンで USDC の `transferWithAuthorization` を呼び出して送金を完了します。
+
+Base は最も推奨される本番統合ネットワークであり、特に `upto` 後払い計量に適しています。これは Permit2、USDC、およびウォレットエコシステムがいずれもより成熟しているためです。
+
+Base `exact` 検証結果の例：
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+content ADC_BASE_E2E_OK
+tx 0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+block 46726299
+explorer https://basescan.org/tx/0x408430ab3451bc22a51e510cdb4b063d6b9686724fea7a31fc109af20f5cd2f3
+transfer value 95215 atomic USDC
+```
+
+結果の説明：
+
+- API の paid retry はモデルコンテンツ `ADC_BASE_E2E_OK` を返します。
+- オンチェーン取引はすでに BaseScan で確認でき、ブロック番号は `46726299` です。
+- `95215` atomic USDC は `0.095215` USDC に相当し、今回の API 呼び出しの実際の決済金額です。
+
+注文支払い Base `exact` のプログラム実行結果：
+
+```text
+order 78481793-304e-47f7-bc0c-8231aec9cc1e
+state Finished
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer value 1200000 atomic USDC
+```
+
+結果の説明：
+
+- プラットフォーム注文の最終状態は `Finished` です。
+- 注文の `pay_id` には同じ Base トランザクションハッシュが書き込まれます。
+- `1200000` atomic USDC は `1.2` USDC に相当し、旧ポリシー下におけるこの 10 Credits 注文の過去の実払い金額です。新規注文では X402 支払い方法割引は追加で適用されなくなり、具体的な署名金額は今回の 402 レスポンスに準拠します。
+
+## SKALE
+
+SKALE は bridged USDC を使用し、署名方式は Base と同様に EIP-3009 です。低 gas コストの EVM 支払いシナリオに適しており、実際の呼び出しは引き続き API が返す `accepts` に準拠します。
+
+SKALE の典型的な 402 `accepts` には以下が含まれます：
+
+```json
+{
+  "network": "eip155:1187947933",
+  "scheme": "exact",
+  "extra": {
+    "name": "Bridged USDC (SKALE Bridge)",
+    "version": "2",
+    "chainId": 1187947933,
+    "verifyingContract": "0x85889c8c714505E0c94b30fcfcF64fE3Ac8FCb20"
+  }
+}
+```
+
+SKALE は現在 `exact` のみを提供しています。後払い計量が必要な場合は、Base `upto` を使用してください。
+
+SKALE `exact` 検証結果の例：
+
+```text
+content ADC_SKALE_E2E_OK
+tx 0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+block 1969317
+explorer https://skale-base-explorer.skalenodes.com/tx/0x9fd09901e74c763325fe118b2bc64765c3fca785b86b24a78b97964384db084f
+paid 0.095215 USDC
+```
+
+結果の説明：
+- API の有料リトライはモデル内容 `ADC_SKALE_E2E_OK` を返す。
+- 取引は SKALE explorer で確認可能であり、ブロック番号は `1969317`。
+- 今回の `exact` 支払いの決済金額は `0.095215` USDC。
+
+## Solana
+
+Solana は SPL USDC `TransferChecked` を使用する。クライアントは送金トランザクションを構築し、署名して送信した後、トランザクション署名またはシリアライズされたトランザクションを `PAYMENT-SIGNATURE` envelope に入れる。
+
+Solana の特徴：
+
+- Solana wallet adapter または base58 secret key を使用する；
+- 資産は Solana USDC mint；
+- 現在は `exact` のみ対応；
+- Facilitator は transfer instruction の mint、destination、authority、および amount を検証する。
+
+ウォレット fee payer モードを使用する場合、ウォレットが直接トランザクションを送信し、Facilitator はトランザクションの確認と settlement 結果の返却を担当する。
+
+Solana `exact` 検証結果の例：
+
+```text
+payer AY2RmGm2zPxB1uKvvF4dKyYdr2VySyL3wcD1MKJZoLRd
+HTTP 402 -> HTTP 200
+content ADC_SOLANA_E2E_OK
+chain signature not confirmed in this run
+```
+
+結果の説明：
+
+- 有料リトライはすでに HTTP 200 を返しており、モデル出力は `ADC_SOLANA_E2E_OK`。
+- 公開 RPC でオンチェーン signature を照会する際、レート制限に遭遇する可能性がある。
+- 公開 RPC の照会はレート制限される可能性があるため、ここでは Solana explorer を記載しない。厳密な照合が必要な場合は、自前の Solana RPC またはプラットフォーム側の settlement 記録を使用してトランザクション署名を確認してください。
+
+## 選び方
+
+| やりたいこと        | 推奨ネットワーク                         |
+| ------------ | ---------------------------- |
+| 最小経路を素早く通す     | SKALE `exact` または Base `exact` |
+| 一般的な Web3 ユーザー向け | Base                         |
+| チャット補完などの後払い計量   | Base `upto`                  |
+| Solana エコシステムのアプリ  | Solana `exact`               |
+| 低コスト EVM 支払い検証 | SKALE `exact`                |
+
+どのチェーンを選ぶ場合でも、クライアントに価格をハードコードしないでください。価格はサーバーが返す `accepts[].maxAmountRequired` によって決まる。

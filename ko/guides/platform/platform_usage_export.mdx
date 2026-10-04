@@ -1,0 +1,146 @@
+---
+title: "AceDataCloud 플랫폼 API 호출 기록 내보내기"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+현재 계정의 API 호출 상세 내역을 CSV로 직접 다운로드하며, 재무 대조, 오프라인 분석 또는 대량 기록 보관에 적합합니다. 페이지에서 소량의 상세 내역만 확인해야 하는 경우 먼저 [호출 기록 목록](https://platform.acedata.cloud/documents/platform-usage-list)을 사용하세요.
+
+## 준비 작업
+
+1. [AceDataCloud 플랫폼](https://platform.acedata.cloud)에 로그인합니다.
+2. [Account Token 콘솔](https://platform.acedata.cloud/console/platform-tokens)에서 계정 토큰을 생성하고, 즉시 비밀번호 관리자 또는 Secret Manager에 저장합니다.
+3. 필요에 따라 [서비스 신청 목록](https://platform.acedata.cloud/documents/platform-application-list), [API 자격 증명 목록](https://platform.acedata.cloud/documents/platform-credential-list) 또는 [API 목록](https://platform.acedata.cloud/documents/platform-api-list)에서 필터 ID를 가져옵니다.
+
+전체 토큰 설명은 [계정 토큰 관리](https://platform.acedata.cloud/documents/platform-token)를 참조하세요. 계정 토큰과 비즈니스 API 호출에 사용하는 Credential은 혼용할 수 없습니다.
+
+```shell
+export PLATFORM_TOKEN='你的账户令牌'
+```
+
+## 인터페이스 개요
+
+| 항목           | 내용                                                         |
+| ----------- | ---------------------------------------------------------- |
+| 메서드          | `GET`                                                      |
+| URL         | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| 인증          | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope | `usage:read`（`platform:read` / `platform` 可展开包含）           |
+| 응답          | `200 text/csv; charset=utf-8`                              |
+| 파일명         | `usages.csv`                                               |
+
+이 인터페이스는 동기식으로 CSV를 스트리밍 반환하며, 내보내기 작업을 생성하지 않고 JSON 또는 다운로드 링크도 반환하지 않습니다. 시작 시간과 종료 시간이 모두 제공되지 않은 경우에만 기본적으로 현재 자연월 시작부터 현재 시각까지의 기록을 내보냅니다. 한쪽 경계만 제공된 경우 다른 쪽은 자동으로 이번 달 경계로 보완되지 않습니다.
+
+## 쿼리 파라미터
+
+| 파라미터                | 유형       | 필수  | 기본값     | 설명                         |
+| ----------------- | -------- | --- | ------ | -------------------------- |
+| `perspective`     | string   | 아니요   | `both` | `billing`, `actor` 또는 `both` |
+| `service_id`      | UUID     | 아니요   | —      | 서비스별 필터링, 반복 파라미터 지원               |
+| `application_id`  | UUID     | 아니요   | —      | Application별 필터링, 반복 파라미터 지원    |
+| `api_id`          | UUID     | 아니요   | —      | API별 필터링, 반복 파라미터 지원            |
+| `credential_id`   | UUID     | 아니요   | —      | API 자격 증명별 필터링, 반복 파라미터 지원          |
+| `status_code`     | integer  | 아니요   | —      | 반복 또는 쉼표로 구분된 값 지원                 |
+| `created_at_from` | datetime | 아니요   | —      | ISO 8601 시작 시간              |
+| `created_at_to`   | datetime | 아니요   | —      | ISO 8601 종료 시간              |
+
+내보내기 범위는 항상 현재 계정이 결제 주체 및/또는 실제 호출자로서 볼 수 있는 기록으로 제한되며, 계정 간 내보내기는 지원하지 않습니다.
+
+## 요청 예시
+
+현재 월의 CSV를 직접 저장합니다.
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Application, 시간 및 상태 코드별로 내보냅니다.
+
+```shell
+export APPLICATION_ID='你的 Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Python으로 스트리밍 저장 및 무결성 확인:
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("服务器没有返回 CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"导出不完整：{last_line}")
+```
+
+## CSV 열
+
+CSV 헤더 순서는 다음과 같이 고정됩니다.
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| 열                 | 설명                         |
+| ----------------- | -------------------------- |
+| `Usage ID`        | 호출 기록 ID                    |
+| `API`             | API 제목, 일치하지 않는 경우 API ID 또는 빈 값일 수 있음 |
+| `Status Code`     | HTTP 상태 코드                   |
+| `Deducted Amount` | 최종 실제 차감 한도                   |
+| `Original Amount` | 애플리케이션 할인 전의 원래 한도                 |
+| `Trace ID`        | 요청 추적 식별자                     |
+| `Created At`      | 기록 생성 시간, ISO 8601            |
+
+한도 단위는 해당 Application의 `service.unit`에 의해 결정됩니다.
+
+## 내보내기가 완료되었는지 판단하기
+
+한 번에 최대 1,000,000개의 데이터를 출력합니다. 서버가 CSV 반환을 시작한 후에는 중간 오류를 다른 HTTP 상태로 변경할 수 없으므로 클라이언트는 마지막 줄을 확인해야 합니다.
+
+- `# truncated:`: 행 수 상한에 도달했습니다. 더 작은 시간 범위로 나누어 내보내세요.
+- `# error:`: 스트리밍 읽기가 중단되었습니다. 범위를 줄인 후 다시 내보내세요.
+
+대조 프로그램은 어느 marker든 발견하면 파일을 불완전한 것으로 간주해야 하며, 조용히 반영해서는 안 됩니다.
+
+## 오류 및 재시도
+
+| 상황                          | 처리 방법                                  |
+| --------------------------- | ------------------------------------- |
+| `400 usage_history_expired` | 응답의 `available_from`을 사용하여 최근 60일 범위 내로 조정 |
+| `401 not_authenticated`     | Account Token이 존재하고 올바르며 삭제되지 않았는지 확인          |
+| CSV가 아닌 응답                    | 성공 파일로 저장하지 마세요. 먼저 오류 응답을 읽고 요청을 수정하세요                |
+| 다운로드 중단 또는 marker                | 시간 범위를 줄이고 백오프 전략을 사용하여 다시 내보내세요                     |
+
+## 다음 단계
+
+- [호출 기록 보기](https://platform.acedata.cloud/documents/platform-usage-list): 온라인에서 필터링하고 단일 요청을 찾습니다.
+- [호출량 집계](https://platform.acedata.cloud/documents/platform-usage-aggregate): 날짜, API 또는 모델별 집계 데이터를 확인합니다.
+- [서비스 신청 상세 보기](https://platform.acedata.cloud/documents/platform-application-detail): 한도 단위와 남은 한도를 대조합니다.

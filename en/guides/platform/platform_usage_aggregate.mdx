@@ -1,0 +1,151 @@
+---
+title: "Retrieve Aggregated API Usage Statistics from the AceDataCloud Platform"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+Aggregate the number of requests and actual deducted quota for the current account by date and API, suitable for creating monthly reports, trend charts, and cost analysis. Use the [Call Record List](https://platform.acedata.cloud/documents/platform-usage-list) when you need to troubleshoot each record, and use [Usage Export](https://platform.acedata.cloud/documents/platform-usage-export) when you need complete offline details.
+
+## Preparation
+
+1. Log in to the [AceDataCloud Platform](https://platform.acedata.cloud).
+2. Create an account token in the [Account Token Console](https://platform.acedata.cloud/console/platform-tokens), and save it immediately.
+3. To narrow the scope, obtain the corresponding IDs from the [Service Application List](https://platform.acedata.cloud/documents/platform-application-list), [API Credential List](https://platform.acedata.cloud/documents/platform-credential-list), or [API List](https://platform.acedata.cloud/documents/platform-api-list).
+
+For complete token instructions, see [Manage Account Tokens](https://platform.acedata.cloud/documents/platform-token). This API uses an Account Token, not a business Credential.
+
+```shell
+export PLATFORM_TOKEN='your account token'
+```
+
+## API Overview
+
+| Item           | Content                                                       |
+| -------------- | ------------------------------------------------------------- |
+| Method         | `GET`                                                         |
+| URL            | `https://platform.acedata.cloud/api/v1/usage/apis/aggregate/` |
+| Authentication | `Authorization: Bearer ${PLATFORM_TOKEN}`                     |
+| OAuth Scope    | `usage:read` (`platform:read` / `platform` can implicitly include it) |
+| Permission Scope | Regular users are restricted to their own paid usage; administrators can pass `user_id` |
+
+## Query Parameters
+
+| Parameter         | Type            | Required | Default                                       | Description                                                        |
+| ----------------- | --------------- | -------- | --------------------------------------------- | ------------------------------------------------------------------ |
+| `created_at_from` | date / datetime | No       | The first day of the current month in the selected time zone | Start time, recommended parameter name                             |
+| `created_at_to`   | date / datetime | No       | Current time                                  | End time, recommended parameter name                               |
+| `timezone`        | string          | No       | `UTC`                                         | IANA time zone, for example `Asia/Shanghai`; invalid values fall back to UTC |
+| `service_id`      | UUID            | No       | —                                             | Filter by service; supports repeated parameters                    |
+| `application_id`  | UUID            | No       | —                                             | Filter by Application; supports repeated parameters                |
+| `api_id`          | UUID            | No       | —                                             | Filter by API; supports repeated parameters                        |
+| `credential_id`   | UUID            | No       | —                                             | Filter by API credential; supports repeated parameters             |
+| `include_models`  | boolean         | No       | `false`                                       | Whether to additionally calculate model-dimension aggregation; increases query cost |
+| `user_id`         | UUID            | No       | Regular users are fixed to themselves; all accounts for administrators when omitted | Only administrators can specify any account                        |
+
+`start_time` / `end_time` can still be used as backward-compatible aliases for older clients. New integrations should consistently use `created_at_from` / `created_at_to`. The date form of `created_at_to` includes that calendar day, using midnight of the following day as the boundary.
+
+## Request Examples
+
+Query daily/API aggregation for the current month in Beijing time, including model dimensions:
+
+```shell
+curl --get 'https://platform.acedata.cloud/api/v1/usage/apis/aggregate/' \
+  --data-urlencode 'timezone=Asia/Shanghai' \
+  --data-urlencode 'include_models=true' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+Query one week of usage for a specified Application:
+
+```shell
+export APPLICATION_ID='your Application ID'
+
+curl --get 'https://platform.acedata.cloud/api/v1/usage/apis/aggregate/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'created_at_from=2026-09-01' \
+  --data-urlencode 'created_at_to=2026-09-07' \
+  --data-urlencode 'timezone=Asia/Shanghai' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}"
+```
+
+Python example:
+
+```python
+import os
+import requests
+
+response = requests.get(
+    "https://platform.acedata.cloud/api/v1/usage/apis/aggregate/",
+    headers={"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"},
+    params={
+        "created_at_from": "2026-09-01",
+        "created_at_to": "2026-09-07",
+        "timezone": "Asia/Shanghai",
+        "include_models": "true",
+    },
+    timeout=30,
+)
+response.raise_for_status()
+data = response.json()
+print("requests:", data["requests"], "deducted:", data["total"])
+for row in data["items"]:
+    print(row["date"], row["api_id"], row["amount"])
+```
+
+## Response Example
+
+```json
+{
+  "items": [
+    {
+      "date": "2026-09-01",
+      "api_id": "00000000-0000-4000-8000-000000000001",
+      "amount": 12.5
+    }
+  ],
+  "total": 12.5,
+  "apis": {
+    "00000000-0000-4000-8000-000000000001": {
+      "title": "Example API"
+    }
+  },
+  "requests": 42,
+  "models": [
+    {
+      "model": "example-model",
+      "amount": 12.5,
+      "requests": 42
+    }
+  ]
+}
+```
+
+## Response Fields
+
+| Field      | Description                                                        |
+| ---------- | ------------------------------------------------------------------ |
+| `items`    | Grouped by date in the selected time zone and `api_id`; each row contains `date`, `api_id`, and `amount` |
+| `total`    | Sum of `deducted_amount` within the query range                   |
+| `apis`     | Mapping from API ID to title summary, for displaying `items`      |
+| `requests` | Total number of requests within the query range                   |
+| `models`   | Calculated only when `include_models=true`; each item contains `model`, `amount`, and `requests` |
+
+The quota unit depends on `service.unit` of the related Application. If the query includes services with different units, first calculate them separately by `service_id` or `application_id` to avoid directly comparing or adding them.
+
+When the end time is not greater than the start time, the API returns a complete empty structure: `items=[]`, `total=0`, `apis={}`, `requests=0`, `models=[]`.
+
+## Error and Performance Recommendations
+
+| HTTP | `error`                 | Handling Method                                           |
+| ---- | ----------------------- | --------------------------------------------------------- |
+| 400  | `usage_history_expired` | Adjust the time range to after `available_from` in the response |
+| 401  | `not_authenticated`     | Check the Account Token; do not mistakenly use a business Credential |
+| 403  | `permission_denied`     | Regular users cannot query other accounts                 |
+
+- Do not enable `include_models` by default; enable it only when the report truly requires model-level breakdowns.
+- For large-range queries, prioritize separating them by `service_id` or `application_id`, which both avoids mixed units and reduces query cost.
+- Dates without calls are not automatically filled with zero; the client should complete the date axis before charting.
+
+## Next Steps
+- [View call records](https://platform.acedata.cloud/documents/platform-usage-list): Locate the details that make up the aggregated results.
+- [Export call volume](https://platform.acedata.cloud/documents/platform-usage-export): Download the complete CSV details.
+- [View service application details](https://platform.acedata.cloud/documents/platform-application-detail): Confirm the balance and unit.

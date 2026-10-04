@@ -1,0 +1,100 @@
+---
+title: "在 Open WebUI 中使用 Ace Data Cloud"
+description: "Platform 集成指南 - Ace Data Cloud"
+---
+
+[Open WebUI](https://openwebui.com/)（原 Ollama WebUI）是支持多用户、知识库、RAG 和私有部署的开源 AI 客户端。它支持自定义 OpenAI 兼容端点，因此可以接入 Ace Data Cloud。本文介绍配置流程。
+
+## 申请流程
+
+要在 Open WebUI 中接入 Ace Data Cloud，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications)，获取您的 API Token，留作备用。
+
+![获取 Ace Data Cloud API Key](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+如果你尚未登录或注册，会自动跳转到登录页面邀请您来注册和登录，登录注册之后会自动返回当前页面。
+
+在首次申请时会有免费额度赠送，可以免费体验 Ace Data Cloud 的模型服务。
+
+## 部署并配置 Ace Data Cloud
+
+Open WebUI 通过环境变量接入 OpenAI 兼容端点，用 Docker 一行命令即可部署（把 `{token}` 替换为你的 Token）：
+
+```bash
+docker run -d \
+  --name open-webui \
+  -p 3000:8080 \
+  -e WEBUI_SECRET_KEY=$(openssl rand -base64 32) \
+  -e OPENAI_API_BASE_URL=https://api.acedata.cloud/v1 \
+  -e OPENAI_API_KEY={token} \
+  -v open-webui:/app/backend/data \
+  ghcr.io/open-webui/open-webui:main
+```
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `OPENAI_API_BASE_URL` | Ace Data Cloud 入口，**必须以 `/v1` 结尾** |
+| `OPENAI_API_KEY` | 你的 Token |
+| `WEBUI_SECRET_KEY` | session 加密密钥，自动生成 |
+| `-v open-webui:/app/backend/data` | 持久化对话 / 用户数据 |
+
+打开 `http://你的服务器IP:3000`，第一个注册的账号自动成为管理员。注意 Base URL 的路径规则：
+
+| OPENAI_API_BASE_URL | 实际请求 | 结果 |
+| --- | --- | --- |
+| `https://api.acedata.cloud/v1` | `https://api.acedata.cloud/v1/chat/completions` | 正确 |
+| `https://api.acedata.cloud/openai` | `https://api.acedata.cloud/openai/chat/completions` | 也可用 |
+| `https://api.acedata.cloud/openai/v1` | `https://api.acedata.cloud/openai/v1/chat/completions` | 404（`/openai` 下没有 `/v1`） |
+
+登录后进入 **Admin Panel → Settings → Connections** 点「Verify Connection」验证；在 **Settings → Models** 中可以筛选并 Pin 常用模型。
+
+> 除了用环境变量，Open WebUI 也支持在界面里直接添加连接：进入 **Admin Settings → Connections**，点 ➕ 填入 URL（`https://api.acedata.cloud/v1`）与 API Key 即可，Open WebUI 会自动调用 `/models` 拉取模型列表。详见官方文档 [Starting With OpenAI-Compatible Servers](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible)。
+
+![Open WebUI Ace Data Cloud Connection 配置界面](https://cdn.acedata.cloud/f366abfd935d.png)
+
+> `MODEL_ID` 仅用于演示可选 allow list；留空时会展示 `/models` 返回的全部模型。
+
+## 选择模型
+
+模型目录会持续更新。优先使用客户端自动加载的模型列表；需要手动填写时，先请求 `GET https://api.acedata.cloud/v1/models` 获取当前模型 ID，再按客户端支持的上下文、图片和工具调用能力选择。
+
+## 验证对接
+
+如果不确定问题出在 Open WebUI 还是网络，可以先用 curl 直接验证端点（把 `{token}` 替换为你的 Token）：
+
+```bash
+curl -X POST 'https://api.acedata.cloud/v1/chat/completions' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+返回 OpenAI 兼容的 `chat.completion` 对象即说明 Token 与端点都已就绪；若返回 `HTTP 403 used_up` 则表示 Token 有效但余额不足，到 [控制台](https://platform.acedata.cloud/console/applications) 充值即可。
+
+## 进阶：知识库与多用户
+
+Open WebUI 的知识库（RAG）默认用 ChromaDB 存向量，嵌入模型可指定 `text-embedding-3-large`（通过 Ace Data Cloud），文档原文只存在你的服务器上，仅命中的片段会发给模型。在 **Admin Panel → Users** 中可以管理用户角色（Pending / User / Admin）；建议把「Default User Role」设为 `pending`，新用户需审核后才能使用，避免外人随意注册消耗额度。若用 nginx 反向代理，请加上 `proxy_buffering off;` 与 `client_max_body_size 100M;`。
+
+## 常见问题
+
+### 提示 Connection error / 404
+
+通常是 `OPENAI_API_BASE_URL` 写成了 `.../openai/v1` 或漏了 `/v1`。改成 `https://api.acedata.cloud/v1`。
+
+### 上传文档后无法对话
+
+在 Admin Panel 的 RAG 设置里把嵌入模型选为 `text-embedding-3-large`（OpenAI provider）。
+
+### 容器重启后数据丢失
+
+启动时需挂载数据卷 `-v open-webui:/app/backend/data`。
+
+## 了解更多
+
+- [Open WebUI 官网](https://openwebui.com/) ｜ [Open WebUI GitHub](https://github.com/open-webui/open-webui) ｜ [快速开始文档](https://docs.openwebui.com/getting-started/quick-start)
+- [Open WebUI 接入 OpenAI 兼容端点官方文档](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible)
+- [Ace Data Cloud OpenAI Chat Completions API 文档](https://platform.acedata.cloud/documents/openai-chat-completions)
+- [Ace Data Cloud 服务列表](https://platform.acedata.cloud/documents)
+- [Ace Data Cloud 控制台](https://platform.acedata.cloud/console)

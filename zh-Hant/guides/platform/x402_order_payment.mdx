@@ -1,0 +1,233 @@
+---
+title: "X402 訂單支付教學"
+description: "Platform 整合指南 - Ace Data Cloud"
+---
+
+除了直接按 API 請求付費，Ace Data Cloud 也支援用 X402 支付控制台訂單。訂單支付和 API 呼叫的核心協定相同：第一次請求返回 402，客戶端簽出 `PAYMENT-SIGNATURE`，然後用同一個請求重試。
+
+差別在於訂單支付屬於平台 API，需要帳戶權杖；而直接呼叫 `x402.acedata.cloud` 的 AI API 可以只用 X402，不需要 API Token。
+
+## 準備訂單
+
+進入 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/orders)，選擇需要支付的訂單，記錄訂單 ID。
+
+如果你還沒有訂單，可以在套餐頁面建立一個待支付訂單。訂單價格以頁面顯示為準，X402 402 回應中的 `amount` 是最終簽名依據。
+
+## 建立帳戶權杖
+
+訂單支付請求需要帳戶權杖。開啟 [平台 Token 頁面](https://platform.acedata.cloud/console/platform-tokens)，建立一個 `platform-v1-...` 格式的 token。
+
+後續請求使用：
+
+```http
+Authorization: Bearer {platform_token}
+```
+
+帳戶權杖不同於一般 API Token。一般 API Token 用於消費 API 額度；帳戶權杖用於代表你的帳戶操作平台資源，例如訂單支付。
+
+## 觸發 402
+
+先發送一次不帶 `PAYMENT-SIGNATURE` 的請求：
+
+```http
+POST https://platform.acedata.cloud/api/v1/orders/{order_id}/pay/
+Authorization: Bearer {platform_token}
+Content-Type: application/json
+
+{
+  "pay_way": "X402"
+}
+```
+
+返回狀態為 402，回應中包含 `accepts`：
+
+```json
+{
+  "x402Version": 2,
+  "error": "Payment required for this order.",
+  "resource": {
+    "url": "http://platform.acedata.cloud/api/v1/orders/.../pay/",
+    "description": "Ace Data Cloud Credits x 10.0",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "amount": "1200000",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 120,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "decimals": 6
+      }
+    }
+  ],
+  "paywall": {
+    "app_name": "Ace Data Cloud",
+    "app_logo": "https://cdn.acedata.cloud/favicon.ico"
+  }
+}
+```
+
+訂單支付走的是官方 x402 v2：`x402Version` 為 `2`，`network` 使用 CAIP-2 識別碼，金額欄位是 `amount`。
+
+建立 10 Credits 訂單並觸發 402 的程式執行結果：
+
+> 以下交易記錄為舊政策下的歷史實測樣本，金額和交易雜湊保留原樣。新 X402 訂單不再享有支付方式折扣；請以本次 402 回應的 `amount` 為簽名和付款依據。
+
+```text
+created order 78481793-304e-47f7-bc0c-8231aec9cc1e
+created state Pending
+created price 1.26
+
+http_status=402
+x402Version 2
+error Payment required for this order.
+accepts [
+  ('eip155:8453', 'exact', '1200000', '0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7'),
+  ('solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'exact', '1200000', '5iVXFrYaYWX2GUTbkQj8mDBoBhAX8bneYigS2LJTia43')
+]
+description Ace Data Cloud Credits x 10.0
+```
+
+結果說明：
+
+- 訂單建立成功後狀態是 `Pending`，此時還沒有鏈上付款。
+- 第一次 `pay/` 請求沒有攜帶 `PAYMENT-SIGNATURE`，所以返回 HTTP 402。
+- `accepts` 同時給出 Base `exact` 和 Solana `exact`，本教學後續選擇 Base。
+- 訂單建立時價格是 `1.26`，在舊 X402 支付優惠政策期間支付，實際簽名和結算金額為 `1.2` USDC，對應 `1200000` atomic USDC。
+
+注意這裡 `resource` 是服務端返回並參與簽名的欄位，客戶端不要把其中的協定、路徑或訂單 ID 自行改寫。
+
+## 簽名並重試
+
+訂單支付可以重複使用 `@acedatacloud/x402-client` 或 `acedatacloud-x402` 的底層簽名函式。下面是 TypeScript 範例：
+
+```ts
+import { Wallet } from 'ethers';
+import { signEVMPayment } from '@acedatacloud/x402-client';
+
+const platformToken = process.env.ACE_PLATFORM_TOKEN!;
+const orderId = process.env.ACE_ORDER_ID!;
+const wallet = new Wallet(process.env.EVM_PRIVATE_KEY!);
+
+const url = `https://platform.acedata.cloud/api/v1/orders/${orderId}/pay/`;
+const body = { pay_way: 'X402' };
+
+const first = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(body)
+});
+
+if (first.status !== 402) {
+  throw new Error(`expected 402, got ${first.status}`);
+}
+
+const paymentRequired = await first.json();
+const requirement = paymentRequired.accepts.find(
+  (item: any) => item.network === 'eip155:8453' && item.scheme === 'exact'
+);
+
+const evmProvider = {
+  async request({ method, params }: { method: string; params?: unknown[] }) {
+    if (method !== 'eth_signTypedData_v4') throw new Error(`unsupported method: ${method}`);
+    const [, typedDataJson] = params as [string, string];
+    const typedData = JSON.parse(typedDataJson);
+    return wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
+  }
+};
+
+const envelope = await signEVMPayment(requirement, evmProvider, wallet.address);
+const xPayment = Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
+
+const paid = await fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${platformToken}`,
+    'Content-Type': 'application/json',
+    'PAYMENT-SIGNATURE': xPayment
+  },
+  body: JSON.stringify(body)
+});
+
+if (!paid.ok) {
+  throw new Error(`payment failed: ${paid.status} ${await paid.text()}`);
+}
+
+console.log(await paid.json());
+```
+
+同一個訂單用 Base `exact` 簽名並重試後的程式執行結果：
+
+```text
+status 200
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+has_x_payment_response True
+settle_header {'success': True, 'network': 'base', 'transaction': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151', 'errorReason': None}
+order {'id': '78481793-304e-47f7-bc0c-8231aec9cc1e', 'state': 'Finished', 'pay_way': 'X402', 'price': 1.2, 'pay_id': '0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151'}
+```
+
+鏈上確認結果：
+```text
+tx 0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+status 1
+block 46726704
+explorer https://basescan.org/tx/0xfec08cc00a159ea1ec692b32faa9bf3d17595a986301169e689d94f58bc44151
+transfer {"from":"0x5d4f08D5c2bb60703284bc06671Eb680fA41B105","to":"0x4F0E2D3477a1B94CF33d16E442CEe4733dadCeE7","value":"1200000"}
+```
+
+結果說明：
+
+- `status 200` 表示平台訂單支付介面接受了這次 `PAYMENT-SIGNATURE`。
+- `has_x_payment_response True` 表示回應標頭包含 Base64 編碼的 `PAYMENT-RESPONSE` 收據。
+- `settle_header.success=True` 且 `network=base` 表示 Facilitator 已完成 Base 結算。
+- 訂單最終狀態是 `Finished`，`pay_way` 是 `X402`，`pay_id` 寫入鏈上交易雜湊。
+- BaseScan 上的 `Transfer` 事件顯示付款地址向平台收款地址轉帳 `1200000` atomic USDC，也就是 `1.2` USDC。
+
+## 成功回應與收據
+
+訂單支付成功後，回應本文是訂單資訊。平台還會在回應標頭 `PAYMENT-RESPONSE` 中攜帶 Base64 編碼的結算回應，解碼後常見欄位包括：
+
+| 欄位            | 說明                           |
+| ------------- | ---------------------------- |
+| `success`     | Facilitator settlement 是否成功。 |
+| `transaction` | 鏈上結算交易雜湊。                    |
+| `network`     | 支付網路。                        |
+| `payer`       | 付款錢包地址。                      |
+| `amount`      | 實際結算金額，使用 atomic units。      |
+
+如果你需要對帳，建議同時儲存訂單 ID、付款錢包地址、`transaction` 和訂單最終狀態。
+
+## 注意事項
+
+- 訂單支付需要平台帳戶權杖，不能只靠 X402 錢包簽名完成。
+- `amount` 使用 USDC atomic units，`1200000` 表示 `1.2` USDC。
+- 不要自行拼接收款地址或資產地址，以 402 回應中的 `accepts` 為準。
+- 如果同一個 `PAYMENT-SIGNATURE` 被重複提交，Facilitator 會按 nonce 做重放保護。
+
+## 支付失敗回應
+
+未攜帶 `PAYMENT-SIGNATURE` 的第一次 HTTP 402 是正常支付挑戰，不代表支付失敗。簽名後的驗證或結算失敗仍保留標準的字串 `error` 作為相容性保底，並在 `extensions.acedatacloud.paymentError` 回傳穩定的錯誤結構：
+
+```json
+{
+  "code": "insufficient_token_balance",
+  "params": { "network": "eip155:8453" },
+  "stage": "verify",
+  "retryable": true,
+  "charged": false
+}
+```
+
+用戶端應優先按 `code` 在地化，未知 code 回退到通用支付失敗。`charged` 是三態欄位：只有明確在結算前拒絕時才會回傳 `false`；欄位缺失表示扣款狀態未知，不能解釋為「未扣款」。目前訂單進入 `Failed` 後不能原單重試，請修正錢包問題後建立新訂單。
+
+不要記錄或提交完整 `PAYMENT-SIGNATURE`、錢包簽名、授權 payload、Facilitator 原始診斷或 RPC 回應。客服排查只需訂單 ID 和公開的錯誤 `code`。

@@ -1,0 +1,146 @@
+---
+title: "Експорт записів викликів API платформи AceDataCloud"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Безпосередньо завантажте деталі викликів API поточного облікового запису як CSV, що підходить для фінансової звірки, офлайн-аналізу або збереження великої кількості записів. Якщо потрібно лише переглянути невелику кількість деталей на сторінці, спочатку скористайтеся [списком записів викликів](https://platform.acedata.cloud/documents/platform-usage-list).
+
+## Підготовка
+
+1. Увійдіть до [платформи AceDataCloud](https://platform.acedata.cloud).
+2. Створіть токен облікового запису в [консолі Account Token](https://platform.acedata.cloud/console/platform-tokens) і негайно збережіть його в менеджері паролів або Secret Manager.
+3. За потреби отримайте ID для фільтрації зі [списку заявок на послуги](https://platform.acedata.cloud/documents/platform-application-list), [списку облікових даних API](https://platform.acedata.cloud/documents/platform-credential-list) або [списку API](https://platform.acedata.cloud/documents/platform-api-list).
+
+Повний опис токенів дивіться в [керуванні токенами облікового запису](https://platform.acedata.cloud/documents/platform-token). Токен облікового запису та Credential для виклику бізнес-API не можна використовувати взаємозамінно.
+
+```shell
+export PLATFORM_TOKEN='你的账户令牌'
+```
+
+## Огляд інтерфейсу
+
+| Пункт           | Вміст                                                         |
+| --------------- | ------------------------------------------------------------ |
+| Метод           | `GET`                                                        |
+| URL             | `https://platform.acedata.cloud/api/v1/usage/apis/export/`   |
+| Автентифікація  | `Authorization: Bearer ${PLATFORM_TOKEN}`                    |
+| OAuth Scope     | `usage:read`（`platform:read` / `platform` 可展开包含）           |
+| Відповідь       | `200 text/csv; charset=utf-8`                                |
+| Ім’я файлу      | `usages.csv`                                                 |
+
+Цей інтерфейс синхронно повертає CSV потоком, не створює завдання експорту та не повертає JSON або посилання для завантаження. Лише коли не надано ні початковий, ні кінцевий час, за замовчуванням експортуються записи від початку поточного календарного місяця до поточного моменту; якщо надано лише одну межу, інша сторона не буде автоматично доповнена межею поточного місяця.
+
+## Параметри запиту
+
+| Параметр          | Тип      | Обов’язковий | За замовчуванням | Опис                                      |
+| ----------------- | -------- | ------------ | ---------------- | ----------------------------------------- |
+| `perspective`     | string   | Ні           | `both`           | `billing`、`actor` 或 `both`               |
+| `service_id`      | UUID     | Ні           | —                | Фільтрація за послугою; підтримує повторення параметра |
+| `application_id`  | UUID     | Ні           | —                | Фільтрація за Application; підтримує повторення параметра |
+| `api_id`          | UUID     | Ні           | —                | Фільтрація за API; підтримує повторення параметра |
+| `credential_id`   | UUID     | Ні           | —                | Фільтрація за обліковими даними API; підтримує повторення параметра |
+| `status_code`     | integer  | Ні           | —                | Підтримує повторення або значення, розділені комами |
+| `created_at_from` | datetime | Ні           | —                | Початковий час ISO 8601                   |
+| `created_at_to`   | datetime | Ні           | —                | Кінцевий час ISO 8601                     |
+
+Діапазон експорту завжди обмежений записами, видимими поточному обліковому запису як платнику та/або фактичному викликачеві, експорт між обліковими записами не підтримується.
+
+## Приклади запитів
+
+Безпосередньо зберегти CSV за поточний місяць:
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Експорт за Application, часом і кодом статусу:
+
+```shell
+export APPLICATION_ID='你的 Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Потокове збереження в Python і перевірка цілісності:
+
+```python
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("服务器没有返回 CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"导出不完整：{last_line}")
+```
+
+## Стовпці CSV
+
+Порядок заголовків CSV фіксований:
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| Стовпець            | Опис                                      |
+| ------------------- | ----------------------------------------- |
+| `Usage ID`          | ID запису виклику                         |
+| `API`               | Назва API; якщо відповідність не знайдено, може бути ID API або порожнє значення |
+| `Status Code`       | Код стану HTTP                            |
+| `Deducted Amount`   | Фактично остаточно списаний ліміт         |
+| `Original Amount`   | Початковий ліміт до застосування знижки   |
+| `Trace ID`          | Ідентифікатор відстеження запиту          |
+| `Created At`        | Час створення запису, ISO 8601            |
+
+Одиниця ліміту визначається `service.unit` відповідного Application.
+
+## Визначення повноти експорту
+
+За один раз виводиться максимум 1 000 000 записів. Після того як сервер почав повертати CSV, він більше не може змінити помилку посеред процесу на інший HTTP-статус, тому клієнт повинен перевірити останній рядок:
+
+- `# truncated:`：досягнуто ліміту кількості рядків; експортуйте частинами за меншими часовими вікнами.
+- `# error:`：потокове читання перервано; зменште діапазон і експортуйте повторно.
+
+Коли програма звірки бачить будь-який marker, вона повинна вважати файл неповним і не може тихо зарахувати його.
+
+## Помилки та повторні спроби
+
+| Ситуація                    | Спосіб обробки                                           |
+| --------------------------- | -------------------------------------------------------- |
+| `400 usage_history_expired` | Використайте `available_from` у відповіді, щоб скоригувати діапазон до останніх 60 днів |
+| `401 not_authenticated`     | Перевірте, чи існує Account Token, чи він правильний і не видалений |
+| Не-CSV відповідь            | Не зберігайте як успішний файл; спочатку прочитайте відповідь із помилкою та виправте запит |
+| Переривання завантаження або marker | Зменште часове вікно, використайте стратегію відступу та експортуйте повторно |
+
+## Наступний крок
+
+- [Перегляд записів викликів](https://platform.acedata.cloud/documents/platform-usage-list)：онлайн-фільтрація та пошук окремого запиту.
+- [Агрегування обсягу викликів](https://platform.acedata.cloud/documents/platform-usage-aggregate)：перегляд даних, зведених за датою, API або моделлю.
+- [Перегляд деталей заявки на послугу](https://platform.acedata.cloud/documents/platform-application-detail)：звірка одиниці ліміту та залишкового ліміту.

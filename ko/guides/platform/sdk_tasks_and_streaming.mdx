@@ -1,0 +1,316 @@
+---
+title: "SDK 작업 폴링 및 스트리밍 응답"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud의 서비스는 응답 모드에 따라 두 가지로 나뉩니다:
+
+| 유형       | 전형적인 서비스                                                                         | 호출 모드                                     |
+| -------- | ---------------------------------------------------------------------------- | ---------------------------------------- |
+| **동기 생성** | NanoBanana / Flux / Seedream / Chat Completions(비스트리밍) / Google 검색              | 한 번의 HTTP, 결과는 응답 본문에 포함                          |
+| **스트리밍 응답** | Chat Completions(`stream: true`)                                             | SSE, 다중 프레임 토큰별 푸시                         |
+| **비동기 작업** | Midjourney / Sora / Veo / Luma / Kling / Hailuo / Suno / Pixverse / Seedance | 먼저 작업을 생성하여 `task_id`를 얻고, 이후 `/<provider>/tasks`를 폴링 |
+
+이 문서에서는 후자의 두 가지에 중점을 둡니다: **비동기 작업의 TaskHandle 폴링** 및 **채팅 스트리밍 응답**의 세부 사항, 함정 및 언어 간 차이.
+
+## 1. TaskHandle — 비동기 작업의 통합 추상화
+
+세 가지 SDK는 비동기 작업을 `TaskHandle`로 캡슐화하여 동일한 4개의 메서드를 제공합니다:
+
+| 메서드                                 | 동작                                                         |
+| ---------------------------------- | ---------------------------------------------------------- |
+| `get()`                            | 최신 상태를 한 번 가져옴(`POST /<provider>/tasks {id, action: "retrieve"}`) |
+| `is_completed()` / `isCompleted()` | `get()`을 한 번 호출하여 `status`가 `succeeded` / `failed`인지 확인           |
+| `wait()`                           | `succeeded` / `failed` 또는 `max_wait` 초과 시까지 블로킹 폴링             |
+| `result` 속성                        | 마지막 `wait()`에서 받은 전체 응답; 호출 전에는 `null`                           |
+
+### 작업 생성의 두 가지 호출 방식
+
+각 비동기 리소스(`images.generate` / `video.generate` / `audio.generate`)에는 `wait` 매개변수가 있습니다:
+
+- `wait=False`(기본값): 즉시 `TaskHandle`을 반환하며, 비즈니스 코드는 언제 폴링할지 결정합니다.
+- `wait=True`: SDK 내부에서 직접 `handle.wait()`를 호출하여 함수가 완료된 후 응답을 반환합니다. **목표 API가 반드시 `status: succeeded` 필드를 반환할 것이라고 확신할 때만 사용하세요** — 일부 공급자는 이 약속을 지키지 않아 `wait`가 `max_wait`까지 계속 진행되며 `TimeoutError`를 발생시킬 수 있습니다.
+
+### 단위 차이(⚠️ 필독)
+
+`poll_interval`과 `max_wait`의 **단위는 세 가지 언어에서 다릅니다**, 언어 간 마이그레이션 시 흔히 발생하는 문제점입니다:
+
+| 언어             | `poll_interval` 단위         | `max_wait` 단위 | 기본값                                   |
+| -------------- | -------------------------- | ------------- | ------------------------------------- |
+| **TypeScript** | **밀리초**                     | **밀리초**        | `pollInterval=3000`, `maxWait=600000` |
+| **Python**     | **초**                      | **초**         | `poll_interval=3.0`, `max_wait=600.0` |
+| Go             | (TaskHandle는 아직 Go SDK에서 노출되지 않음) | —             | —                                     |
+
+> TS의 `{ pollInterval: 3000 }`을 초로 잘못 해석하여 Python `poll_interval=3000`으로 변환하면 SDK가 두 번째 폴링을 위해 50분을 기다리게 됩니다.
+
+### 예시: Python 명시적 폴링 Midjourney
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+# wait=False로 즉시 handle을 가져옴
+handle = client.images.generate(
+    provider="midjourney",
+    prompt="a cinematic photo of a banana wearing a tuxedo",
+    wait=False,
+)
+print("task_id", handle.id)
+
+t0 = time.time()
+result = handle.wait(poll_interval=3.0, max_wait=180.0)
+print("elapsed_s", round(time.time() - t0, 1))
+print("status", result.get("response", result).get("status"))
+print("images", [it.get("image_url") for it in (result.get("response", result).get("data") or [])])
+```
+
+전체 코드는 다음과 같은 작업을 수행합니다:
+
+1. `images.generate(..., wait=False)`가 `prompt`를 Midjourney API에 제출하고 즉시 `handle`을 가져오며, 블로킹되지 않습니다.
+2. `handle.wait(poll_interval=3.0, max_wait=180.0)`는 내부적으로 3초마다 `/midjourney/tasks`에 POST 요청을 보내며, `status`가 `succeeded` 또는 `failed`로 변할 때까지 또는 총 소요 시간이 180초를 초과할 때까지 진행됩니다. `TimeoutError`가 발생합니다.
+3. 완료 후 `result["response"]["data"]`는 일반적으로 4개의 이미지를 포함합니다(기본적으로 Midjourney는 2x2 그리드).
+
+### 예시: TypeScript 명시적 폴링
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+// wait: false로 즉시 handle을 가져옴
+const handle: any = await client.images.generate({
+  provider: 'midjourney',
+  prompt: 'a cinematic photo of a banana wearing a tuxedo',
+  wait: false,
+});
+console.log('task_id', handle.id);
+
+const t0 = Date.now();
+const result: any = await handle.wait({ pollInterval: 3000, maxWait: 180_000 });
+console.log('elapsed_s', ((Date.now() - t0) / 1000).toFixed(1));
+const response = result.response ?? result;
+console.log('status', response.status);
+console.log('images', (response.data ?? []).map((it: any) => it.image_url));
+```
+
+### 동기 생성 vs 비동기 작업의 선택
+
+만약 당신의 공급자가 본래 동기적으로 이미지를 생성하는 경우(NanoBanana / Flux / Seedream), **`wait`를 전달하지 마세요**:
+
+```python
+# ✅ 추천
+res = client.images.generate(provider="nano-banana", prompt="...")
+url = res["data"][0]["image_url"]
+
+# ❌ 반례: SDK 내부에서 /nano-banana/tasks를 폴링하게 되어 RTT를 낭비합니다
+res = client.images.generate(provider="nano-banana", prompt="...", wait=True)
+```
+
+판별 방법은 간단합니다: 목표 API 문서에 **`task_id` + `/tasks`** 쌍이 **없다면**, 동기 생성입니다; 동기 생성의 응답에서 `data` 필드는 이미 최종 결과를 포함하고 있습니다.
+
+### TaskHandle 내부 프로토콜
+
+`TaskHandle.get()` 호출은 다음과 같습니다:
+
+```http
+POST {API_BASE}/<provider>/tasks
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{"id": "<task_id>", "action": "retrieve"}
+```
+
+응답은 통일된 구조입니다:
+
+```json
+{
+  "task_id": "...",
+  "trace_id": "...",
+  "response": {
+    "status": "pending | running | succeeded | failed",
+    "data": [...]
+  }
+}
+```
+
+SDK는 또한 **외부 `response`로 감싸지지 않은** 구형 응답을 호환합니다 — 최상위 `status`를 직접 읽을 수 있으므로 신구형 응답 전환이 비즈니스 코드에 영향을 미치지 않습니다.
+
+## 2. SSE 스트리밍 응답 (chat.completions)
+
+`chat.completions.create(stream=True)`는 현재 SDK에서 유일한 스트리밍 인터페이스입니다(오디오 / 비디오 스트림은 아직 지원되지 않음). 세 가지 언어의 반복 스타일은 각기 다릅니다:
+
+| 언어         | 반복                                                                        | 취소 메커니즘                       |
+| ---------- | ------------------------------------------------------------------------- | -------------------------- |
+| TypeScript | `for await (const chunk of stream)`                                       | `AbortController`를 fetch에 전달 |
+| Python     | `for chunk in client.openai.chat.completions.create(..., stream=True)`    | 루프에서 탈출하면 됨(연결은 SDK가 자동으로 종료)       |
+| Go         | `chunks, errs := ...CreateStream(ctx, req)` → `for chunk := range chunks` | `context.Context`를 취소       |
+
+### TypeScript
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const stream: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: '1부터 5까지 공백으로 구분하여 세어보세요. 숫자만.' }],
+  max_tokens: 30,
+  temperature: 0,
+  stream: true
+});
+
+let chunks = 0;
+let collected = '';
+for await (const chunk of stream) {
+  chunks++;
+  const delta = chunk?.choices?.[0]?.delta?.content;
+  if (delta) collected += delta;
+}
+console.log('chunks', chunks);
+console.log('collected', collected);
+```
+
+실제 실행 결과:
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Python
+
+```python
+import os
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+chunks = 0
+collected = []
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "1부터 5까지 공백으로 구분하여 세어보세요. 숫자만."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+print("chunks", chunks)
+print("collected", "".join(collected))
+```
+
+실제 실행 결과:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+### Go
+
+```go
+chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+    Model:     "gpt-4o-mini",
+    Messages:  []map[string]any{{"role": "user", "content": "1부터 5까지 공백으로 구분하여 세어보세요. 숫자만."}},
+    MaxTokens: 30,
+})
+cnt := 0
+collected := ""
+for chunk := range chunks {
+    cnt++
+    if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+        if d, ok := ch[0].(map[string]any)["delta"].(map[string]any); ok {
+            if s, ok := d["content"].(string); ok {
+                collected += s
+            }
+        }
+    }
+}
+if e, ok := <-errs; ok && e != nil {
+    log.Println("stream_err", e)
+}
+fmt.Println("chunks", cnt, "collected", collected)
+```
+
+실제 실행 결과:
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+### 스트리밍 chunk의 구조
+
+각 chunk는 OpenAI 호환 `chat.completion.chunk`입니다:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion.chunk",
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "delta": { "content": " 3" },
+      "finish_reason": null
+    }
+  ]
+}
+```
+
+- 첫 번째 chunk는 일반적으로 `delta.role: "assistant"`를 포함하지만 `content`는 비어 있습니다.
+- 중간의 chunk는 각각 `delta.content`를 포함하며, 직접 연결할 수 있습니다.
+- 마지막 chunk는 `delta`가 비어 있고, `finish_reason`은 `stop` / `length` / `content_filter`입니다.
+
+### 중간 취소
+
+| 언어         | 취소 방법                                                                           |
+| ---------- | ------------------------------------------------------------------------------ |
+| TypeScript | `create()` 호출 시 `signal: abortController.signal`를 전달하고 `abortController.abort()` 호출 |
+| Python     | `for` 루프에서 `break`로 종료, SDK는 `__exit__`에서 HTTPx 스트림을 닫습니다.                                |
+| Go         | `NewClient` 시 전달한 `ctx`에서 `cancel()` 호출, `chunks` 채널이 즉시 닫힙니다.                    |
+
+미리 취소된 토큰은 이미 청구됩니다 — 취소 시점 이전에 생성된 토큰은 실제 소비에 따라 청구됩니다.
+
+## 삼, 타임아웃 및 재시도
+
+세 가지 SDK는 동일한 재시도 전략을 공유합니다:
+
+| 트리거 조건                       | 행동                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| HTTP 408 / 409 / 429 / 5xx | 기본적으로 2회 재시도, 지수 백오프 1초 → 2초 → 4초                                                      |
+| 네트워크 레이어 오류 (DNS, 연결 거부, TLS 실패)     | 동일                                                                              |
+| 401 / 403 / 404 / 422      | 재시도하지 않으며, 해당 유형의 오류를 직접 발생시킵니다.                                                                  |
+| 스트리밍 (`stream=True`) 요청        | **재시도하지 않음** — 첫 프레임이 이미 스트리밍되었을 때 재생할 수 없습니다.                                                            |
+| 명시적 `timeout` 트리거            | `APITimeoutError`를 발생시킵니다 (Python) / `TimeoutError` (TS) / `context.DeadlineExceeded` (Go) |
+
+재시도를 비활성화하려면: 클라이언트를 구성할 때 `max_retries=0` / `maxRetries: 0` / `WithMaxRetries(0)`를 전달합니다.
+
+비동기 작업(TaskHandle)의 폴링 자체는 `max_retries`의 영향을 받지 않습니다 — 그 루프는 비즈니스 수준의 것이며 HTTP 수준의 것이 아니며, `max_wait`로 총 기간을 제어합니다.
+
+## 사, 일반적인 함정
+
+1. **동기 제공자는 `wait`를 전달하지 마세요**: NanoBanana / Flux / Seedream은 동기 생성이며, 강제로 `wait=True`를 설정하면 SDK가 업데이트되지 않는 `tasks` 인터페이스를 폴링하게 됩니다.
+2. **TaskHandle 단위 차이**: Python은 초, TS는 밀리초로, 언어 간 이식 시 반드시 변환해야 합니다.
+3. **`wait=True`는 여전히 `TimeoutError`를 발생시킬 수 있습니다**: 응답은 `status in ('succeeded','failed')`를 충족해야 루프를 종료합니다; 제공자가 다른 필드 이름을 사용한 경우, 비즈니스 코드는 직접 `handle.get()`으로 파싱해야 합니다.
+4. **스트리밍 취소**: 취소 전에 생성된 토큰은 이미 청구됩니다.
+5. **동일한 프로세스 내에서 클라이언트 재사용**: SDK는 자체 연결 풀을 제공하므로, 빈번한 `new AceDataCloud()` / `AceDataCloud()` 호출은 TLS 핸드셰이크를 병목으로 만듭니다.
+
+## 더 알아보기
+
+- 📘 [TypeScript SDK 접속 튜토리얼](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Python SDK 접속 튜토리얼](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Go SDK 접속 튜토리얼](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 결제 훅](https://platform.acedata.cloud/documents/sdk-x402-payment)
+- 📦 [SDK monorepo 소스코드](https://github.com/AceDataCloud/SDK)

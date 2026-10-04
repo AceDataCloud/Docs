@@ -1,0 +1,316 @@
+---
+title: "SDK завдання опитування та потокова відповідь"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Сервіси на Ace Data Cloud поділяються на дві категорії за режимом відповіді:
+
+| Тип         | Типові сервіси                                                                         | Режим виклику                                     |
+| ----------- | ------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| **Синхронне генерування** | NanoBanana / Flux / Seedream / Chat Completions (не потокове) / Google пошук              | Один HTTP, результат у тілі відповіді                          |
+| **Потокова відповідь** | Chat Completions (`stream: true`)                                             | SSE, багато кадрів по токену                         |
+| **Асинхронні завдання** | Midjourney / Sora / Veo / Luma / Kling / Hailuo / Suno / Pixverse / Seedance | Спочатку створити завдання, отримати `task_id`, потім опитувати `/<provider>/tasks` |
+
+Ця стаття зосереджена на двох останніх категоріях: **опитування TaskHandle асинхронних завдань** та **деталі, пастки і міжмовні відмінності потокових відповідей чату**.
+
+## I. TaskHandle — єдина абстракція асинхронних завдань
+
+Усі три SDK обгортають асинхронні завдання в `TaskHandle`, надаючи однакові 4 методи:
+
+| Метод                               | Поведінка                                                         |
+| ---------------------------------- | --------------------------------------------------------------- |
+| `get()`                            | Отримати останній статус ( `POST /<provider>/tasks {id, action: "retrieve"}`) |
+| `is_completed()` / `isCompleted()` | Виклик `get()` один раз, перевірити, чи `status` є `succeeded` / `failed`           |
+| `wait()`                           | Блокуюче опитування, поки не буде `succeeded` / `failed` або не перевищить `max_wait`             |
+| Атрибут `result`                   | Повна відповідь, отримана під час останнього виклику `wait()`; перед викликом — `null`                           |
+
+### Два способи виклику для створення завдання
+
+Кожен асинхронний ресурс (`images.generate` / `video.generate` / `audio.generate`) має параметр `wait`:
+
+- `wait=False` (за замовчуванням): негайно повертає `TaskHandle`, бізнес-код сам вирішує, коли опитувати.
+- `wait=True`: SDK внутрішньо викликає `handle.wait()`, функція повертає відповідь після завершення. **Використовуйте лише тоді, коли ви впевнені, що цільовий API обов'язково поверне поле `status: succeeded`** — деякі постачальники не дотримуються цієї угоди, що призведе до того, що `wait` буде продовжуватися до `max_wait`, перш ніж викине `TimeoutError`.
+
+### Різниця в одиницях (⚠️ Обов'язково до прочитання)
+
+Одиниці `poll_interval` та `max_wait` **відрізняються в трьох мовах**, що є поширеною проблемою при міжмовній міграції:
+
+| Мова             | Одиниця `poll_interval`         | Одиниця `max_wait` | Значення за замовчуванням                                   |
+| ---------------- | ------------------------------- | ------------------- | ---------------------------------------------------------- |
+| **TypeScript**   | **мілісекунди**                     | **мілісекунди**        | `pollInterval=3000`, `maxWait=600000`                     |
+| **Python**       | **секунди**                      | **секунди**         | `poll_interval=3.0`, `max_wait=600.0`                     |
+| Go               | (TaskHandle ще не доступний у Go SDK) | —                   | —                                                          |
+
+> Якщо ви спробуєте перевести `{ pollInterval: 3000 }` з TS як секунди в Python `poll_interval=3000`, SDK чекатиме 50 хвилин, перш ніж опитувати вдруге.
+
+### Приклад: Явне опитування Midjourney на Python
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+# wait=False негайно отримує handle
+handle = client.images.generate(
+    provider="midjourney",
+    prompt="a cinematic photo of a banana wearing a tuxedo",
+    wait=False,
+)
+print("task_id", handle.id)
+
+t0 = time.time()
+result = handle.wait(poll_interval=3.0, max_wait=180.0)
+print("elapsed_s", round(time.time() - t0, 1))
+print("status", result.get("response", result).get("status"))
+print("images", [it.get("image_url") for it in (result.get("response", result).get("data") or [])])
+```
+
+Весь код виконує наступне:
+
+1. `images.generate(..., wait=False)` передає `prompt` до Midjourney API, негайно отримуючи `handle`, не блокуючи.
+2. `handle.wait(poll_interval=3.0, max_wait=180.0)` внутрішньо кожні 3 секунди виконує POST запит до `/midjourney/tasks`, поки `status` не зміниться на `succeeded` або `failed`, або загальний час не перевищить 180 секунд, викинувши `TimeoutError`.
+3. Після завершення `result["response"]["data"]` зазвичай містить 4 зображення (за замовчуванням Midjourney 2x2 grid).
+
+### Приклад: Явне опитування Midjourney на TypeScript
+
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+// wait: false негайно отримує handle
+const handle: any = await client.images.generate({
+  provider: 'midjourney',
+  prompt: 'a cinematic photo of a banana wearing a tuxedo',
+  wait: false,
+});
+console.log('task_id', handle.id);
+
+const t0 = Date.now();
+const result: any = await handle.wait({ pollInterval: 3000, maxWait: 180_000 });
+console.log('elapsed_s', ((Date.now() - t0) / 1000).toFixed(1));
+const response = result.response ?? result;
+console.log('status', response.status);
+console.log('images', (response.data ?? []).map((it: any) => it.image_url));
+```
+
+### Вибір між синхронним генеруванням та асинхронними завданнями
+
+Якщо ваш постачальник сам по собі є синхронним (NanoBanana / Flux / Seedream), **не передавайте `wait`**:
+
+```python
+# ✅ Рекомендовано
+res = client.images.generate(provider="nano-banana", prompt="...")
+url = res["data"][0]["image_url"]
+
+# ❌ Неправильний приклад: викликає внутрішнє опитування SDK /nano-banana/tasks, витрачаючи RTT
+res = client.images.generate(provider="nano-banana", prompt="...", wait=True)
+```
+
+Метод визначення дуже простий: якщо в документації цільового API **немає** пари `task_id` + `/tasks`, це синхронне генерування; у відповіді синхронного генерування поле `data` вже містить остаточний результат.
+
+### Внутрішній протокол TaskHandle
+
+Виклик `TaskHandle.get()` виглядає так:
+
+```http
+POST {API_BASE}/<provider>/tasks
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{"id": "<task_id>", "action": "retrieve"}
+```
+
+Відповідь має єдину структуру:
+
+```json
+{
+  "task_id": "...",
+  "trace_id": "...",
+  "response": {
+    "status": "pending | running | succeeded | failed",
+    "data": [...]
+  }
+}
+```
+
+SDK також сумісний з **старими відповідями без зовнішнього обгортання `response`** — безпосередньо читаючи верхній рівень `status`, тому перехід між новими та старими відповідями не вплине на бізнес-код.
+
+## II. SSE потокова відповідь (chat.completions)
+
+`chat.completions.create(stream=True)` є наразі єдиним потоковим інтерфейсом у SDK (потоки аудіо / відео ще не підтримуються). Стилі ітерації трьох мов є рідними:
+
+| Мова         | Ітерація                                                                    | Механізм скасування                       |
+| ------------ | -------------------------------------------------------------------------- | ---------------------------------------- |
+| TypeScript   | `for await (const chunk of stream)`                                       | `AbortController` передається fetch     |
+| Python       | `for chunk in client.openai.chat.completions.create(..., stream=True)`    | Вийти з циклу (з'єднання автоматично закривається SDK)       |
+| Go           | `chunks, errs := ...CreateStream(ctx, req)` → `for chunk := range chunks` | Скасування `context.Context`             |
+
+### TypeScript
+```ts
+import { AceDataCloud } from '@acedatacloud/sdk';
+
+const client = new AceDataCloud();
+
+const stream: any = await client.openai.chat.completions.create({
+  model: 'gpt-4o-mini',
+  messages: [{ role: 'user', content: 'Порахуйте від 1 до 5, розділяючи пробілами. Тільки числа.' }],
+  max_tokens: 30,
+  temperature: 0,
+  stream: true
+});
+
+let chunks = 0;
+let collected = '';
+for await (const chunk of stream) {
+  chunks++;
+  const delta = chunk?.choices?.[0]?.delta?.content;
+  if (delta) collected += delta;
+}
+console.log('chunks', chunks);
+console.log('collected', collected);
+```
+
+Реальний результат виконання:
+
+```text
+total_elapsed_ms 2616
+first_chunk_ms 2481
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Python
+
+```python
+import os
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_TOKEN"])
+
+chunks = 0
+collected = []
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Порахуйте від 1 до 5, розділяючи пробілами. Тільки числа."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+print("chunks", chunks)
+print("collected", "".join(collected))
+```
+
+Реальний результат виконання:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+### Go
+
+```go
+chunks, errs := client.OpenAI().Chat().Completions().CreateStream(ctx, adc.ChatCompletionRequest{
+    Model:     "gpt-4o-mini",
+    Messages:  []map[string]any{{"role": "user", "content": "Порахуйте від 1 до 5, розділяючи пробілами. Тільки числа."}},
+    MaxTokens: 30,
+})
+cnt := 0
+collected := ""
+for chunk := range chunks {
+    cnt++
+    if ch, ok := chunk["choices"].([]any); ok && len(ch) > 0 {
+        if d, ok := ch[0].(map[string]any)["delta"].(map[string]any); ok {
+            if s, ok := d["content"].(string); ok {
+                collected += s
+            }
+        }
+    }
+}
+if e, ok := <-errs; ok && e != nil {
+    log.Println("stream_err", e)
+}
+fmt.Println("chunks", cnt, "collected", collected)
+```
+
+Реальний результат виконання:
+
+```text
+total_elapsed_ms 1816
+first_chunk_ms 1633
+chunks 13
+collected 1 2 3 4 5
+```
+
+### Структура потоку chunk
+
+Кожен chunk є OpenAI-сумісним `chat.completion.chunk`:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion.chunk",
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "delta": { "content": " 3" },
+      "finish_reason": null
+    }
+  ]
+}
+```
+
+- Перший chunk зазвичай має `delta.role: "assistant"`, але `content` порожній.
+- Середні chunk містять `delta.content`, які можна безпосередньо з'єднувати.
+- Останній chunk має `delta` порожнім, `finish_reason` є `stop` / `length` / `content_filter`.
+
+### Скасування на півдорозі
+
+| Мова         | Спосіб скасування                                                                           |
+| ---------- | ------------------------------------------------------------------------------ |
+| TypeScript | Передати `signal: abortController.signal` у виклику `create()`, викликати `abortController.abort()` |
+| Python     | `break` для виходу з циклу `for`, SDK закриває HTTPx потік у `__exit__`                                |
+| Go         | Викликати `cancel()` на `ctx`, переданому в `NewClient`, канал `chunks` буде негайно закритий                    |
+
+Передчасне скасування вже нарахованих токенів — токени, згенеровані до моменту скасування, все ще будуть нараховані.
+
+## Три, тайм-аут і повторна спроба
+
+Три SDK ділять одну і ту ж стратегію повторних спроб:
+
+| Умови спрацьовування                       | Дії                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| HTTP 408 / 409 / 429 / 5xx | За замовчуванням повторити 2 рази, експоненціальне затримка 1s → 2s → 4s                                                      |
+| Помилки на мережевому рівні (DNS, відмовлено в з'єднанні, TLS не вдався)     | Те ж саме                                                                              |
+| 401 / 403 / 404 / 422      | Не повторювати, безпосередньо викидати відповідну типізовану помилку                                                                  |
+| Потокові (`stream=True`) запити        | **Не повторювати** — перший кадр вже вийшов, тому неможливо відтворити                                                            |
+| Явний `timeout` спрацьовує            | Викидає `APITimeoutError` (Python) / `TimeoutError` (TS) / `context.DeadlineExceeded` (Go) |
+
+Щоб вимкнути повторні спроби: передати `max_retries=0` / `maxRetries: 0` / `WithMaxRetries(0)` під час створення клієнта.
+
+Опитування асинхронних завдань (TaskHandle) не підлягає впливу `max_retries` — його цикл є бізнес-рівнем, а не HTTP-рівнем, контролюється `max_wait`.
+
+## Чотири, поширені пастки
+
+1. **Синхронному провайдеру не передавати `wait`**: NanoBanana / Flux / Seedream є синхронними, примусове `wait=True` змусить SDK опитувати інтерфейс `tasks`, який взагалі не оновлюється.
+2. **Різниця в одиницях TaskHandle**: Python — секунди, TS — мілісекунди, при переносі між мовами обов'язково перераховуйте.
+3. **`wait=True` все ще може викликати `TimeoutError`**: відповідь повинна відповідати `status in ('succeeded','failed')`, щоб вийти з циклу; якщо провайдер використовує інші назви полів, бізнес-код повинен самостійно `handle.get()` розпарсити.
+4. **Потокове скасування**: токени, згенеровані до скасування, вже нараховані.
+5. **Повторне використання клієнта в одному процесі**: SDK має власний пул з'єднань, часте `new AceDataCloud()` / `AceDataCloud()` може зробити TLS-рукопожаття вузьким місцем.
+
+## Дізнатися більше
+
+- 📘 [Посібник з інтеграції TypeScript SDK](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🐍 [Посібник з інтеграції Python SDK](https://platform.acedata.cloud/documents/sdk-python)
+- 🟦 [Посібник з інтеграції Go SDK](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + X402 платіжні гачки](https://platform.acedata.cloud/documents/sdk-x402-payment)
+- 📦 [Джерела SDK monorepo](https://github.com/AceDataCloud/SDK)

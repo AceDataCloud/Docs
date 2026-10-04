@@ -1,0 +1,171 @@
+---
+title: "X402 `exact` y `upto` esquemas de facturación"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Ace Data Cloud X402 actualmente utiliza dos tipos de esquemas: `exact` y `upto`. Ellos resuelven diferentes problemas de facturación.
+
+## `exact`
+
+`exact` significa que el precio se puede determinar antes de que la solicitud llegue a la API objetivo. La cantidad firmada por el cliente es el monto final a cobrar.
+
+Adecuado para:
+
+- Generación de imágenes a precio fijo;
+- Creación de tareas de video a precio fijo;
+- API de búsqueda o herramientas a precio fijo;
+- Pago de pedidos.
+
+EVM `exact` utiliza USDC EIP-3009 `TransferWithAuthorization`:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "authorization": {
+      "from": "0x...",
+      "to": "0x...",
+      "value": "95215",
+      "validAfter": "1780237345",
+      "validBefore": "1780240945",
+      "nonce": "0x..."
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+Facilitator verifica la firma y el monto en la fase de `/verify`, y en la fase de `/settle` envía esta autorización a la cadena.
+
+## `upto`
+
+`upto` significa que el cliente autoriza un límite máximo, Ace Data Cloud liquidará según el uso real después de completar la solicitud, el monto real cobrado no puede exceder el límite.
+
+Adecuado para:
+
+- Completar chat: el precio final depende de los tokens de prompt y los tokens de completion;
+- Respuestas en streaming: solo se sabe la longitud de la salida real al final;
+- API de medición posterior futura.
+
+`upto` utiliza Permit2 `PermitWitnessTransferFrom`. La firma del cliente no es una transferencia fija, sino una autorización de límite con testigo:
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "upto",
+    "network": "eip155:8453"
+  },
+  "payload": {
+    "permit2Authorization": {
+      "from": "0x...",
+      "spender": "0x4020A4f3b7b90ccA423B9fabCc0CE57C6C240002",
+      "nonce": "123456789",
+      "deadline": "1780240945",
+      "permitted": {
+        "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "amount": "95215"
+      },
+      "witness": {
+        "to": "0x...",
+        "facilitator": "0x...",
+        "validAfter": "1780237345"
+      }
+    },
+    "signature": "0x..."
+  }
+}
+```
+
+`permitted.amount` es el límite, no necesariamente el monto final a cobrar. Gateway en la fase de `/record` convertirá el uso real en `amount` y lo enviará al Facilitator. El Facilitator solo permitirá liquidar `amount &lt;= permitted.amount`.
+
+Resultados de ejecución del programa base `upto`:
+
+```text
+payer 0x5d4f08D5c2bb60703284bc06671Eb680fA41B105
+elapsed_ms 5104
+content ADC_BASE_UPTO_OK
+id chatcmpl-DlcbyS4IT8kUAMo4Ri97HiIHc9T8V
+tx 0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+block 46726437
+explorer https://basescan.org/tx/0x4b0b836ce1cd1171cdbc37df1637150b024214ec28e7f6f2d09122f15cbfc036
+signed ceiling 95215 atomic USDC
+transfer value 3 atomic USDC
+```
+
+Descripción:
+
+- El límite de autorización devuelto en 402 es `95215` atomic USDC, el cliente firma según este límite.
+- Después de la respuesta real del modelo, solo se liquidan `3` atomic USDC, la transacción en cadena ya se puede consultar en BaseScan.
+- Este resultado puede ilustrar la diferencia clave de `upto`: el monto firmado es un límite, la liquidación en cadena puede ser menor que el límite.
+- Si el uso real excede el límite, el Facilitator debe rechazar la liquidación, el cliente necesita autorizar nuevamente con un límite más alto.
+
+`upto` actualmente solo está disponible en Base. SKALE solo ofrece `exact`, si necesitas medición posterior, utiliza Base.
+
+## Por qué se necesita Permit2 approve
+
+`upto` es finalmente gestionado por el proxy x402 a través de Permit2 para retirar USDC de la billetera de pago. Antes de usarlo por primera vez, la billetera de pago necesita otorgar una vez un allowance ERC-20 a Permit2.
+
+Python CLI:
+
+```bash
+pip install 'acedatacloud-x402[cli]'
+X402_PRIVATE_KEY=0x... acedatacloud-x402 approve-permit2 --network base
+```
+
+Método de programación:
+
+```python
+from acedatacloud_x402 import EVMAccountSigner, approve_permit2
+
+approve_permit2(
+    rpc_url="https://mainnet.base.org",
+    signer=EVMAccountSigner.from_private_key("0x..."),
+    token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+)
+```
+
+Una vez completada la autorización, cada solicitud aún necesita firmar un nuevo sobre `upto`, ya que nonce, deadline, testigo y límite de monto son diferentes.
+
+## Liquidación de monto cero
+
+`upto` admite situaciones donde el monto real es 0. Por ejemplo, si la API objetivo no genera una cantidad facturable con éxito, Gateway puede enviar `amount = "0"`. El Facilitator devolverá éxito, pero no emitirá una transacción en cadena.
+
+Esto puede evitar el problema de "la solicitud no tuvo éxito pero aún así se cobra en cadena".
+
+## Sugerencias de selección
+
+| Escenario                   | Sugerencia                       |
+| -------------------- | ------------------------ |
+| API de precio fijo             | Usar `exact`, lógica simple.         |
+| Pago de pedidos                 | Usar `exact`.              |
+| Completar chat, facturación por token      | Usar Base `upto`.          |
+| Aún no ha hecho Permit2 approve | Primero usar `exact` para probar, luego cambiar a `upto`. |
+| Necesita medición posterior en SKALE      | No soportado, SKALE solo ofrece `exact`.  |
+
+Si no estás seguro de cuál elegir, usa primero el comportamiento predeterminado del SDK; el SDK elegirá el requisito de pago de red coincidente devuelto por el servidor.
+
+## Lista de verificación Base `upto`
+
+Al integrar o depurar, asegúrate de que los siguientes parámetros provengan de la misma respuesta 402 y se mantengan consistentes al firmar en el cliente:
+
+| Parámetro                         | Punto de verificación                                          |
+| -------------------------- | -------------------------------------------- |
+| `network`                  | Debe ser `eip155:8453`.                           |
+| `scheme`                   | Debe ser `upto`.                                  |
+| `extra.chainId`            | El id de cadena de Base es `8453`.                      |
+| `asset`                    | Usar la dirección del contrato Base USDC de la respuesta 402.                  |
+| `extra.facilitatorAddress` | Debe participar como testigo y coincidir con el Facilitator `/supported`. |
+| Permit2 allowance          | La billetera de pago necesita autorizar Permit2 para Base USDC.               |
+
+Errores comunes y formas de manejar:
+
+| Error                                           | Forma de manejar                                                                          |
+| -------------------------------------------- | ----------------------------------------------------------------------------- |
+| `invalid_upto_evm_payload_invalid_signature` | Verifica que el id de cadena, la dirección del facilitador, el dominio de Permit2, el gastador, la cuenta de firma y el testigo coincidan con la respuesta 402. |
+| `PERMIT2_ALLOWANCE_REQUIRED`                 | Realiza un Permit2 approve para USDC en la cadena objetivo y vuelve a enviar la solicitud.                                         |
+| `amount exceeds permitted amount`            | El uso real excede el límite firmado, necesita firmar nuevamente con un límite más alto.                                                       |

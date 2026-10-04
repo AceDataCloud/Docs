@@ -1,0 +1,100 @@
+---
+title: "Utiliser Ace Data Cloud dans Open WebUI"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[Open WebUI](https://openwebui.com/) (anciennement Ollama WebUI) est un client IA open source prenant en charge le multi-utilisateur, les bases de connaissances, le RAG et le déploiement privé. Il prend en charge les points de terminaison personnalisés compatibles avec OpenAI, ce qui permet d'intégrer Ace Data Cloud. Cet article présente le processus de configuration.
+
+## Processus de demande
+
+Pour intégrer Ace Data Cloud dans Open WebUI, rendez-vous d'abord sur la [console Ace Data Cloud](https://platform.acedata.cloud/console/applications), obtenez votre API Token et conservez-le pour une utilisation ultérieure.
+
+![Obtenir la clé API Ace Data Cloud](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Si vous n'êtes pas encore connecté ou inscrit, vous serez automatiquement redirigé vers la page de connexion qui vous invitera à vous inscrire et à vous connecter ; après la connexion et l'inscription, vous reviendrez automatiquement sur la page actuelle.
+
+Lors de votre première demande, un quota gratuit vous sera offert, vous permettant d'essayer gratuitement les services de modèles d'Ace Data Cloud.
+
+## Déployer et configurer Ace Data Cloud
+
+Open WebUI se connecte aux points de terminaison compatibles avec OpenAI via des variables d'environnement ; il peut être déployé avec une seule commande Docker (remplacez `{token}` par votre Token) :
+
+```bash
+docker run -d \
+  --name open-webui \
+  -p 3000:8080 \
+  -e WEBUI_SECRET_KEY=$(openssl rand -base64 32) \
+  -e OPENAI_API_BASE_URL=https://api.acedata.cloud/v1 \
+  -e OPENAI_API_KEY={token} \
+  -v open-webui:/app/backend/data \
+  ghcr.io/open-webui/open-webui:main
+```
+
+| Variable d'environnement                              | Rôle                                 |
+| --------------------------------- | ---------------------------------- |
+| `OPENAI_API_BASE_URL`             | Point d'entrée Ace Data Cloud, **doit se terminer par `/v1`** |
+| `OPENAI_API_KEY`                  | Votre Token                           |
+| `WEBUI_SECRET_KEY`                | Clé de chiffrement de session, générée automatiquement                  |
+| `-v open-webui:/app/backend/data` | Persistance des conversations / données utilisateur                       |
+
+Ouvrez `http://IP_de_votre_serveur:3000` ; le premier compte enregistré devient automatiquement administrateur. Notez les règles de chemin de la Base URL :
+
+| OPENAI_API_BASE_URL                   | Requête réelle                                                   | Résultat                       |
+| ------------------------------------- | ------------------------------------------------------ | ------------------------ |
+| `https://api.acedata.cloud/v1`        | `https://api.acedata.cloud/v1/chat/completions`        | Correct                       |
+| `https://api.acedata.cloud/openai`    | `https://api.acedata.cloud/openai/chat/completions`    | Également utilisable                      |
+| `https://api.acedata.cloud/openai/v1` | `https://api.acedata.cloud/openai/v1/chat/completions` | 404 (il n'y a pas de `/v1` sous `/openai`) |
+
+Après vous être connecté, accédez à **Admin Panel → Settings → Connections** et cliquez sur « Verify Connection » pour vérifier ; dans **Settings → Models**, vous pouvez filtrer et épingler les modèles fréquemment utilisés.
+
+> En plus d'utiliser les variables d'environnement, Open WebUI permet également d'ajouter directement une connexion dans l'interface : accédez à **Admin Settings → Connections**, cliquez sur ➕ et renseignez l'URL (`https://api.acedata.cloud/v1`) et l'API Key ; Open WebUI appellera automatiquement `/models` pour récupérer la liste des modèles. Consultez la documentation officielle [Starting With OpenAI-Compatible Servers](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible) pour plus de détails.
+
+![Interface de configuration de la connexion Open WebUI Ace Data Cloud](https://cdn.acedata.cloud/f366abfd935d.png)
+
+> `MODEL_ID` est uniquement utilisé pour illustrer une allow list facultative ; lorsqu'il est laissé vide, tous les modèles renvoyés par `/models` seront affichés.
+
+## Choisir un modèle
+
+Le catalogue des modèles est continuellement mis à jour. Utilisez en priorité la liste de modèles chargée automatiquement par le client ; si vous devez les renseigner manuellement, demandez d'abord `GET https://api.acedata.cloud/v1/models` pour obtenir les ID de modèles actuels, puis choisissez selon les capacités de contexte, d'image et d'appel d'outils prises en charge par le client.
+
+## Vérifier l'intégration
+
+Si vous ne savez pas si le problème provient d'Open WebUI ou du réseau, vous pouvez d'abord utiliser curl pour vérifier directement le point de terminaison (remplacez `{token}` par votre Token) :
+
+```bash
+curl -X POST 'https://api.acedata.cloud/v1/chat/completions' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+Le renvoi d'un objet `chat.completion` compatible avec OpenAI indique que le Token et le point de terminaison sont prêts ; si `HTTP 403 used_up` est renvoyé, cela signifie que le Token est valide mais que le solde est insuffisant, vous pouvez recharger depuis la [console](https://platform.acedata.cloud/console/applications).
+
+## Avancé : base de connaissances et multi-utilisateur
+
+La base de connaissances (RAG) d'Open WebUI utilise par défaut ChromaDB pour stocker les vecteurs ; le modèle d'intégration peut être défini sur `text-embedding-3-large` (via Ace Data Cloud). Les documents originaux ne sont stockés que sur votre serveur, et seuls les extraits correspondants seront envoyés au modèle. Dans **Admin Panel → Users**, vous pouvez gérer les rôles des utilisateurs (Pending / User / Admin) ; il est recommandé de définir « Default User Role » sur `pending`, afin que les nouveaux utilisateurs doivent être approuvés avant de pouvoir utiliser le service, évitant ainsi que des personnes externes s'inscrivent librement et consomment le quota. Si vous utilisez un proxy inverse nginx, veuillez ajouter `proxy_buffering off;` et `client_max_body_size 100M;`.
+
+## Questions fréquentes
+
+### Message Connection error / 404
+
+Habituellement, `OPENAI_API_BASE_URL` a été écrit comme `.../openai/v1` ou il manque `/v1`. Modifiez-le en `https://api.acedata.cloud/v1`.
+
+### Impossible de dialoguer après l'importation d'un document
+
+Dans les paramètres RAG de l'Admin Panel, sélectionnez `text-embedding-3-large` (fournisseur OpenAI) comme modèle d'intégration.
+
+### Données perdues après le redémarrage du conteneur
+
+Vous devez monter le volume de données au démarrage : `-v open-webui:/app/backend/data`.
+
+## En savoir plus
+
+- [Site officiel d'Open WebUI](https://openwebui.com/) ｜ [Open WebUI GitHub](https://github.com/open-webui/open-webui) ｜ [Documentation de démarrage rapide](https://docs.openwebui.com/getting-started/quick-start)
+- [Documentation officielle Open WebUI pour connecter des points de terminaison compatibles avec OpenAI](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible)
+- [Documentation de l'API Ace Data Cloud OpenAI Chat Completions](https://platform.acedata.cloud/documents/openai-chat-completions)
+- [Liste des services Ace Data Cloud](https://platform.acedata.cloud/documents)
+- [Console Ace Data Cloud](https://platform.acedata.cloud/console)

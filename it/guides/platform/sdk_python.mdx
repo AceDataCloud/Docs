@@ -1,0 +1,308 @@
+---
+title: "Guida all'integrazione del SDK Python"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[`acedatacloud`](https://pypi.org/project/acedatacloud/) è l'SDK Python ufficiale di Ace Data Cloud, che incapsula tutti i servizi su `api.acedata.cloud` in metodi tipizzati come `client.openai.chat.completions.create(...)`, `client.images.generate(...)`, `client.search.google(...)`, ecc., fornendo sia client sincroni che asincroni.
+
+Si basa su `httpx`, supporta flussi SSE, ripetizioni automatiche, eccezioni tipizzate e validazione dei tipi pydantic.
+
+Indirizzi del codice sorgente e del pacchetto:
+
+- Repository SDK: [https://github.com/AceDataCloud/SDK](https://github.com/AceDataCloud/SDK)
+- PyPI: [https://pypi.org/project/acedatacloud/](https://pypi.org/project/acedatacloud/)
+
+## Installazione
+
+```bash
+pip install acedatacloud
+# oppure uv add / poetry add
+```
+
+Se è necessario pagare sulla catena X402 (senza percorso API Token), installare anche:
+
+```bash
+pip install acedatacloud-x402
+```
+
+Output del controllo della versione in un venv pulito:
+
+```text
+$ python -c "import importlib.metadata as m; print(m.version('acedatacloud'))"
+2026.4.26.1
+
+$ python -c "from acedatacloud import AceDataCloud, AsyncAceDataCloud; print('ok')"
+ok
+```
+
+Spiegazione dei risultati:
+
+- La versione del pacchetto è `2026.4.26.1` (CalVer, revisione del 26 aprile 2026).
+- `AceDataCloud` è il client sincrono, `AsyncAceDataCloud` è il client asincrono di asyncio.
+- Questo SDK non dipende da `pydantic`, il corpo della risposta restituisce unicamente `dict`. Questo è diverso da `openai-python`, e bisogna prestare attenzione durante la migrazione.
+
+## Preparare l'API Token
+
+Fare riferimento a [Panoramica SDK - Richiesta API Token](https://platform.acedata.cloud/documents/acedatacloud-sdk#申请-api-token) per ottenere il token, quindi in shell `export`:
+
+```bash
+export ACEDATACLOUD_API_TOKEN={token}
+```
+
+Quando si costruisce il client, non passare `api_token`, l'SDK leggerà automaticamente la variabile d'ambiente `ACEDATACLOUD_API_TOKEN`. Se nel tuo ambiente è già presente `ACEDATACLOUD_API_KEY` (convenzione del repository del progetto), si prega di passare esplicitamente: `AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])`.
+
+## Esempio 1: chat.completions (sincrono)
+
+```python
+import os, time, json
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_SDK_OK"}],
+    max_tokens=20,
+    temperature=0,
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("id", res["id"])
+print("model", res["model"])
+print("content", res["choices"][0]["message"]["content"])
+print("usage", json.dumps({k: v for k, v in res["usage"].items()
+                            if k in ("prompt_tokens","completion_tokens","total_tokens")}))
+```
+
+Risultato dell'esecuzione del programma:
+
+```text
+elapsed_ms 2963
+id chatcmpl-DldFdnIlhSUXINpupgsUmZL78MnBu
+model gpt-4o-mini
+content ADC_PY_SDK_OK
+usage {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+```
+
+Spiegazione dei risultati:
+
+- `id` è l'ID della risposta, che può essere trovato in [Storia dell'uso](https://platform.acedata.cloud/console/usages).
+- `content ADC_PY_SDK_OK` è l'identificativo fisso restituito realmente dal modello.
+- `res["usage"]` restituisce un `dict`, non un modello pydantic; una chiamata consuma circa 24 token.
+
+## Esempio 2: chat.completions (flusso SSE)
+
+Quando `stream=True`, `create` restituisce un generatore normale, che restituisce ogni volta un chunk dict analizzato.
+
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+first_chunk_ms = None
+chunks = 0
+collected = []
+
+for chunk in client.openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Count from 1 to 5, separated by single spaces, no extra text."}],
+    max_tokens=30,
+    temperature=0,
+    stream=True,
+):
+    if first_chunk_ms is None:
+        first_chunk_ms = int((time.time() - t0) * 1000)
+    chunks += 1
+    delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+    if delta:
+        collected.append(delta)
+
+print("total_elapsed_ms", int((time.time() - t0) * 1000))
+print("first_chunk_ms", first_chunk_ms)
+print("chunks", chunks)
+print("collected", "".join(collected).strip())
+```
+
+Risultato dell'esecuzione del programma:
+
+```text
+total_elapsed_ms 2111
+first_chunk_ms 2104
+chunks 12
+collected 1 2 3 4 5
+```
+
+Spiegazione dei risultati:
+
+- La latenza del primo frame è di 2104 ms, mentre le successive 11 frame hanno impiegato solo 7 ms per arrivare—una volta che il servizio inizia a fluire, il locale può consumare facilmente.
+- Il chunk è un normale dict, i valori possono essere estratti in modo sicuro utilizzando `.get()` secondo il formato SSE di OpenAI.
+- Nella produzione reale, si consiglia di inviare SSE al frontend mentre si yield, con una latenza complessiva del primo byte vicina a 2 secondi.
+
+## Esempio 3: AsyncAceDataCloud (asincrono)
+
+L'API di `AsyncAceDataCloud` è completamente simmetrica rispetto alla versione sincrona, solo che tutti i metodi IO restituiscono coroutine. È adatta per servizi FastAPI / aiohttp / asyncio.
+
+```python
+import os, asyncio, time
+from acedatacloud import AsyncAceDataCloud
+
+async def main():
+    client = AsyncAceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+    t0 = time.time()
+    res = await client.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Reply with exactly: ADC_PY_ASYNC_OK"}],
+        max_tokens=20,
+        temperature=0,
+    )
+    print("elapsed_ms", int((time.time() - t0) * 1000))
+    print("id", res["id"])
+    print("content", res["choices"][0]["message"]["content"])
+    await client.close()
+
+asyncio.run(main())
+```
+
+Risultato dell'esecuzione del programma:
+
+```text
+elapsed_ms 2392
+id chatcmpl-DldFwRlrgtYDBpIr0T55aDQI4GlbF
+content ADC_PY_ASYNC_OK
+```
+
+Spiegazione dei risultati:
+
+- La versione asincrona e quella sincrona seguono lo stesso percorso HTTP, solo che l'implementazione del pool di connessioni è diversa (`httpx.AsyncClient`).
+- Alla chiusura, è necessario esplicitamente `await client.close()` per chiudere il pool di connessioni; nei servizi a lungo ciclo di vita, è sufficiente chiuderlo una volta prima della chiusura del processo.
+- La latenza singola è simile a quella sincrona, ma nei contesti di concorrenza l'asincrono mostra i suoi vantaggi—un event loop può gestire decine o centinaia di richieste in volo contemporaneamente.
+
+## Esempio 4: images.generate (NanoBanana)
+
+L'API NanoBanana è un servizio di generazione di immagini sincrono, **non passare `wait`**—la chiamata SDK attenderà sempre il ritorno del servizio 200.
+```python
+import os, time
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(api_token=os.environ["ACEDATACLOUD_API_KEY"])
+
+t0 = time.time()
+res = client.images.generate(
+    provider="nano-banana",
+    model="nano-banana",
+    prompt="Un logo minimalista di una banana gialla su uno sfondo bianco, design piatto",
+)
+print("elapsed_ms", int((time.time() - t0) * 1000))
+print("task_id", res.get("task_id"))
+print("trace_id", res.get("trace_id"))
+data = res.get("data") or []
+if data:
+    print("image_url", data[0].get("image_url"))
+```
+
+Risultato dell'esecuzione del programma:
+
+```text
+elapsed_ms 18977
+task_id 9e71f40f-1579-480d-adf4-07a95450904f
+trace_id 5aa21d7f-af84-48e6-9ce0-9c6c36c8e5d9
+image_url https://platform.cdn.acedata.cloud/nanobanana/884e92df-a497-44e0-9681-35c7a00e0a6c.png
+```
+
+Descrizione del risultato:
+
+- `image_url` è un indirizzo stabile su CDN, può essere scaricato o incorporato direttamente nella pagina web.
+- In 18,9 secondi quasi tutto è stato impiegato per l'inferenza del modello; il costo del SDK locale è stato solo di pochi millisecondi.
+- Per compiti realmente asincroni come Midjourney, Sora, Veo, Suno, è necessario utilizzare `wait=True` o eseguire manualmente `TaskHandle.wait()` per il polling, vedere [SDK polling delle attività e risposta in streaming](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+## Esempio 5: Gestione degli errori tipizzati
+
+```python
+import os
+from acedatacloud import AceDataCloud
+from acedatacloud import AuthenticationError, RateLimitError, ValidationError
+
+bad = AceDataCloud(api_token="definitely-not-a-real-token")
+
+try:
+    bad.openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5,
+    )
+except AuthenticationError as err:
+    print("err_class", type(err).__name__)
+    print("status", err.status_code)
+    print("code", err.code)
+except RateLimitError as err:
+    # 429, il SDK ha già tentato automaticamente il backoff esponenziale 2 volte prima di fallire
+    print("rate limited:", err.code)
+except ValidationError as err:
+    # 400, ad esempio mancanza di campi, nome del modello inesistente
+    print("bad request:", err.code, err.message)
+```
+
+La gerarchia delle eccezioni è coerente con TypeScript: `AuthenticationError` (401), `TokenMismatchError` (token non corrisponde al servizio), `InsufficientBalanceError` (saldo insufficiente), `ResourceDisabledError` (servizio disabilitato), `ValidationError` (400), `RateLimitError` (429), `ModerationError` (403 revisione dei contenuti), `APIError` (cattura generale), `TimeoutError` (timeout), `TransportError` (livello di rete).
+
+## Opzioni di configurazione
+
+```python
+from acedatacloud import AceDataCloud
+
+client = AceDataCloud(
+    # Obbligatorio uno: token esplicito o variabile d'ambiente ACEDATACLOUD_API_TOKEN
+    api_token="...",
+
+    # Indirizzo base dell'API della piattaforma, predefinito https://api.acedata.cloud
+    base_url="https://api.acedata.cloud",
+
+    # Alcuni servizi (come i metadati del dashboard) utilizzano il dominio della piattaforma
+    platform_base_url="https://platform.acedata.cloud",
+
+    # Timeout per richiesta singola, secondi; predefinito 300.0
+    timeout=300.0,
+
+    # Numero massimo di tentativi automatici, predefinito 2; condizioni di ripetizione: 408 / 409 / 429 / 5xx / errore di rete
+    max_retries=2,
+
+    # Intestazioni di richiesta personalizzate
+    headers={"x-app": "my-service/1.0"},
+)
+```
+
+> Il `timeout` del SDK Python e il `poll_interval` / `max_wait` di TaskHandle sono entrambi in **secondi**, il SDK TypeScript utilizza **millisecondi**, prestare particolare attenzione durante la migrazione tra linguaggi. Vedi [SDK polling delle attività e risposta in streaming](https://platform.acedata.cloud/documents/sdk-tasks-and-streaming).
+
+> Il SDK legge per impostazione predefinita la variabile d'ambiente `ACEDATACLOUD_API_TOKEN`; in questo articolo, per uniformarsi ad altri tutorial come [Claude Code VS Code tutorial](https://platform.acedata.cloud/documents/claude-code-vscode-integrations), l'esempio utilizza `ACEDATACLOUD_API_KEY`, è necessario `api_token=os.environ["ACEDATACLOUD_API_KEY"]` per l'iniezione esplicita.
+
+## Avanzato: Hook di pagamento X402
+
+```python
+from acedatacloud import AceDataCloud
+from acedatacloud_x402 import create_x402_payment_handler
+
+client = AceDataCloud(
+    payment_handler=create_x402_payment_handler(
+        network="base",
+        evm_signer=my_evm_signer,
+        prefer_scheme="exact",   # o "upto"
+    )
+)
+```
+
+Per il processo completo e i risultati reali sulla catena, vedere [SDK + Hook di pagamento X402](https://platform.acedata.cloud/documents/sdk-x402-payment).
+
+## Come controllare il saldo rimanente
+
+Puoi controllare il saldo rimanente attuale del tuo account tramite [Ace Data Cloud Console - Elenco delle applicazioni](https://platform.acedata.cloud/console/applications).
+
+Puoi visualizzare tutta la cronologia degli utilizzi e i dettagli delle spese tramite [Ace Data Cloud Console - Cronologia utilizzi](https://platform.acedata.cloud/console/usages).
+
+## Scopri di più
+
+- 🐍 [`acedatacloud` su PyPI](https://pypi.org/project/acedatacloud/)
+- 🗂 [Codice sorgente del SDK](https://github.com/AceDataCloud/SDK/tree/main/python)
+- 📘 [Guida all'integrazione del SDK TypeScript](https://platform.acedata.cloud/documents/sdk-typescript)
+- 🟦 [Guida all'integrazione del SDK Go](https://platform.acedata.cloud/documents/sdk-go)
+- 🔌 [SDK + Hook di pagamento X402](https://platform.acedata.cloud/documents/sdk-x402-payment)

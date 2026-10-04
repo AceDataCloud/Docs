@@ -1,0 +1,100 @@
+---
+title: "Использование Ace Data Cloud в Open WebUI"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+[Open WebUI](https://openwebui.com/) (ранее Ollama WebUI) — это open-source AI-клиент, поддерживающий многопользовательский режим, базу знаний, RAG и частное развертывание. Он поддерживает пользовательские совместимые с OpenAI конечные точки, поэтому может подключаться к Ace Data Cloud. В этой статье описывается процесс настройки.
+
+## Процесс получения
+
+Чтобы подключить Ace Data Cloud в Open WebUI, сначала перейдите в [консоль Ace Data Cloud](https://platform.acedata.cloud/console/applications), получите ваш API Token и сохраните его для дальнейшего использования.
+
+![Получение Ace Data Cloud API Key](https://cdn.acedata.cloud/dvc3cg.jpg)
+
+Если вы еще не вошли в систему или не зарегистрировались, вы будете автоматически перенаправлены на страницу входа с приглашением зарегистрироваться и войти, после входа и регистрации вы автоматически вернетесь на текущую страницу.
+
+При первом получении предоставляется бесплатная квота, с которой можно бесплатно попробовать модельные сервисы Ace Data Cloud.
+
+## Развертывание и настройка Ace Data Cloud
+
+Open WebUI подключается к совместимым с OpenAI конечным точкам через переменные окружения, развертывание выполняется одной командой Docker (замените `{token}` на ваш Token):
+
+```bash
+docker run -d \
+  --name open-webui \
+  -p 3000:8080 \
+  -e WEBUI_SECRET_KEY=$(openssl rand -base64 32) \
+  -e OPENAI_API_BASE_URL=https://api.acedata.cloud/v1 \
+  -e OPENAI_API_KEY={token} \
+  -v open-webui:/app/backend/data \
+  ghcr.io/open-webui/open-webui:main
+```
+
+| Переменная окружения                              | Назначение                                 |
+| --------------------------------- | ---------------------------------- |
+| `OPENAI_API_BASE_URL`             | Точка входа Ace Data Cloud, **должна оканчиваться на `/v1`** |
+| `OPENAI_API_KEY`                  | Ваш Token                           |
+| `WEBUI_SECRET_KEY`                | Ключ шифрования session, генерируется автоматически                  |
+| `-v open-webui:/app/backend/data` | Постоянное хранение данных диалогов / пользователей                       |
+
+Откройте `http://IP_вашего_сервера:3000`, первая зарегистрированная учетная запись автоматически становится администратором. Обратите внимание на правила пути Base URL:
+
+| OPENAI_API_BASE_URL                   | Фактический запрос                                                   | Результат                       |
+| ------------------------------------- | ------------------------------------------------------ | ------------------------ |
+| `https://api.acedata.cloud/v1`        | `https://api.acedata.cloud/v1/chat/completions`        | Корректно                       |
+| `https://api.acedata.cloud/openai`    | `https://api.acedata.cloud/openai/chat/completions`    | Также доступно                      |
+| `https://api.acedata.cloud/openai/v1` | `https://api.acedata.cloud/openai/v1/chat/completions` | 404 (под `/openai` нет `/v1`) |
+
+После входа перейдите в **Admin Panel → Settings → Connections** и нажмите «Verify Connection» для проверки; в **Settings → Models** можно отфильтровать и Pin часто используемые модели.
+
+> Помимо использования переменных окружения, Open WebUI также поддерживает добавление подключения напрямую в интерфейсе: перейдите в **Admin Settings → Connections**, нажмите ➕ и заполните URL (`https://api.acedata.cloud/v1`) и API Key, после чего Open WebUI автоматически вызовет `/models` для получения списка моделей. Подробнее см. в официальной документации [Starting With OpenAI-Compatible Servers](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible).
+
+![Интерфейс настройки подключения Open WebUI Ace Data Cloud](https://cdn.acedata.cloud/f366abfd935d.png)
+
+> `MODEL_ID` используется только для демонстрации необязательного allow list; если оставить пустым, будут отображены все модели, возвращаемые `/models`.
+
+## Выбор модели
+
+Каталог моделей будет постоянно обновляться. В приоритете используйте автоматически загружаемый клиентом список моделей; если необходимо заполнить вручную, сначала запросите `GET https://api.acedata.cloud/v1/models`, чтобы получить текущие ID моделей, затем выберите в соответствии с поддерживаемыми клиентом возможностями контекста, изображений и вызова инструментов.
+
+## Проверка интеграции
+
+Если вы не уверены, связана ли проблема с Open WebUI или сетью, можно сначала напрямую проверить конечную точку с помощью curl (замените `{token}` на ваш Token):
+
+```bash
+curl -X POST 'https://api.acedata.cloud/v1/chat/completions' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "ping"}]
+  }'
+```
+
+Возврат совместимого с OpenAI объекта `chat.completion` означает, что Token и конечная точка готовы; если возвращается `HTTP 403 used_up`, это означает, что Token действителен, но баланса недостаточно — пополните счет в [консоли](https://platform.acedata.cloud/console/applications).
+
+## Расширенно: база знаний и многопользовательский режим
+
+База знаний Open WebUI (RAG) по умолчанию использует ChromaDB для хранения векторов, в качестве модели эмбеддингов можно указать `text-embedding-3-large` (через Ace Data Cloud), исходные тексты документов хранятся только на вашем сервере, модели будут отправлены только найденные фрагменты. В **Admin Panel → Users** можно управлять ролями пользователей (Pending / User / Admin); рекомендуется установить «Default User Role» в `pending`, чтобы новые пользователи могли использовать систему только после проверки, избегая произвольной регистрации посторонних лиц и расходования квоты. Если используется обратное проксирование nginx, добавьте `proxy_buffering off;` и `client_max_body_size 100M;`.
+
+## Часто задаваемые вопросы
+
+### Появляется Connection error / 404
+
+Обычно `OPENAI_API_BASE_URL` указан как `.../openai/v1` или отсутствует `/v1`. Измените на `https://api.acedata.cloud/v1`.
+
+### Невозможно начать диалог после загрузки документа
+
+В настройках RAG панели Admin Panel выберите модель эмбеддингов `text-embedding-3-large` (OpenAI provider).
+
+### Данные теряются после перезапуска контейнера
+
+При запуске необходимо подключить том данных `-v open-webui:/app/backend/data`.
+
+## Узнать больше
+
+- [Официальный сайт Open WebUI](https://openwebui.com/) ｜ [Open WebUI GitHub](https://github.com/open-webui/open-webui) ｜ [Документация по быстрому началу](https://docs.openwebui.com/getting-started/quick-start)
+- [Официальная документация Open WebUI по подключению совместимых с OpenAI конечных точек](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible)
+- [Документация Ace Data Cloud OpenAI Chat Completions API](https://platform.acedata.cloud/documents/openai-chat-completions)
+- [Список сервисов Ace Data Cloud](https://platform.acedata.cloud/documents)
+- [Консоль Ace Data Cloud](https://platform.acedata.cloud/console)

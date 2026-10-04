@@ -1,0 +1,146 @@
+---
+title: "Export AceDataCloud Platform API Call Records"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+Directly download the API call details of the current account as CSV, suitable for financial reconciliation, offline analysis, or saving large volumes of records. If you only need to view a small number of details on the page, please first use the [Call Record List](https://platform.acedata.cloud/documents/platform-usage-list).
+
+## Preparation
+
+1. Log in to the [AceDataCloud Platform](https://platform.acedata.cloud).
+2. Create an account token in the [Account Token Console](https://platform.acedata.cloud/console/platform-tokens), and immediately save it to a password manager or Secret Manager.
+3. Obtain filter IDs as needed from the [Service Application List](https://platform.acedata.cloud/documents/platform-application-list), [API Credential List](https://platform.acedata.cloud/documents/platform-credential-list), or [API List](https://platform.acedata.cloud/documents/platform-api-list).
+
+For complete token instructions, see [Manage Account Tokens](https://platform.acedata.cloud/documents/platform-token). Account tokens and Credentials used to call business APIs cannot be used interchangeably.
+
+```shell
+export PLATFORM_TOKEN='your account token'
+```
+
+## API Overview
+
+| Item           | Content                                                    |
+| -------------- | ---------------------------------------------------------- |
+| Method         | `GET`                                                      |
+| URL            | `https://platform.acedata.cloud/api/v1/usage/apis/export/` |
+| Authentication | `Authorization: Bearer ${PLATFORM_TOKEN}`                  |
+| OAuth Scope    | `usage:read` (`platform:read` / `platform` can include it) |
+| Response       | `200 text/csv; charset=utf-8`                              |
+| File Name      | `usages.csv`                                               |
+
+This API synchronously streams the CSV response, does not create an export task, and does not return JSON or a download link. Only when neither start nor end time is provided does it default to exporting records from the beginning of the current calendar month to the current time; when only one boundary is provided, the other boundary is not automatically filled with the current month's boundary.
+
+## Query Parameters
+
+| Parameter         | Type     | Required | Default  | Description                                      |
+| ----------------- | -------- | -------- | -------- | ------------------------------------------------ |
+| `perspective`     | string   | No       | `both`   | `billing`, `actor`, or `both`                    |
+| `service_id`      | UUID     | No       | —        | Filter by service; supports repeated parameters  |
+| `application_id`  | UUID     | No       | —        | Filter by Application; supports repeated parameters |
+| `api_id`          | UUID     | No       | —        | Filter by API; supports repeated parameters      |
+| `credential_id`   | UUID     | No       | —        | Filter by API credential; supports repeated parameters |
+| `status_code`     | integer  | No       | —        | Supports repeated or comma-separated values      |
+| `created_at_from` | datetime | No       | —        | ISO 8601 start time                              |
+| `created_at_to`   | datetime | No       | —        | ISO 8601 end time                                |
+
+The export scope is always limited to records visible to the current account as the billing entity and/or actual caller, and cross-account exports are not supported.
+
+## Request Examples
+
+Directly save the current month's CSV:
+
+```shell
+curl --fail-with-body --location \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Export by Application, time, and status code:
+
+```shell
+export APPLICATION_ID='your Application ID'
+
+curl --fail-with-body --get \
+  'https://platform.acedata.cloud/api/v1/usage/apis/export/' \
+  --data-urlencode "application_id=${APPLICATION_ID}" \
+  --data-urlencode 'status_code=200,500' \
+  --data-urlencode 'created_at_from=2026-09-01T00:00:00Z' \
+  --data-urlencode 'created_at_to=2026-09-08T00:00:00Z' \
+  -H "Authorization: Bearer ${PLATFORM_TOKEN}" \
+  --output usages.csv
+```
+
+Stream-save with Python and check integrity:
+
+```shell
+import os
+from pathlib import Path
+
+import requests
+
+url = "https://platform.acedata.cloud/api/v1/usage/apis/export/"
+headers = {"Authorization": f"Bearer {os.environ['PLATFORM_TOKEN']}"}
+params = {
+    "created_at_from": "2026-09-01T00:00:00Z",
+    "created_at_to": "2026-09-08T00:00:00Z",
+    "perspective": "both",
+}
+output = Path("usages.csv")
+
+with requests.get(url, headers=headers, params=params, stream=True, timeout=120) as response:
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("text/csv"):
+        raise RuntimeError("The server did not return CSV")
+    with output.open("wb") as file:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            file.write(chunk)
+
+last_line = output.read_text(encoding="utf-8").splitlines()[-1]
+if last_line.startswith("# truncated:") or last_line.startswith("# error:"):
+    raise RuntimeError(f"Export is incomplete: {last_line}")
+```
+
+## CSV Columns
+
+The CSV header order is fixed as:
+
+```text
+Usage ID,API,Status Code,Deducted Amount,Original Amount,Trace ID,Created At
+```
+
+| Column             | Description                                                  |
+| ------------------ | ------------------------------------------------------------ |
+| `Usage ID`         | Call record ID                                               |
+| `API`              | API title; may be the API ID or empty if it cannot be matched |
+| `Status Code`      | HTTP status code                                             |
+| `Deducted Amount`  | Final actual deducted quota                                  |
+| `Original Amount`  | Original quota before application discounts                  |
+| `Trace ID`         | Request tracing identifier                                   |
+| `Created At`       | Record creation time, ISO 8601                               |
+
+The quota unit is determined by `service.unit` of the corresponding Application.
+
+## Determine Whether the Export Is Complete
+
+A maximum of 1,000,000 records can be output in a single export. After the server has started returning CSV, it cannot change an intermediate error to another HTTP status, so the client must check the last line:
+
+- `# truncated:`: The row limit has been reached; export in segments using smaller time windows.
+- `# error:`: Stream reading was interrupted; reduce the scope and export again.
+
+When a reconciliation program sees either marker, it must treat the file as incomplete and must not silently record it.
+
+## Errors and Retries
+
+| Situation                   | Handling Method                                                    |
+| --------------------------- | ------------------------------------------------------------------ |
+| `400 usage_history_expired` | Use `available_from` in the response to adjust to within the most recent 60-day range |
+| `401 not_authenticated`     | Check whether the Account Token exists, is correct, and has not been deleted |
+| Non-CSV response            | Do not save it as a successful file; first read the error response and correct the request |
+| Download interruption or marker | Reduce the time window and export again using a backoff strategy |
+
+## Next Steps
+
+- [View Call Records](https://platform.acedata.cloud/documents/platform-usage-list): Filter online and locate individual requests.
+- [Aggregate Call Volume](https://platform.acedata.cloud/documents/platform-usage-aggregate): View data aggregated by date, API, or model.
+- [View Service Application Details](https://platform.acedata.cloud/documents/platform-application-detail): Verify quota units and remaining quota.
