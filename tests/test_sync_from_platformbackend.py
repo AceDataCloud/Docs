@@ -672,3 +672,13 @@ class RetiredPublicAssetTests(unittest.TestCase):
             content = page.read_text()
             self.assertIn(new_url, content)
             self.assertNotIn(old_url, content)
+
+
+class PublicationMetadataTests(unittest.TestCase):
+    def test_undocumented_api_is_not_in_the_public_schema(self):
+        with tempfile.TemporaryDirectory() as folder:
+            backend = Path(folder)
+            (backend / 'openapi').mkdir()
+            (backend / 'openapi/internal.json').write_text(json.dumps({'paths': {'/internal/route': {'post': {}}}}))
+            service = {'alias': 'sample', 'apis': [{'id': 'internal', 'documented': False}]}
+            self.assertIsNone(sync.merge_openapi_specs(backend, service))
