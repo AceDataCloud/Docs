@@ -1,9 +1,9 @@
 ---
-title: "Guide för Suno Studio-projektintegration"
+title: "Guide för integrering av Suno Studio-projekt"
 description: "Suno Music Generation API guide - Ace Data Cloud"
 ---
 
-Suno Studio-projektets API hanterar flerspåriga musikprojekt via en enda ingång:
+Suno Studio Project API hanterar musikprojekt med flera spår via en enda ingång:
 
 ```http
 POST /suno/projects
@@ -11,24 +11,24 @@ Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
 ```
 
-`action` i begäran avgör operationstypen. Project-primärnyckeln använder konsekvent `id`; `version_id` representerar den aktuella projektversionen, och alla ändrings- och exportoperationer måste skicka den senaste versionen för att undvika samtidiga överskrivningar.
+`action` i begäran avgör åtgärdstypen. Projektets primärnyckel använder konsekvent `id`; `version_id` representerar den aktuella projektversionen, och alla ändrings- och exportåtgärder måste skicka in den senaste versionen för att undvika samtidiga överskrivningar.
 
-## Översikt över operationer
+## Översikt över åtgärder
 
 | action             | Läge  | Användning                      |
 | ------------------ | --- | ----------------------- |
 | `create`           | Synkront  | Skapa ett tomt projekt                   |
-| `retrieve`         | Synkront  | Läs projektet och det fullständiga redigerbara `state`      |
-| `save`             | Synkront  | Spara projektets fullständiga tillstånd                |
+| `retrieve`         | Synkront  | Läs projektet och fullständigt redigerbart `state`      |
+| `save`             | Synkront  | Spara fullständigt projektstatus                |
 | `upload`           | Asynkront  | Initiera material som kan läggas till i projektet från en HTTPS-ljudadress |
 | `add_track`        | Asynkront  | Lägg till befintligt ljud i projektet               |
 | `generate_track`   | Asynkront  | Generera nya spårkandidater för ett angivet intervall            |
 | `replace_section`  | Asynkront  | Generera kandidater för lokal ersättning                |
-| `commit_candidate` | Asynkront  | Bekräfta den valda kandidaten i projektet             |
-| `remove_track`     | Synkront  | Ta bort det angivna spåret                  |
-| `render`           | Asynkront  | Exportera den sparade versionen som en komplett låt           |
+| `commit_candidate` | Asynkront  | Skicka den valda kandidaten till projektet             |
+| `remove_track`     | Synkront  | Ta bort angivet spår                  |
+| `render`           | Asynkront  | Exportera den sparade versionen som en fullständig låt           |
 
-Asynkrona operationer returnerar omedelbart `task_id`. Använd det kostnadsfria `/suno/tasks`-gränssnittet för polling, eller skicka `callback_url` för att ta emot resultat i sluttillståndet.
+Asynkrona åtgärder returnerar omedelbart `task_id`. Använd det kostnadsfria gränssnittet `/suno/tasks` för polling, eller skicka `callback_url` för att ta emot resultat i slutstatus.
 
 ## Skapa och läsa
 
@@ -39,13 +39,13 @@ Asynkrona operationer returnerar omedelbart `task_id`. Använd det kostnadsfria 
 }
 ```
 
-Alla ändringsoperationer bör skicka en unik `Idempotency-Key` Header. Efter lyckad skapelse är `data.id` i svaret Project ID. Ett nytt tomt projekt kanske saknar `version_id` före den första sparningen.
+Alla ändringsåtgärder bör skicka en unik `Idempotency-Key` Header. Efter att skapandet lyckats är `data.id` i svaret projekt-ID:t. Ett nytt tomt projekt kan sakna `version_id` före den första sparningen.
 
 ```json
 {"action":"retrieve","id":"PROJECT_ID"}
 ```
 
-Lässvaret innehåller det fullständiga `state`. Det rekommenderas att först läsa, sedan ändra och spara baserat på returvärdet; konstruera inte interna takt- och spårstrukturer manuellt från grunden.
+Lässvaret innehåller fullständigt `state`. Ett nytt tomt projekt returnerar `{"tracks":[],"timing":{"bps":2}}`, vilket kan användas direkt för den första sparningen. `timing.bps` anger slag per sekund, standardvärdet är 2 (120 BPM), och måste vara positivt; klippets `startBeats`, `endBeats` och `readStartBeats` använder projektets slagenheter, och du kan inte direkt använda taktpositioner i ljudanalysen som tidslinjekoordinater.
 
 ## Spara fullständigt tillstånd
 
@@ -55,11 +55,11 @@ Lässvaret innehåller det fullständiga `state`. Det rekommenderas att först l
   "id":"PROJECT_ID",
   "version_id":"CURRENT_VERSION_ID",
   "title":"Edited Project",
-  "state":{"tracks":[],"timing":{}}
+  "state":{"tracks":[],"timing":{"bps":2}}
 }
 ```
 
-Vid den första sparningen av ett nytt tomt projekt kan `version_id` utelämnas; efter att den första sparningen har skapat en version måste efterföljande sparningar skicka det senaste värdet. Om versionen redan har ändrats returnerar gränssnittet HTTP 409. Kör då `retrieve` igen, slå samman ändringarna och skicka sedan med en ny idempotensnyckel; försök inte blint igen med den gamla begäran.
+Den första sparningen av ett nytt tomt projekt kan utelämna `version_id`; efter att den första sparningen har skapat en version måste efterföljande sparningar skicka in det senaste värdet. Om versionen redan har ändrats returnerar gränssnittet HTTP 409. Kör då `retrieve` igen, slå samman ändringarna och skicka sedan med en ny idempotensnyckel; försök inte blint igen med den gamla begäran.
 
 ## Ladda upp och lägga till spår
 
@@ -73,7 +73,7 @@ Vid den första sparningen av ett nytt tomt projekt kan `version_id` utelämnas;
 }
 ```
 
-När uppladdningen är klar returnerar aktivitetsresultatet kandidatens `audio_id`. Lägg sedan till den i projektet:
+Efter att uppladdningen lyckats, läs ljud-ID:t från `response.data.candidate.audio_id`. Lägg sedan till det i projektet:
 
 ```json
 {
@@ -85,25 +85,29 @@ När uppladdningen är klar returnerar aktivitetsresultatet kandidatens `audio_i
 }
 ```
 
+Att lägga till ett spår behåller som standard ljudets uppspelningshastighet och omvandlar ljudlängden till antal slag enligt projektets `timing.bps`. Efter varje `save`, `add_track`, `commit_candidate` eller `remove_track` bör du använda det nya `version_id` i svaret.
+
 ## Generering och ersättning
 
-`generate_track` genererar spårkandidater för ett projektintervall; `replace_section` returnerar två kandidater för lokal ersättning. Ingen av de två operationerna väljer automatiskt det konstnärliga resultatet.
+`generate_track` genererar spårkandidater för ett projektintervall; `replace_section` returnerar två kandidater för lokal ersättning. Inget av de två åtgärderna väljer automatiskt det konstnärliga resultatet. Modellen måste använda offentliga namn: `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild` eller `chirp-v6-mini`; tillgängligheten för den specifika åtgärden beror fortfarande på uppgiftens slutstatus, och namn som inte stöds returnerar 400 före inskickning. Ingen annan modell används automatiskt i stället.
 
 ```json
 {
-  "action": "replace_section",
-  "id": "PROJECT_ID",
-  "version_id": "CURRENT_VERSION_ID",
-  "source_audio_id": "AUDIO_ID",
-  "start_seconds": 35.12,
-  "end_seconds": 48.76,
-  "model": "chirp-v6",
-  "replacement_lyrics": "nya låttextfragment",
-  "async": true
+  "action":"replace_section",
+  "id":"PROJECT_ID",
+  "version_id":"CURRENT_VERSION_ID",
+  "source_audio_id":"AUDIO_ID",
+  "start_seconds":35.12,
+  "end_seconds":48.76,
+  "model":"chirp-v6",
+  "replacement_lyrics":"nya textavsnitt",
+  "async":true
 }
 ```
 
-Bekräfta efter att kandidaten har valts:
+`generate_track` måste dessutom tillhandahålla `render_audio_id` (färdigt exporterat projektljud), `stem_control_tags` och källjudets `source_audio_id`. `batch_size` är 1–4, med standardvärdet 2; `start_seconds` och `end_seconds` är sekunder i källjudet. Ersättningsintervallet för `fixed=true` måste vara kortare än 26 sekunder.
+
+Skicka in efter att ha valt kandidat:
 
 ```json
 {
@@ -116,9 +120,11 @@ Bekräfta efter att kandidaten har valts:
 }
 ```
 
-Kandidaten är bunden till projektversionen vid genereringstillfället. När projektet redan har ändrats kan gamla kandidater inte bekräftas direkt.
+Kandidaten är bunden till projektversionen vid genereringstillfället. När projektet redan har ändrats kan den gamla kandidaten inte skickas in direkt.
 
-## Exportera komplett låt
+Kandidater för lokal ersättning skickas till originalspåret som innehåller det unika källklippet, kandidater för fullständiga takes behåller originalpositionen och ersätter originalklippet; intervallkandidater ersätter endast det begärda intervallet och behåller klippen före och efter. När längden inte kan matchas tillförlitligt returneras 400 och originalprojektet behålls; skicka då inte `start_beats` eller `end_beats`. Kandidater för nya spår bör skickas till ett tomt spår som sparats i förväg, använder som standard källklippets startpunkt eller skickar uttryckligen in ett intervall utan överlappning; överlappande befintliga klipp på samma spår returnerar 400. Generera inte först och skapa sedan ett nytt spår, eftersom versionsändringen då gör kandidaten föråldrad.
+
+## Exportera fullständig låt
 
 ```json
 {
@@ -132,6 +138,20 @@ Kandidaten är bunden till projektversionen vid genereringstillfället. När pro
 }
 ```
 
-Servern läser det auktoritativa projektstatuset för den angivna versionen och sammanställer exportparametrarna. Resultatet i sluttillståndet innehåller `render_id`, `audio_id`, `audio_url` och längd. Projektet är bundet till körmiljön vid skapandet och kan inte migreras mellan miljöer eller växla över automatiskt vid fel.
+Servern läser det auktoritativa projektstatuset för den angivna versionen och sammanställer exportparametrarna. När `start_beats` och `end_beats` utelämnas exporteras som standard från den tidigaste startpunkten till den senaste slutpunkten av alla hörbara klipp; tysta spår/klipp inkluderas inte, och när solo-spår finns väljs endast solo-spåren. Ett tomt projekt eller inga giltiga hörbara spår returnerar 400. Resultatet i slutstatus innehåller `render_id`, `audio_id`, `audio_url` och längd. Projektet är bundet till exekveringsmiljön vid skapandet och kan inte migreras mellan miljöer eller automatiskt växla vid fel.
 
-> Du får endast ladda upp eller behandla ljud som du har laglig användningsrätt till. Projekt-API:t är för närvarande i Beta; persistenta slutliga ljud-URL:er i viktiga resultat.
+> Du får endast ladda upp eller bearbeta ljud som du har laglig användningsrätt till. Project API är för närvarande i Beta; spara den slutliga ljud-URL:en i viktiga resultat permanent.
+
+## Polling och felåterställning
+
+```json
+{
+  "action": "retrieve",
+  "id": "TASK_ID"
+}
+```
+Skicka ovanstående begäran till `/suno/tasks`. Projects-uppgifter anses lyckade när `finished_at` finns och `response.success=true`; `response.success=false` betyder misslyckande. Att skicka in returnerar HTTP 200 eller `task_id` betyder endast att den har tagits emot, inte att ljudet är färdigt.
+
+Samma `Idempotency-Key` med samma begäran läser tillbaka det ursprungliga resultatet (inklusive misslyckanden) och genererar inte automatiskt på nytt eller debiterar dubbelt. För att uttryckligen försöka igen med en misslyckad operation, fråga först den ursprungliga uppgiften för att bekräfta misslyckandet och använd sedan en ny nyckel; skicka inte in igen medan den ursprungliga uppgiften fortfarande behandlas eller resultatet är osäkert.
+
+Felklassificeringar omfattar `studio_unavailable` / `studio_model_unavailable` (503, kan tillfälligt inte bearbetas eller modellen är otillgänglig), `studio_model_unsupported` (400, modellen stöder inte operationen), `studio_state_invalid` (400, projektstatusen eller exportomfånget är ogiltigt), `too_many_requests` (429), `studio_audio_unavailable` (403, refererat ljud kan inte användas för projektexport) och `content_rejected` (403). Behåll `trace_id` för felsökning.
