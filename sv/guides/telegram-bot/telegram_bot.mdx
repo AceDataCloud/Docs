@@ -1,0 +1,148 @@
+---
+title: "Guide för användning av Telegram-kontoproxy"
+description: "Telegram Account Proxy API guide - Ace Data Cloud"
+---
+
+Telegram-kontoproxyn tillhandahåller separata, permanenta MCP- och REST-gränssnitt för ditt personliga Telegram-konto. Varje instans betjänar endast ett konto; containern innehåller ingen AI och inloggningssessionen lagras i instansens separata beständiga volym.
+
+> Detta är inte en Telegram Bot API-bot. Använd inte för skräppost, massutskick till okända kontakter eller för att kringgå Telegram-begränsningar. Innan innehåll skickas, redigeras eller raderas till tredje part bör din Agent inhämta ett uttryckligt godkännande.
+
+## Distribution och inloggning
+
+1. Skapa en Telegram-kontoproxy i [Konsol → Applikationer](https://platform.acedata.cloud/console/applications), aktivera prenumerationen och klicka sedan på distribuera. Instansresurser konfigureras automatiskt av plattformen.
+2. När instansen är klar klickar du på ”Generera QR-kod för inloggning”. QR-koden är giltig under en kort tid och kan genereras igen efter att den har gått ut.
+3. Öppna **Inställningar → Enheter → Länka skrivbordsenhet** i Telegram och skanna QR-koden.
+4. Om statusen ändras till `password_required`, ange Telegrams lösenord för tvåstegsverifiering i konsolen. Lösenordet skickas endast till din klientinstans och skrivs inte till plattformskonfigurationen.
+5. När statusen ändras till `authenticated` visar konsolen det aktuella kontot, MCP-adressen och Bearer-åtkomsttokenen.
+
+Auktoriseringssessionen lagras i den beständiga volymen och återanvänds vid normala omstarter och uppgraderingar. ”Logga ut från konto” i konsolen anropar `/api/auth/logout` för att återkalla Telegram-sessionen; ”Förstör instans” raderar även arbetsbelastningen och den beständiga volymen.
+
+## Autentisering och hälsokontroll
+
+Förutom `/health` och `/readyz` kräver inloggnings-, REST- och MCP-gränssnitten:
+
+```text
+Authorization: Bearer <åtkomsttoken>
+```
+
+Tjänsten accepterar endast autentisering via begärandehuvud och stöder inte att tokenen läggs till i URL:en. Skydda den som du skyddar ditt kontolösenord.
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` betyder endast att HTTP-processen är aktiv:
+
+```json
+{"status":"ok"}
+```
+
+`/readyz` visar om MTProto-anslutningen är tillgänglig. När anslutningen är upprättad returneras HTTP 200, även om kontot fortfarande skannar QR-koden eller väntar på tvåstegsverifiering:
+
+```json
+{"status":"ready","gateway_connected":true,"login_state":"login_required"}
+```
+
+Vid frånkoppling returnerar Kubernetes direkta kontroll av Pod HTTP 503, och instansen återansluter automatiskt i bakgrunden. Vid denna tidpunkt tas Pod tillfälligt bort från den publika Service, och det garanteras inte att diagnostik-JSON kan läsas via instansdomänen; vänta i konsolen tills Deployment återgår till Ready. Vanliga värden för `login_state` omfattar `login_required`, `waiting_scan`, `password_required`, `authenticated`; du måste fortfarande nå `authenticated` innan kontoåtgärder för meddelanden utförs.
+
+## Anslut MCP-klienter
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <åtkomsttoken>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Cursor och andra klienter som stöder statiska begärandehuvuden
+
+Konfigurera Streamable HTTP-adressen enligt klientens aktuella dokumentation och lägg till begärandehuvudet `Authorization`. Klienter som stöder följande struktur kan till exempel använda:
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <åtkomsttoken>"}
+    }
+  }
+}
+```
+
+Detta är inte ett universellt konfigurationsformat för alla MCP-klienter. Claude Desktop / Claude.ai:s fjärranslutningar upprättas från molnet och läser inga HTTP-begärandehuvuden i den lokala `claude_desktop_config.json`; använd för närvarande Claude Code eller en klient som uttryckligen stöder denna funktion om statiska Bearer-begärandehuvuden krävs.
+
+## MCP-verktyg
+
+| Verktyg                         | Funktion                |
+| -------------------------- | ----------------- |
+| `telegram_whoami`          | Visa aktuellt auktoriserat konto          |
+| `telegram_list_chats`      | Lista senaste konversationer, med möjlighet att endast visa olästa      |
+| `telegram_contacts`        | Lista kontakter             |
+| `telegram_read_messages`   | Läs senaste meddelanden i angiven konversation       |
+| `telegram_search_messages` | Sök i en konversation eller i alla konversationer       |
+| `telegram_send_message`    | Skicka meddelande, med möjlighet att svara på ett angivet meddelande      |
+| `telegram_edit_message`    | Redigera meddelanden som skickats från det aktuella kontot       |
+| `telegram_delete_message`  | Radera meddelanden som du har behörighet att radera        |
+| `telegram_react`           | Reagera på meddelanden med Unicode-emoji |
+| `telegram_mark_read`       | Markera konversation som läst          |
+
+`target` kan vara ett konversations-ID, användarnamn eller **exakt** konversationsnamn; när namnet är tvetydigt bör ID eller användarnamn användas i första hand.
+
+## REST API
+
+Alla lyckade svar använder `{"data": ...}`, och misslyckade svar använder `{"error": "..."}`.
+
+### Exempel
+
+```bash
+# Aktuellt konto
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# Senaste konversationer
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# Skicka ett testmeddelande till Saved Messages
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### Fullständiga gränssnitt
+
+| Metod och sökväg                                                      | Huvudparametrar                      | Funktion                    |
+| ---------------------------------------------------------- | ------------------------- | --------------------- |
+| `POST /api/auth/qr`                                        | —                         | Generera URL för QR-kod för inloggning           |
+| `GET /api/auth/status`                                     | —                         | Fråga inloggningsstatus och kontoinformation           |
+| `POST /api/auth/password`                                  | `{password}`              | Skicka lösenord för tvåstegsverifiering              |
+| `POST /api/auth/logout`                                    | —                         | Återkalla sessionen som sparats av instansen             |
+| `GET /api/whoami`                                          | —                         | Visa aktuellt konto                |
+| `GET /api/chats`                                           | `?limit=&unread_only=`    | Lista konversationer och antal olästa              |
+| `GET /api/contacts`                                        | —                         | Lista kontakter                 |
+| `GET /api/chats/{target}/messages`                         | `?limit=`                 | Läs meddelanden                  |
+| `GET /api/messages/search`                                 | `?q=&target=&limit=`      | Sök meddelanden; sök över konversationer om target utelämnas |
+| `POST /api/messages`                                       | `{target,text,reply_to?}` | Skicka eller svara på meddelanden               |
+| `PATCH /api/chats/{target}/messages/{message_id}`          | `{text}`                  | Redigera meddelanden                  |
+| `DELETE /api/chats/{target}/messages/{message_id}`         | —                         | Radera meddelanden                  |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}`                 | Lägg till Unicode-emojireaktion       |
+| `POST /api/chats/{target}/read`                            | —                         | Markera konversation som läst                |
+
+## Vanliga frågor
+- **401**: Bearer-token saknas eller är felaktig. Bekräfta att token placeras i begäranshuvudet, inte som en URL-frågeparameter.
+- **503**: Proxy-åtkomsttoken är inte konfigurerad, eller Telegram-klienten är ännu inte redo. Kontrollera först `/readyz`; om proxy-åtkomsttoken inte är konfigurerad kommer skyddade gränssnitt också att returnera 503.
+- **400**: Parametrar eller JSON är ogiltiga; sökning måste ange `q`, och `limit` måste vara ett heltal större än eller lika med 1.
+- **403 / 404**: Det aktuella kontot saknar behörighet, eller target- / message-ID:t finns inte.
+- **429**: Telegrams frekvensbegränsning har utlösts. Läs `retry_after` och vänta, återförsök inte parallellt.
+- **QR-koden slutförs aldrig**: Generera QR-koden igen och bekräfta att Telegrams skanningsalternativ ”Länka skrivbordsenhet” används.
+- **Inloggning krävs igen efter omstart**: Kontrollera att instansens beständiga volym fungerar korrekt; efter aktiv utloggning, återkallande av sessionen i Telegrams enhetslista eller när sessionen har blivit ogiltig måste du skanna igen.
+
+## Verifieringsomfång
+
+Källkoden och de automatiserade testerna täcker inloggningsstatus, Bearer fail-close, validering av REST-parametrar, felmappning och implementering av sessionspersistens. I produktion bör du fortfarande först slutföra smoke-tester för skrivskyddad åtkomst samt skapande/redigering/borttagning av meddelanden i `target=me` (Saved Messages), innan Agent tillåts att hantera tredjepartssessioner.

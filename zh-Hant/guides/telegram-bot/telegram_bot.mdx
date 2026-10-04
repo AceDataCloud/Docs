@@ -1,0 +1,148 @@
+---
+title: "Telegram 帳號代理使用指南"
+description: "Telegram Account Proxy 整合指南 - Ace Data Cloud"
+---
+
+Telegram 帳號代理為你本人擁有的個人 Telegram 帳號提供獨立、常駐的 MCP 與 REST 介面。每個實例只服務一個帳號；容器內不含 AI，登入工作階段保存在該實例的獨立持久磁碟區中。
+
+> 這不是 Telegram Bot API 機器人。請勿用於垃圾訊息、批量冷發或繞過 Telegram 限制。向第三方傳送、編輯或刪除內容前，應由你的 Agent 取得明確確認。
+
+## 部署與登入
+
+1. 在[控制台 → 應用程式](https://platform.acedata.cloud/console/applications)建立 Telegram 帳號代理，開通訂閱後點擊部署。實例資源由平台自動設定。
+2. 實例就緒後點擊「產生登入 QR Code」。QR Code 短期有效，過期後可重新產生。
+3. 在 Telegram 開啟**設定 → 裝置 → 連結桌面裝置**並掃描 QR Code。
+4. 如果狀態變為 `password_required`，在控制台輸入 Telegram 兩步驟驗證密碼。密碼只提交到你的租戶實例，不會寫入平台設定。
+5. 狀態變為 `authenticated` 後，控制台顯示目前帳號、MCP 位址和 Bearer 存取權杖。
+
+授權工作階段儲存在持久磁碟區中，正常重新啟動和升級會重複使用它。控制台「登出帳號」會呼叫 `/api/auth/logout` 撤銷 Telegram 工作階段；「銷毀實例」還會刪除工作負載與持久磁碟區。
+
+## 驗證與健康檢查
+
+除 `/health` 和 `/readyz` 外，登入、REST 與 MCP 介面都要求：
+
+```text
+Authorization: Bearer <訪問令牌>
+```
+
+服務只接受請求標頭驗證，不支援把權杖拼接到 URL。請像保護帳號密碼一樣保護它。
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` 只表示 HTTP 程序存活：
+
+```json
+{"status":"ok"}
+```
+
+`/readyz` 表示 MTProto 連線是否可用。已連線時回傳 HTTP 200，即使帳號仍在掃碼或等待兩步驟驗證：
+
+```json
+{"status":"ready","gateway_connected":true,"login_state":"login_required"}
+```
+
+斷線時，Kubernetes 對 Pod 的直接探測回傳 HTTP 503，實例會在背景自動重新連線。此時 Pod 會被暫時移出公網 Service，不保證能透過實例網域讀取診斷 JSON；請在控制台等待 Deployment 恢復 Ready。`login_state` 常見值包括 `login_required`、`waiting_scan`、`password_required`、`authenticated`；進行帳號訊息操作前仍需達到 `authenticated`。
+
+## 連線 MCP 用戶端
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <訪問令牌>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Cursor 等支援靜態請求標頭的用戶端
+
+依用戶端目前文件設定 Streamable HTTP 位址，並新增 `Authorization` 請求標頭。例如支援下列結構的用戶端可使用：
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <訪問令牌>"}
+    }
+  }
+}
+```
+
+這不是所有 MCP 用戶端的通用設定格式。Claude Desktop / Claude.ai 的遠端連接器由雲端建立，不讀取本機 `claude_desktop_config.json` 中的任何 HTTP 請求標頭；目前如需靜態 Bearer 請求標頭，請使用 Claude Code 或明確支援該能力的用戶端。
+
+## MCP 工具
+
+| 工具                         | 作用                |
+| -------------------------- | ----------------- |
+| `telegram_whoami`          | 查看目前授權帳號          |
+| `telegram_list_chats`      | 列出最近交談，可僅看未讀      |
+| `telegram_contacts`        | 列出聯絡人             |
+| `telegram_read_messages`   | 讀取指定交談的最近訊息       |
+| `telegram_search_messages` | 搜尋一個交談或全部交談       |
+| `telegram_send_message`    | 傳送訊息，可回覆指定訊息      |
+| `telegram_edit_message`    | 編輯目前帳號傳送的訊息       |
+| `telegram_delete_message`  | 刪除有權限刪除的訊息        |
+| `telegram_react`           | 使用 Unicode 表情回應訊息 |
+| `telegram_mark_read`       | 將交談標記為已讀          |
+
+`target` 可以是交談 ID、使用者名稱或**精確**交談名稱；名稱有歧義時優先使用 ID 或使用者名稱。
+
+## REST API
+
+所有成功回應使用 `{"data": ...}`，失敗回應使用 `{"error": "..."}`。
+
+### 範例
+
+```bash
+# 目前帳號
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 最近交談
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 給 Saved Messages 傳送一則測試訊息
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### 完整介面
+
+| 方法與路徑                                                      | 主要參數                      | 作用                    |
+| ---------------------------------------------------------- | ------------------------- | --------------------- |
+| `POST /api/auth/qr`                                        | —                         | 產生登入 QR Code URL      |
+| `GET /api/auth/status`                                     | —                         | 查詢登入狀態與帳號資訊           |
+| `POST /api/auth/password`                                  | `{password}`              | 提交兩步驟驗證密碼             |
+| `POST /api/auth/logout`                                    | —                         | 撤銷實例儲存的工作階段           |
+| `GET /api/whoami`                                          | —                         | 查看目前帳號                |
+| `GET /api/chats`                                           | `?limit=&unread_only=`    | 列出交談與未讀數              |
+| `GET /api/contacts`                                        | —                         | 列出聯絡人                 |
+| `GET /api/chats/{target}/messages`                         | `?limit=`                 | 讀取訊息                  |
+| `GET /api/messages/search`                                 | `?q=&target=&limit=`      | 搜尋訊息；省略 target 時跨交談搜尋 |
+| `POST /api/messages`                                       | `{target,text,reply_to?}` | 傳送或回覆訊息               |
+| `PATCH /api/chats/{target}/messages/{message_id}`          | `{text}`                  | 編輯訊息                  |
+| `DELETE /api/chats/{target}/messages/{message_id}`         | —                         | 刪除訊息                  |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}`                 | 新增 Unicode 表情回應       |
+| `POST /api/chats/{target}/read`                            | —                         | 標記交談已讀                |
+
+## 常見問題
+- **401**：Bearer 權杖缺失或錯誤。確認權杖放在請求標頭，不是 URL 查詢參數。
+- **503**：代理存取權杖未設定，或 Telegram 用戶端尚未就緒。先檢查 `/readyz`；若代理存取權杖未設定，受保護介面也會回傳 503。
+- **400**：參數或 JSON 無效；搜尋必須提供 `q`，`limit` 必須是大於等於 1 的整數。
+- **403 / 404**：目前帳號沒有權限，或 target / message ID 不存在。
+- **429**：觸發 Telegram 頻率限制。讀取 `retry_after` 並等待，不要並行重試。
+- **QR Code 一直未完成**：重新產生 QR Code，並確認使用的是 Telegram「連結桌面裝置」掃碼入口。
+- **重新啟動後要求重新登入**：檢查執行個體持久性磁碟區是否正常；主動登出、在 Telegram 裝置列表撤銷工作階段或工作階段失效後需要重新掃碼。
+
+## 驗證範圍
+
+原始碼和自動化測試涵蓋登入狀態、Bearer fail-close、REST 參數驗證、錯誤對應與工作階段持久化實作。生產使用仍應先在 `target=me`（Saved Messages）完成唯讀與訊息建立/編輯/刪除 smoke，再允許 Agent 操作第三方工作階段。

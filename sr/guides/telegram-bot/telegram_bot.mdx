@@ -1,0 +1,148 @@
+---
+title: "Vodič za korišćenje Telegram proxyja za nalog"
+description: "Telegram Account Proxy API guide - Ace Data Cloud"
+---
+
+Telegram proxy za nalog pruža nezavisne, stalno dostupne MCP i REST interfejse za lični Telegram nalog koji posedujete. Svaka instanca opslužuje samo jedan nalog; kontejner ne sadrži AI, a sesija prijave se čuva na zasebnom trajnom volumenu te instance.
+
+> Ovo nije Telegram Bot API bot. Nemojte koristiti za spam poruke, masovno slanje hladnih poruka ili zaobilaženje Telegram ograničenja. Pre slanja, uređivanja ili brisanja sadržaja trećim stranama, vaš Agent treba da pribavi izričitu potvrdu.
+
+## Postavljanje i prijava
+
+1. Kreirajte Telegram proxy za nalog u [Konzola → Aplikacije](https://platform.acedata.cloud/console/applications), a nakon aktiviranja pretplate kliknite na postavljanje. Resurse instance platforma automatski konfiguriše.
+2. Kada instanca bude spremna, kliknite na „Generiši QR kod za prijavu“. QR kod važi kratko vreme i može se ponovo generisati nakon isteka.
+3. U Telegramu otvorite **Podešavanja → Uređaji → Poveži uređaj za računar** i skenirajte QR kod.
+4. Ako se status promeni u `password_required`, unesite lozinku za Telegram verifikaciju u dva koraka u konzoli. Lozinka se šalje samo instanci vašeg zakupca i neće biti upisana u konfiguraciju platforme.
+5. Nakon što status postane `authenticated`, konzola prikazuje trenutni nalog, MCP adresu i Bearer pristupni token.
+
+Sesija autorizacije se čuva na trajnom volumenu i ponovo se koristi pri normalnim restartovanjima i nadogradnjama. Opcija „Odjavi nalog“ u konzoli poziva `/api/auth/logout` da opozove Telegram sesiju; opcija „Uništi instancu“ takođe briše radno opterećenje i trajni volumen.
+
+## Autentikacija i provera zdravlja
+
+Osim za `/health` i `/readyz`, prijava, REST i MCP interfejsi svi zahtevaju:
+
+```text
+Authorization: Bearer <访问令牌>
+```
+
+Servis prihvata autentikaciju samo putem zaglavlja zahteva i ne podržava dodavanje tokena u URL. Zaštitite ga kao što štitite lozinku naloga.
+
+```bash
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/health
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/readyz
+```
+
+`/health` samo označava da je HTTP proces aktivan:
+
+```json
+{"status":"ok"}
+```
+
+`/readyz` označava da li je MTProto veza dostupna. Kada je povezan, vraća HTTP 200, čak i ako nalog još uvek skenira QR kod ili čeka verifikaciju u dva koraka:
+
+```json
+{"status":"ready","gateway_connected":true,"login_state":"login_required"}
+```
+
+Kada je veza prekinuta, Kubernetes direktna provera Poda vraća HTTP 503, a instanca će se automatski ponovo povezati u pozadini. U tom trenutku Pod će biti privremeno uklonjen iz javnog Service-a, pa nije garantovano da se dijagnostički JSON može pročitati preko domena instance; sačekajte u konzoli da Deployment ponovo postane Ready. Uobičajene vrednosti `login_state` uključuju `login_required`, `waiting_scan`, `password_required`, `authenticated`; pre izvođenja operacija nad porukama naloga i dalje je potrebno dostići `authenticated`.
+
+## Povezivanje MCP klijenta
+
+### Claude Code
+
+```bash
+claude mcp add \
+  --transport http \
+  --header "Authorization: Bearer <访问令牌>" \
+  telegram \
+  https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp
+```
+
+### Cursor i drugi klijenti koji podržavaju statička zaglavlja zahteva
+
+Podesite Streamable HTTP adresu prema trenutnoj dokumentaciji klijenta i dodajte zaglavlje zahteva `Authorization`. Na primer, klijenti koji podržavaju sledeću strukturu mogu koristiti:
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "http",
+      "url": "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/mcp",
+      "headers": {"Authorization": "Bearer <访问令牌>"}
+    }
+  }
+}
+```
+
+Ovo nije univerzalni format konfiguracije za sve MCP klijente. Udaljene konektore za Claude Desktop / Claude.ai uspostavlja cloud i oni ne čitaju nikakva lokalna HTTP zaglavlja zahteva iz `claude_desktop_config.json`; ako vam je trenutno potrebno statičko Bearer zaglavlje zahteva, koristite Claude Code ili klijent koji izričito podržava tu mogućnost.
+
+## MCP alati
+
+| Alat                         | Funkcija                |
+| -------------------------- | ----------------- |
+| `telegram_whoami`          | Prikazuje trenutno autorizovani nalog          |
+| `telegram_list_chats`      | Navodi nedavne razgovore, uz opciju prikaza samo nepročitanih      |
+| `telegram_contacts`        | Navodi kontakte             |
+| `telegram_read_messages`   | Čita nedavne poruke iz navedenog razgovora       |
+| `telegram_search_messages` | Pretražuje jedan razgovor ili sve razgovore       |
+| `telegram_send_message`    | Šalje poruku, uz mogućnost odgovora na navedenu poruku      |
+| `telegram_edit_message`    | Uređuje poruku poslatu sa trenutnog naloga       |
+| `telegram_delete_message`  | Briše poruke za koje postoje dozvole za brisanje        |
+| `telegram_react`           | Odgovara na poruku koristeći Unicode emoji |
+| `telegram_mark_read`       | Označava razgovor kao pročitan          |
+
+`target` može biti ID razgovora, korisničko ime ili **tačan** naziv razgovora; kada je naziv dvosmislen, prednost imaju ID ili korisničko ime.
+
+## REST API
+
+Svi uspešni odgovori koriste `{"data": ...}`, a odgovori o grešci koriste `{"error": "..."}`.
+
+### Primeri
+
+```bash
+# 当前账号
+curl https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/whoami \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 最近会话
+curl "https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/chats?limit=20&unread_only=false" \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN"
+
+# 给 Saved Messages 发一条测试消息
+curl -X POST https://telegram-bot-xxxxxxxxxxxx.app.acedata.cloud/api/messages \
+  -H "Authorization: Bearer $PROXY_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"me","text":"Hello from my Telegram proxy"}'
+```
+
+### Kompletni interfejsi
+
+| Metoda i putanja                                                      | Glavni parametri                      | Funkcija                    |
+| ---------------------------------------------------------- | ------------------------- | --------------------- |
+| `POST /api/auth/qr`                                        | —                         | Generiše URL QR koda za prijavu           |
+| `GET /api/auth/status`                                     | —                         | Proverava status prijave i informacije o nalogu           |
+| `POST /api/auth/password`                                  | `{password}`              | Šalje lozinku za verifikaciju u dva koraka              |
+| `POST /api/auth/logout`                                    | —                         | Opoziva sesiju sačuvanu u instanci             |
+| `GET /api/whoami`                                          | —                         | Prikazuje trenutni nalog                |
+| `GET /api/chats`                                           | `?limit=&unread_only=`    | Navodi razgovore i broj nepročitanih              |
+| `GET /api/contacts`                                        | —                         | Navodi kontakte                 |
+| `GET /api/chats/{target}/messages`                         | `?limit=`                 | Čita poruke                  |
+| `GET /api/messages/search`                                 | `?q=&target=&limit=`      | Pretražuje poruke; pretražuje kroz razgovore kada je target izostavljen |
+| `POST /api/messages`                                       | `{target,text,reply_to?}` | Šalje poruku ili odgovor               |
+| `PATCH /api/chats/{target}/messages/{message_id}`          | `{text}`                  | Uređuje poruku                  |
+| `DELETE /api/chats/{target}/messages/{message_id}`         | —                         | Briše poruku                  |
+| `POST /api/chats/{target}/messages/{message_id}/reactions` | `{emoji}`                 | Dodaje Unicode emoji reakciju       |
+| `POST /api/chats/{target}/read`                            | —                         | Označava razgovor kao pročitan                |
+
+## Često postavljana pitanja
+- **401**：Bearer token nedostaje ili je pogrešan. Potvrdite da je token postavljen u zaglavlju zahteva, a ne kao URL parametar upita.
+- **503**：Pristupni token za proxy nije konfigurisan ili Telegram klijent još nije spreman. Prvo proverite `/readyz`; ako pristupni token za proxy nije konfigurisan, zaštićeni interfejsi će takođe vratiti 503.
+- **400**：Parametri ili JSON nisu validni; pretraga mora da sadrži `q`, a `limit` mora biti ceo broj veći ili jednak 1.
+- **403 / 404**：Trenutni nalog nema dozvolu ili target / message ID ne postoji.
+- **429**：Aktivirano je Telegram ograničenje učestalosti. Pročitajte `retry_after` i sačekajte, nemojte ponavljati pokušaje istovremeno.
+- **QR kod stalno nije završen**：Ponovo generišite QR kod i potvrdite da se koristi Telegram ulaz za skeniranje „Poveži desktop uređaj“.
+- **Nakon ponovnog pokretanja se zahteva ponovna prijava**：Proverite da li trajni volumen instance radi ispravno; nakon aktivnog odjavljivanja, opozivanja sesije na Telegram listi uređaja ili isteka sesije, potrebno je ponovo skenirati kod.
+
+## Opseg verifikacije
+
+Izvorni kod i automatizovani testovi pokrivaju status prijave, Bearer fail-close, REST validaciju parametara, mapiranje grešaka i implementaciju trajnosti sesije. U produkciji bi ipak prvo trebalo završiti smoke test čitanja i kreiranja/uređivanja/brisanja poruka na `target=me` (Saved Messages), pre nego što se Agent-u dozvoli rad sa sesijama trećih strana.
