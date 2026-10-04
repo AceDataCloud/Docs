@@ -17,6 +17,9 @@ links with `mint broken-links`. Navigation and site settings live in `docs.json`
   `mcp/overview.mdx` is explicitly hand-authored and preserved. Public source
   records without an old service route use `guides/platform/<source-key>.mdx`.
   Existing routes and the exact Coding route map are preserved.
+- Per-locale API reference indexes are generated from the published specs.
+  Source-file links are resolved to the correct locale route; platform-relative
+  document links are made absolute instead of being interpreted as Docs routes.
 - `openapi/` contains specs for APIs with public platform document records;
   private markers and temporary publication holds are still enforced.
 - Generated navigation is reconciled atomically with pages: Coding translations,
@@ -51,8 +54,8 @@ statuses abort publication; **0** means every expected page is current.
 The workflow retains `docs-sync-report` for 14 days and puts pending page keys,
 locales, and reasons in the job summary. Generated output is staged and validated
 before an atomic publish; interruption recovery includes navigation and all MCP
-locales. A separate MDX compilation gate parses all generated pages before Git
-push. Plain Markdown braces are escaped outside code rather than interpreted as
+locales. A separate MDX and local-link gate checks every site page before Git
+push, including editorial entry points. Plain Markdown braces are escaped outside code rather than interpreted as
 JavaScript expressions. Customer example sanitization remains mandatory.
 
 ## Verification
