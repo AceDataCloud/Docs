@@ -12,6 +12,8 @@ links with `mint broken-links`. Navigation and site settings live in `docs.json`
   It includes exact-locale content, source SHA-256, and translation readiness.
   Display-oriented API/sibling relations are not a publication contract.
 - Every configured locale's `guides/` and `mcp/` directories are generated.
+  Existing Greek, Finnish and Serbian directories are also reconciled because
+  their unlisted URLs remain accessible, without adding them to the language menu.
   `mcp/overview.mdx` is explicitly hand-authored and preserved. Public source
   records without an old service route use `guides/platform/<source-key>.mdx`.
   Existing routes and the exact Coding route map are preserved.
@@ -49,13 +51,18 @@ statuses abort publication; **0** means every expected page is current.
 The workflow retains `docs-sync-report` for 14 days and puts pending page keys,
 locales, and reasons in the job summary. Generated output is staged and validated
 before an atomic publish; interruption recovery includes navigation and all MCP
-locales. Customer example sanitization remains mandatory.
+locales. A separate MDX compilation gate parses all generated pages before Git
+push. Plain Markdown braces are escaped outside code rather than interpreted as
+JavaScript expressions. Customer example sanitization remains mandatory.
 
 ## Verification
 
 ```sh
 python -m compileall -q scripts tests
 python -m unittest
+npm ci --ignore-scripts
+node --test tests/mdx-validation.test.mjs
+node scripts/validate_mdx.mjs /path/to/generated-preview
 mint broken-links
 ```
 
