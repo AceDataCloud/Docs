@@ -1,5 +1,6 @@
 import copy
 import json
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,11 +17,60 @@ def record(key, source="# Source", content="# Translated", status="ready"):
 
 def catalog(language="en", records=None):
     records = records or [record("development_codex")]
-    return {"schema_version": 1, "source_language": "zh-cn", "language": language,
-            "catalog_hash": "a" * 64, "public_api_ids": ["public-api"], "items": records}
+    items = [{"id": f"doc-{i}", "alias": f"guide-{i}", "private": False, "api_id": None,
+              "content": item["content"] if item["content"] is not None else "# Display fallback",
+              "content_source": {**{k: v for k, v in item.items() if k != "content"}, "language": language}}
+             for i, item in enumerate(records)]
+    items.append({"id": "api-doc", "alias": "api", "private": False, "api_id": "public-api", "content_source": None})
+    return {"count": len(items), "items": items}
 
 
 class PublicationTests(unittest.TestCase):
+    def test_existing_document_list_is_paginated_without_a_new_endpoint(self):
+        pages = [{"count": 3, "items": [{"id": "a"}, {"id": "b"}]},
+                 {"count": 3, "items": [{"id": "c"}]}]
+        urls = []
+
+        def open_page(request, timeout):
+            self.assertEqual(request.get_header("Origin"), "https://platform.acedata.cloud")
+            urls.append(request.full_url)
+            return io.BytesIO(json.dumps(pages.pop(0)).encode())
+
+        with patch.object(sync, "urlopen", side_effect=open_page):
+            result = sync.fetch_document_list("en")
+        self.assertEqual(len(result["items"]), 3)
+        self.assertEqual(urls, ["https://platform.acedata.cloud/api/v1/documents/?lang=en&limit=1000&offset=0",
+                                "https://platform.acedata.cloud/api/v1/documents/?lang=en&limit=1000&offset=2"])
+
+    def test_pagination_rejects_a_changed_or_incomplete_document_list(self):
+        for last in [{"count": 3, "items": []}, {"count": 3, "items": [{"id": "a"}]},
+                     {"count": 4, "items": [{"id": "c"}]}]:
+            pages = [{"count": 3, "items": [{"id": "a"}, {"id": "b"}]}, last]
+            with patch.object(sync, "urlopen", side_effect=lambda *a, **kw: io.BytesIO(json.dumps(pages.pop(0)).encode())):
+                with self.assertRaises(RuntimeError):
+                    sync.fetch_document_list("en")
+
+    def test_metadata_is_required_and_private_documents_are_not_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = catalog()
+            data["items"].append({"id": "private", "private": True, "api_id": "private-api"})
+            data["count"] += 1
+            (root / "en.json").write_text(json.dumps(data))
+            self.assertEqual(sync.load_publication_catalog("en", root)["public_api_ids"], ["public-api"])
+            del data["items"][0]["content_source"]
+            (root / "en.json").write_text(json.dumps(data))
+            with self.assertRaisesRegex(RuntimeError, "lacks content_source"):
+                sync.load_publication_catalog("en", root)
+
+    def test_shared_source_aliases_are_deduplicated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "en.json").write_text(json.dumps(catalog(records=[record("development_codex")] * 2)))
+            records = sync.load_publication_catalog("en", root)["records"]
+            self.assertEqual(list(records), ["development_codex"])
+            self.assertEqual(records["development_codex"]["aliases"], ["guide-0", "guide-1"])
+
     def test_source_and_platform_links_resolve_without_rewriting_examples(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -93,7 +143,7 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(set(actual["records"]), {"development_codex", "mcp_seedance"})
 
     def test_catalog_rejects_wrong_locale_duplicate_identity_and_corrupt_content(self):
-        payloads = [catalog("zh-cn"), catalog(records=[record("development_codex")] * 2), catalog()]
+        payloads = [catalog("zh-cn"), catalog(records=[record("development_codex"), record("development_codex", content="# Conflicting")]), catalog()]
         payloads[-1]["items"][0]["content"] = "Tampered"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -106,7 +156,7 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             en, zh = catalog(), catalog("zh-cn")
-            zh["items"][0]["source_hash"] = "b" * 64
+            zh["items"][0]["content_source"]["source_hash"] = "b" * 64
             for language, payload in [("en", en), ("zh-cn", zh)]:
                 (root / f"{language}.json").write_text(json.dumps(payload))
             with self.assertRaisesRegex(RuntimeError, "changed between"):
