@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import copy
 import html
+import hashlib
 import json
 import os
 import re
@@ -27,7 +28,7 @@ from urllib.request import Request, urlopen
 START = time.time()
 
 BASE_URL = "https://api.acedata.cloud"
-DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/?limit=1000"
+PUBLICATION_URL = "https://platform.acedata.cloud/api/v1/documents/publication/"
 SHARED_GUIDE_ALIASES = {"kling_assets": ("kling_elements", "kling_voices")}
 TRANSACTION_FILE = ".docs-sync-transaction.json"
 BACKUP_DIR = ".docs-sync-backup"
@@ -398,7 +399,7 @@ def validate_manifest(manifest: Any) -> None:
             raise RuntimeError("Invalid Docs sync transaction item")
         relative = Path(item["relative"])
         parts = relative.parts
-        allowed = relative == Path("openapi") or (len(parts) == 2 and parts[1] == "guides") or relative == Path("zh-Hans/mcp")
+        allowed = relative in {Path("openapi"), Path("docs.json")} or (len(parts) == 2 and parts[0] in LANGUAGE_SOURCE_DIRS and parts[1] in {"guides", "mcp"})
         if relative.is_absolute() or ".." in parts or not allowed or item["relative"] in seen:
             raise RuntimeError("Unsafe Docs sync transaction path")
         seen.add(item["relative"])
@@ -788,8 +789,7 @@ def merge_openapi_specs(backend_dir: Path, service: dict[str, Any]) -> dict[str,
             continue
         spec = load_openapi_spec(backend_dir, api["id"])
         if not spec:
-            log(f"  WARNING: missing OpenAPI spec for {api.get('id')} ({service.get('alias')})")
-            continue
+            raise RuntimeError(f"Missing public OpenAPI spec for {api.get('id')} ({service.get('alias')})")
         if spec.get("x-private"):
             continue
         merged["paths"].update({path: operation for path, operation in spec.get("paths", {}).items()
@@ -922,66 +922,64 @@ def build_doc_service_map(
             result[doc_key] = matched_alias
             continue
 
-        log(f"  WARNING: unmapped development doc {doc_key}, skipping")
         result[doc_key] = None
 
     return result
 
 
-def index_localized_guides(payload: Any, language: str) -> dict[str, dict[str, str]]:
-    items = payload.get("items") if isinstance(payload, dict) else payload
-    if not isinstance(items, list):
-        raise RuntimeError(f"Invalid document feed for {language}")
-
-    guides: dict[str, dict[str, str]] = {}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        api = item.get("api")
-        sibling = item.get("sibling")
-        if not isinstance(api, dict) or not isinstance(sibling, dict) or not sibling.get("content"):
-            continue
-
-        candidates = [item.get("alias", ""), sibling.get("alias", "").removesuffix("-integration")]
-        api_path = (api.get("path") or "").strip("/").replace("/", "_")
-        definition = api.get("definition") or {}
-        operation = definition.get("paths", {}).get(api.get("path"), {}).get((api.get("method") or "").lower(), {})
-        operation_id = operation.get("operationId")
-        namespace = (api.get("path") or "").strip("/").split("/")[0]
-        if isinstance(operation_id, str) and operation_id.startswith(namespace + "_"):
-            candidates.append(operation_id)
-
-        guide = {
-            "content": sibling["content"],
-            "title": sibling.get("title") or sibling.get("name") or "",
-        }
-        for candidate in candidates:
-            if candidate:
-                key = normalize(candidate)
-                existing = guides.get(key)
-                if existing and existing != guide:
-                    raise RuntimeError(f"Conflicting localized guide key {candidate!r} for {language}")
-                guides[key] = guide
-        if api_path:
-            guides.setdefault(normalize(api_path), guide)
-
-    if not guides:
-        raise RuntimeError(f"No localized guides found for {language}")
-    return guides
+def load_publication_catalog(language: str, catalog_dir: Path | None = None) -> dict[str, Any]:
+    language = language.lower()
+    if catalog_dir:
+        payload = load_json(catalog_dir / f"{language}.json")
+    else:
+        request = Request(f"{PUBLICATION_URL}?lang={language}")
+        for attempt in range(3):
+            try:
+                with urlopen(request, timeout=60) as response:
+                    payload = json.load(response)
+                break
+            except (HTTPError, URLError, RemoteDisconnected, OSError, json.JSONDecodeError):
+                if attempt == 2:
+                    raise
+                time.sleep(2**attempt)
+    if (not isinstance(payload, dict) or payload.get("schema_version") != 1
+            or payload.get("language") != language or payload.get("source_language") != "zh-cn"
+            or not isinstance(payload.get("items"), list) or not payload["items"]
+            or not isinstance(payload.get("public_api_ids"), list)
+            or not re.fullmatch(r"[0-9a-f]{64}", payload.get("catalog_hash", ""))):
+        raise RuntimeError(f"Invalid publication catalog for {language}")
+    records = {}
+    for item in payload["items"]:
+        key = item.get("source_key", "")
+        if (not re.fullmatch(r"(?:development_|mcp_)[a-zA-Z0-9_-]+|x402_integration_guide", key)
+                or key in records or item.get("status") not in {"ready", "missing", "stale", "missing_source"}):
+            raise RuntimeError(f"Invalid or duplicate publication identity for {language}")
+        if item.get("source_hash") is not None and not re.fullmatch(r"[0-9a-f]{64}", item["source_hash"]):
+            raise RuntimeError(f"Invalid source hash for {language}/{key}")
+        if item["status"] == "ready":
+            body = item.get("content")
+            if not isinstance(body, str) or not body or digest(body) != item.get("content_hash"):
+                raise RuntimeError(f"Invalid publication content for {language}/{key}")
+        records[key] = item
+    return {**payload, "records": records}
 
 
-def load_localized_guides(language: str) -> dict[str, dict[str, str]]:
-    request = Request(DOCUMENTS_URL, headers={"Accept-Language": language})
-    for attempt in range(3):
-        try:
-            with urlopen(request, timeout=60) as response:
-                payload = json.load(response)
-            return index_localized_guides(payload, language)
-        except (HTTPError, URLError, RemoteDisconnected, OSError, RuntimeError, json.JSONDecodeError):
-            if attempt == 2:
-                raise
-            time.sleep(2**attempt)
-    raise AssertionError("unreachable")
+def digest(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def load_publication_catalogs(languages: list[str], catalog_dir: Path | None = None) -> dict[str, Any]:
+    catalogs = {}
+    identity = None
+    for language in languages:
+        catalog = load_publication_catalog(LANGUAGE_SOURCE_DIRS[language], catalog_dir)
+        current = (catalog["catalog_hash"], sorted(catalog["public_api_ids"]),
+                   sorted((key, item["source_hash"]) for key, item in catalog["records"].items()))
+        if identity is not None and current != identity:
+            raise RuntimeError("Public source catalog changed between locale reads; retry with a consistent snapshot")
+        identity = current
+        catalogs[language] = catalog
+    return catalogs
 
 
 def guide_description(output_language: str, service_name: str) -> str:
@@ -1033,106 +1031,143 @@ def sync_openapi(backend_dir: Path, output_dir: Path, services: list[dict[str, A
     log(f"  wrote {generated} OpenAPI specs")
 
 
-def sync_guides(
-    backend_dir: Path,
-    output_dir: Path,
-    services_by_alias: dict[str, dict[str, Any]],
-    doc_service_map: dict[str, str | None],
-    languages: list[str],
-    fallback_root: Path | None = None,
-    exact_records: dict[str, dict[str, str]] | None = None,
-) -> None:
-    log("Syncing localized guides")
-    total = 0
-    source_dir = backend_dir / "docs"
-    markdown_files = sorted(source_dir.glob("development_*.md"))
-    if not markdown_files:
-        raise RuntimeError(f"No development docs found in {source_dir}")
-
-    for output_language in languages:
-        source_language = LANGUAGE_SOURCE_DIRS.get(output_language, output_language)
-        localized_guides = None if output_language == "zh-Hans" else load_localized_guides(source_language)
-        language_total = 0
-        missing_guides: list[str] = []
-
-        for markdown_file in markdown_files:
-            doc_key = markdown_file.stem.removeprefix("development_")
-            if doc_key.endswith("_title") or doc_key in SKIP_DOC_KEYS:
-                continue
-            service_alias = doc_service_map.get(doc_key)
-            if not service_alias:
-                continue
-            service = services_by_alias.get(service_alias, {})
-            service_name = service.get("display_name") or service_alias.replace("-", " ").title()
-            exact = (exact_records or {}).get(doc_key)
-            relative_output = Path(exact["output_path"]) if exact else Path("guides") / service_alias / f"{doc_key}.mdx"
-            localized_guide = localized_guides.get(normalize(doc_key)) if localized_guides else None
-            if localized_guides and not localized_guide:
-                for alias in SHARED_GUIDE_ALIASES.get(doc_key, ()):
-                    localized_guide = localized_guides.get(normalize(alias))
-                    if localized_guide:
-                        break
-            if localized_guides and not localized_guide:
-                missing_guides.append(doc_key)
-                fallback = fallback_root / output_language / relative_output if fallback_root else None
-                if fallback and fallback.exists():
-                    target = output_dir / output_language / relative_output
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(fallback, target)
-                    total += 1
-                    language_total += 1
-                continue
-            content = localized_guide["content"] if localized_guide else markdown_file.read_text(encoding="utf-8")
-            fallback_title = localized_guide["title"] if localized_guide else doc_key.replace("_", " ").title()
-            mdx = convert_markdown_to_mdx(
-                content,
-                fallback_title,
-                guide_description(output_language, service_name),
-            )
-            write_text(output_dir / output_language / relative_output, mdx)
-            total += 1
-            language_total += 1
-
-        if language_total == 0:
-            raise RuntimeError(f"No guide pages generated for {output_language}")
-        if missing_guides:
-            log(f"  WARNING: {output_language} missing {len(missing_guides)} localized guides: {', '.join(missing_guides)}")
-        log(f"  {output_language}: wrote {language_total} guide pages")
-
-        x402_path = source_dir / "x402_integration_guide.md" if output_language == "zh-Hans" else None
-        if x402_path and x402_path.exists():
-            mdx = convert_markdown_to_mdx(x402_path.read_text(encoding="utf-8"), "X402 Integration Guide")
-            write_text(output_dir / output_language / "guides" / "x402.mdx", mdx)
-            total += 1
-
-        # OAuth "Sign in with Ace Data Cloud" is a platform-level guide (no service alias),
-        # so the loop above skips it — emit it explicitly like x402.
-        oauth_path = source_dir / "development_oauth_apps.md" if output_language == "zh-Hans" else None
-        if oauth_path and oauth_path.exists():
-            mdx = convert_markdown_to_mdx(oauth_path.read_text(encoding="utf-8"), "OAuth Integration Guide")
-            write_text(output_dir / output_language / "guides" / "oauth.mdx", mdx)
-            total += 1
-
-    log(f"  wrote {total} guide pages")
+# overview is hand-authored; every other MCP page is generated in every locale.
+MANUAL_MCP_PAGES = {"overview.mdx"}
+MORE_GUIDES = {
+    "zh-Hans": "更多指南", "zh-Hant": "更多指南", "en": "More guides", "ja": "その他のガイド",
+    "ko": "추가 가이드", "es": "Más guías", "fr": "Autres guides", "de": "Weitere Anleitungen",
+    "pt": "Mais guias", "ru": "Другие руководства", "ar": "المزيد من الأدلة", "it": "Altre guide",
+    "sv": "Fler guider", "uk": "Інші посібники", "pl": "Więcej przewodników",
+}
 
 
-def sync_mcp_docs(backend_dir: Path, output_dir: Path, languages: list[str]) -> None:
-    log("Syncing localized MCP docs")
-    total = 0
-    for output_language in languages:
-        if output_language != "zh-Hans":
+def publication_routes(backend_dir: Path, catalog: dict[str, Any], doc_service_map: dict[str, str | None],
+                       exact_records: dict[str, Any]) -> tuple[dict[str, Path], dict[str, str]]:
+    routes = {}
+    excluded = {}
+    for key in catalog["records"]:
+        source = backend_dir / "docs" / f"{key}.md"
+        doc_key = key.removeprefix("development_")
+        if not source.is_file():
+            excluded[key] = "no_repository_source"
             continue
-        source_dir = backend_dir / "docs"
-        for markdown_file in sorted(source_dir.glob("mcp_*.md")):
-            mcp_name = markdown_file.stem.removeprefix("mcp_")
-            mdx = convert_markdown_to_mdx(
-                markdown_file.read_text(encoding="utf-8"),
-                f"{mcp_name.replace('-', ' ').title()} MCP Server",
-                f"{mcp_name} MCP server integration",
-            )
-            write_text(output_dir / output_language / "mcp" / f"{mcp_name}.mdx", mdx)
-            total += 1
-    log(f"  wrote {total} MCP pages")
+        if doc_key in SKIP_DOC_KEYS or any(key.startswith(f"development_{alias}_") for alias in EXCLUDED_SERVICES):
+            excluded[key] = "publication_hold"
+            continue
+        if key.startswith("mcp_"):
+            relative = Path("mcp") / f"{key.removeprefix('mcp_')}.mdx"
+        elif key == "x402_integration_guide":
+            relative = Path("guides/x402.mdx")
+        elif key == "development_oauth_apps":
+            relative = Path("guides/oauth.mdx")
+        elif doc_key in exact_records:
+            relative = Path(exact_records[doc_key]["output_path"])
+        else:
+            # Preserve established URLs; public standalone guides have a stable
+            # platform path rather than silently disappearing from the export.
+            alias = doc_service_map.get(doc_key) or "platform"
+            relative = Path("guides") / alias / f"{doc_key}.mdx"
+        if relative in routes.values():
+            raise RuntimeError(f"Conflicting publication output: {relative}")
+        routes[key] = relative
+    if not routes:
+        raise RuntimeError("No public source documents to publish")
+    return routes, excluded
+
+
+def sync_document_pages(backend_dir: Path, output_dir: Path, previous: Path,
+                        catalogs: dict[str, Any], routes: dict[str, Path],
+                        services_by_alias: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    results = []
+    for language, catalog in catalogs.items():
+        for name in MANUAL_MCP_PAGES:
+            source = previous / language / "mcp" / name
+            if source.is_file():
+                target = output_dir / language / "mcp" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+        for key, relative in routes.items():
+            record = catalog["records"][key]
+            source = (backend_dir / "docs" / f"{key}.md").read_text(encoding="utf-8")
+            status = record["status"]
+            if record["source_hash"] != digest(source):
+                status = "source_not_deployed"
+            target = output_dir / language / relative
+            old = previous / language / relative
+            retained = False
+            if status == "ready":
+                description = None
+                if relative.parts[0] == "mcp":
+                    description = f"{relative.stem} MCP server integration"
+                elif len(relative.parts) == 3:
+                    alias = relative.parts[1]
+                    service = (services_by_alias or {}).get(alias, {})
+                    name = service.get("display_name") or alias.replace("-", " ").title()
+                    description = guide_description(language, name)
+                write_text(target, convert_markdown_to_mdx(record["content"], key.replace("_", " ").title(), description))
+            elif old.is_file():
+                # Availability and freshness are separate: retain the published
+                # page, but report incomplete and make the workflow fail its gate.
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(old, target)
+                retained = True
+            results.append({"language": language, "source_key": key, "path": str(Path(language) / relative),
+                            "source_hash": digest(source), "status": status, "retained_previous": retained})
+    return results
+
+
+def refresh_generated_navigation(root: Path, languages: list[str], exact_records: dict[str, Any]) -> None:
+    config = load_json(root / "docs.json")
+    for language in config["navigation"]["languages"]:
+        locale = language["language"]
+        if locale not in languages:
+            continue
+        tabs = language.get("tabs", [])
+        if not tabs:
+            raise RuntimeError(f"Missing guide navigation for {locale}")
+        api_tab = next((tab for tab in tabs if any("openapi" in group for group in tab.get("groups", []))), None)
+        if api_tab:
+            api_tab["groups"] = [group for group in api_tab["groups"]
+                                 if "openapi" not in group or (root / group["openapi"]["source"].lstrip("/")).is_file()]
+            known_specs = {group["openapi"]["source"] for group in api_tab["groups"] if "openapi" in group}
+            for spec in sorted((root / "openapi").glob("*.json")):
+                source = f"/openapi/{spec.name}"
+                if source not in known_specs:
+                    directory = f"api-reference/{spec.stem}" if locale == "zh-Hans" else f"{locale}/api-reference/{spec.stem}"
+                    api_tab["groups"].append({"group": load_json(spec)["info"]["title"],
+                                               "openapi": {"source": source, "directory": directory}})
+        prefixes = (f"{locale}/guides/", f"{locale}/mcp/")
+
+        def prune(value: Any) -> None:
+            if isinstance(value, dict):
+                if isinstance(value.get("pages"), list):
+                    value["pages"] = [p for p in value["pages"] if not isinstance(p, str)
+                                      or not p.startswith(prefixes) or (root / f"{p}.mdx").is_file()]
+                for child in value.values():
+                    prune(child)
+            elif isinstance(value, list):
+                for child in value:
+                    prune(child)
+
+        prune(tabs)
+        groups = tabs[0].setdefault("groups", [])
+        groups[:] = [g for g in groups if g.get("group") != MORE_GUIDES[locale]]
+        for group in groups:
+            if group.get("group") == "Coding":
+                group["pages"] = [f"{locale}/{r['output_path'].removesuffix('.mdx')}" for r in exact_records.values()
+                                  if (root / locale / r["output_path"]).is_file()]
+        known: list[str] = []
+        collect_page_paths(tabs, known)
+        additional = sorted(str(p.relative_to(root).with_suffix("")) for p in (root / locale / "guides").rglob("*.mdx")
+                            if str(p.relative_to(root).with_suffix("")) not in known)
+        if additional:
+            groups.append({"group": MORE_GUIDES[locale], "icon": "book-open", "pages": additional})
+        mcp_tab = next((t for t in tabs if "MCP" in t.get("tab", "")), None)
+        if mcp_tab:
+            group = mcp_tab["groups"][0]
+            group["pages"] = sorted({p for p in group.get("pages", []) if isinstance(p, str)}
+                                    | {str(p.relative_to(root).with_suffix("")) for p in (root / locale / "mcp").glob("*.mdx")})
+    write_json(root / "docs.json", config)
 
 
 def get_docs_languages(output_dir: Path) -> list[str]:
@@ -1142,8 +1177,8 @@ def get_docs_languages(output_dir: Path) -> list[str]:
 
 
 def managed_paths(languages: list[str]) -> list[Path]:
-    paths = [Path("openapi"), Path("zh-Hans") / "mcp"]
-    paths.extend(Path(language) / "guides" for language in languages)
+    paths = [Path("openapi"), Path("docs.json")]
+    paths.extend(Path(language) / folder for language in languages for folder in ("guides", "mcp"))
     return paths
 
 
@@ -1160,11 +1195,19 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--require-denylist", action="store_true")
+    parser.add_argument("--catalog-dir", type=Path, help="Read exported publication snapshots for offline verification")
+    parser.add_argument("--report", type=Path, help="Write publication completeness report outside the output tree")
+    parser.add_argument("--dry-run", action="store_true", help="Validate and report without publishing generated files")
+    parser.add_argument("--preview-dir", type=Path, help="Save dry-run output to a new directory for review")
     args = parser.parse_args()
 
     output_dir = args.output_dir.resolve()
+    if args.preview_dir and (not args.dry_run or args.preview_dir.resolve().is_relative_to(output_dir)):
+        raise SystemExit("--preview-dir requires --dry-run and a directory outside the output tree")
     restore_transaction(output_dir)
-    denylist = load_denylist(required=args.require_denylist or not args.validate_only)
+    denylist = load_denylist(required=args.require_denylist or not (args.validate_only or args.dry_run))
+    if args.dry_run and not all(denylist):
+        log("Dry run: private-value denylist is unavailable; publication still requires it")
     if args.validate_only:
         validate_generated_tree(output_dir, denylist)
         log("Generated tree validation passed")
@@ -1179,25 +1222,46 @@ def main() -> int:
 
     documented_aliases = get_documented_service_aliases(output_dir)
     services = load_services(backend_dir, documented_aliases)
-    services_by_alias = {service["alias"]: service for service in services}
     exact_records = load_exact_doc_records(backend_dir, services)
     doc_service_map = build_doc_service_map(services, backend_dir, exact_records)
     languages = get_docs_languages(output_dir)
+    if not languages:
+        raise RuntimeError("No supported publication languages configured")
     log(f"Languages: {', '.join(languages)}")
 
+    catalogs = load_publication_catalogs(languages, args.catalog_dir)
+    source_catalog = catalogs[languages[0]]
+    routes, excluded = publication_routes(backend_dir, source_catalog, doc_service_map, exact_records)
+    public_api_ids = set(source_catalog["public_api_ids"])
+    public_services = [{**service, "apis": [api for api in service.get("apis", []) if api["id"] in public_api_ids]}
+                       for service in services]
     managed = managed_paths(languages)
     with tempfile.TemporaryDirectory(prefix="docs-sync-", dir=output_dir.parent) as temporary_directory:
         staging_dir = Path(temporary_directory) / "output"
         shutil.copytree(output_dir, staging_dir, ignore=shutil.ignore_patterns(".git"))
         clear_managed_paths(staging_dir, managed)
-        sync_openapi(backend_dir, staging_dir, services)
-        sync_guides(backend_dir, staging_dir, services_by_alias, doc_service_map, languages, output_dir, exact_records)
-        sync_mcp_docs(backend_dir, staging_dir, languages)
+        # docs.json is committed atomically with generated pages, not cleared.
+        shutil.copy2(output_dir / "docs.json", staging_dir / "docs.json")
+        sync_openapi(backend_dir, staging_dir, public_services)
+        results = sync_document_pages(backend_dir, staging_dir, output_dir, catalogs, routes,
+                                      {service["alias"]: service for service in services})
+        refresh_generated_navigation(staging_dir, languages, exact_records)
         neutralize_generated_tree(staging_dir, denylist)
         validate_generated_tree(staging_dir, denylist)
-        publish_generated_tree(staging_dir, output_dir, managed)
-    log("Done")
-    return 0
+        pending = [item for item in results if item["status"] != "ready"]
+        report = {"schema_version": 1, "complete": not pending, "catalog_hash": source_catalog["catalog_hash"],
+                  "private_value_validation": all(denylist),
+                  "total": len(results), "ready": len(results) - len(pending), "pending": pending, "excluded": excluded}
+        if args.report:
+            write_json(args.report, report)
+        if args.preview_dir:
+            shutil.copytree(staging_dir, args.preview_dir)
+        if not args.dry_run:
+            publish_generated_tree(staging_dir, output_dir, managed)
+    log(f"Publication: {report['ready']}/{report['total']} current; {len(pending)} pending")
+    for item in pending[:20]:
+        log(f"  PENDING {item['language']}/{item['source_key']}: {item['status']}")
+    return 2 if pending else 0
 
 
 if __name__ == "__main__":

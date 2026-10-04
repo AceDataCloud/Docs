@@ -1,64 +1,77 @@
-# Mintlify Starter Kit
+# AceDataCloud Docs
 
-Use the starter kit to get your docs deployed and ready to customize.
+Mintlify documentation for AceDataCloud. Preview with `mint dev`; check public
+links with `mint broken-links`. Navigation and site settings live in `docs.json`.
 
-Click the green **Use this template** button at the top of this repo to copy the Mintlify starter kit. The starter kit contains examples with
+## Sources and ownership
 
-- Guide pages
-- Navigation
-- Customizations
-- API reference pages
-- Use of popular components
+- PlatformBackend owns Markdown source files and OpenAPI definitions. Edit the
+  source, not generated Docs pages.
+- The read-only `/api/v1/documents/publication/?lang=en` backend endpoint exports
+  public documents by stable source key, including standalone guides and MCP.
+  It includes exact-locale content, source SHA-256, and translation readiness.
+  Display-oriented API/sibling relations are not a publication contract.
+- Every configured locale's `guides/` and `mcp/` directories are generated.
+  `mcp/overview.mdx` is explicitly hand-authored and preserved. Public source
+  records without an old service route use `guides/platform/<source-key>.mdx`.
+  Existing routes and the exact Coding route map are preserved.
+- `openapi/` contains specs for APIs with public platform document records;
+  private markers and temporary publication holds are still enforced.
+- Generated navigation is reconciled atomically with pages: Coding translations,
+  additional public guides, MCP pages, and OpenAPI groups become discoverable;
+  retired generated links are removed. Existing editorial groups are preserved.
+- Quickstarts, concepts, pricing, FAQ, and other editorial pages are maintained
+  here. They are not automatically rewritten from API changes.
 
-**[Follow the full quickstart guide](https://starter.mintlify.com/quickstart)**
+## Synchronization contract
 
-## AI-assisted writing
+`Sync Ecosystem Contracts` is the only source-change trigger. The Docs workflow
+serializes all writers, checks out current `main` after acquiring the queue, and
+validates that an event SHA belongs to the current backend history. Old events
+cannot republish old source snapshots. A final source check rejects a backend
+revision that advanced during generation; normal Git push rejects concurrent
+editorial changes without overwriting them.
 
-Set up your AI coding tool to work with Mintlify:
+Hourly reconciliation picks up asynchronous source deployment and translation
+completion even when no new Git event occurs. Before switching this consumer on,
+deploy the backend publication endpoint; unavailable or malformed feeds fail
+closed and do not fall back to the old display API.
 
-```bash
-npx skills add https://mintlify.com/docs
-```
+For every generated page, the database source hash must match the checked-out
+Markdown and the target translation must be current. Catalog identity must also
+remain consistent across locale reads. There is no automatic language fallback.
+When a translation is pending, an existing page is retained for availability but
+is explicitly reported as incomplete; a missing page is not fabricated. Ready
+pages and public withdrawals can still publish. Exit status **2** means partial
+publication and fails the workflow's final completeness gate. Other nonzero
+statuses abort publication; **0** means every expected page is current.
 
-This command installs Mintlify's documentation skill for your configured AI tools like Claude Code, Cursor, Windsurf, and others. The skill includes component reference, writing standards, and workflow guidance.
+The workflow retains `docs-sync-report` for 14 days and puts pending page keys,
+locales, and reasons in the job summary. Generated output is staged and validated
+before an atomic publish; interruption recovery includes navigation and all MCP
+locales. Customer example sanitization remains mandatory.
 
-See the [AI tools guides](/ai-tools) for tool-specific setup.
-
-## Development
-
-Install the [Mintlify CLI](https://www.npmjs.com/package/mint) to preview your documentation changes locally. To install, use the following command:
-
-```
-npm i -g mint
-```
-
-Run the following command at the root of your documentation, where your `docs.json` is located:
-
-```
-mint dev
-```
-
-View your local preview at `http://localhost:3000`.
-
-## Publishing changes
-
-Install our GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app) to propagate changes from your repo to your deployment. Changes are deployed to production automatically after pushing to the default branch.
-
-## Need help?
-
-### Troubleshooting
-
-- If your dev environment isn't running: Run `mint update` to ensure you have the most recent version of the CLI.
-- If a page loads as a 404: Make sure you are running in a folder with a valid `docs.json`.
-
-### Resources
-- [Mintlify documentation](https://mintlify.com/docs)
-
-## Automated tests
+## Verification
 
 ```sh
-python3 -m unittest
+python -m compileall -q scripts tests
+python -m unittest
+mint broken-links
 ```
 
-CI discovers tests by filename instead of maintaining a per-file list. Add Python
-tests as `test_*.py` in `tests/`; no workflow change is needed.
+For read-only reconciliation, run:
+
+```sh
+python scripts/sync_from_platformbackend.py --backend-dir ../PlatformBackend \
+  --output-dir . --dry-run --report /tmp/docs-sync-report.json
+```
+
+`--preview-dir /tmp/docs-preview` preserves dry-run output in a new directory for
+review and link checking. Set `PUBLIC_EXAMPLE_DENYLIST` and `--require-denylist` to
+include private-value checks in a dry run; without it the report explicitly marks
+that check unverified. Actual publication always requires the configured denylist.
+
+`--catalog-dir /path/to/snapshots` loads files named `zh-cn.json`, `en.json`, etc.
+from the same publication exporter for reproducible, offline verification. Reports
+belong outside the generated output tree. No sync command writes the backend DB
+or generates translations.
