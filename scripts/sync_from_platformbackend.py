@@ -28,7 +28,7 @@ from urllib.request import Request, urlopen
 START = time.time()
 
 BASE_URL = "https://api.acedata.cloud"
-PUBLICATION_URL = "https://platform.acedata.cloud/api/v1/documents/publication/"
+DOCUMENTS_URL = "https://platform.acedata.cloud/api/v1/documents/"
 SHARED_GUIDE_ALIASES = {"kling_assets": ("kling_elements", "kling_voices")}
 TRANSACTION_FILE = ".docs-sync-transaction.json"
 BACKUP_DIR = ".docs-sync-backup"
@@ -930,12 +930,13 @@ def build_doc_service_map(
     return result
 
 
-def load_publication_catalog(language: str, catalog_dir: Path | None = None) -> dict[str, Any]:
-    language = language.lower()
-    if catalog_dir:
-        payload = load_json(catalog_dir / f"{language}.json")
-    else:
-        request = Request(f"{PUBLICATION_URL}?lang={language}")
+def fetch_document_list(language: str) -> dict[str, Any]:
+    items = []
+    expected = None
+    seen = set()
+    while expected is None or len(items) < expected:
+        request = Request(f"{DOCUMENTS_URL}?lang={language}&limit=1000&offset={len(items)}",
+                          headers={"Origin": "https://platform.acedata.cloud", "Accept-Language": language})
         for attempt in range(3):
             try:
                 with urlopen(request, timeout=60) as response:
@@ -945,26 +946,75 @@ def load_publication_catalog(language: str, catalog_dir: Path | None = None) -> 
                 if attempt == 2:
                     raise
                 time.sleep(2**attempt)
-    if (not isinstance(payload, dict) or payload.get("schema_version") != 1
-            or payload.get("language") != language or payload.get("source_language") != "zh-cn"
-            or not isinstance(payload.get("items"), list) or not payload["items"]
-            or not isinstance(payload.get("public_api_ids"), list)
-            or not re.fullmatch(r"[0-9a-f]{64}", payload.get("catalog_hash", ""))):
-        raise RuntimeError(f"Invalid publication catalog for {language}")
+        total, page = payload.get("count"), payload.get("items")
+        if not isinstance(total, int) or total < 0 or not isinstance(page, list):
+            raise RuntimeError(f"Invalid document list for {language}")
+        if expected is not None and total != expected:
+            raise RuntimeError("Document list changed during pagination; retry")
+        expected = total
+        if not page and len(items) < expected:
+            raise RuntimeError("Document list ended before its reported count")
+        for item in page:
+            document_id = item.get("id")
+            if not document_id or document_id in seen:
+                raise RuntimeError("Missing or repeated document identity during pagination")
+            seen.add(document_id)
+        items.extend(page)
+        if len(items) > expected:
+            raise RuntimeError("Document list exceeds its reported count")
+    return {"count": expected, "items": items}
+
+
+def load_publication_catalog(language: str, catalog_dir: Path | None = None) -> dict[str, Any]:
+    """Normalize the existing document list; no separate API or export mode."""
+    language = language.lower()
+    payload = load_json(catalog_dir / f"{language}.json") if catalog_dir else fetch_document_list(language)
+    if (not isinstance(payload, dict) or not isinstance(payload.get("items"), list)
+            or not payload["items"] or payload.get("count") != len(payload["items"])):
+        raise RuntimeError(f"Incomplete document list for {language}")
     records = {}
-    for item in payload["items"]:
-        key = item.get("source_key", "")
+    api_ids = set()
+    for document in payload["items"]:
+        if document.get("private") is not False:
+            continue
+        if "content_source" not in document:
+            raise RuntimeError("Document list lacks content_source metadata; deploy the backend update first")
+        if document.get("api_id"):
+            api_ids.add(str(document["api_id"]))
+        metadata = document["content_source"]
+        if metadata is None:
+            continue
+        if not isinstance(metadata, dict):
+            raise RuntimeError(f"Invalid document source metadata for {language}")
+        key = metadata.get("source_key", "")
         if (not re.fullmatch(r"(?:development_|mcp_)[a-zA-Z0-9_-]+|x402_integration_guide", key)
-                or key in records or item.get("status") not in {"ready", "missing", "stale", "missing_source"}):
-            raise RuntimeError(f"Invalid or duplicate publication identity for {language}")
-        if item.get("source_hash") is not None and not re.fullmatch(r"[0-9a-f]{64}", item["source_hash"]):
+                or metadata.get("language") != language
+                or metadata.get("status") not in {"ready", "missing", "stale", "missing_source", "ambiguous"}):
+            raise RuntimeError(f"Invalid document source identity for {language}")
+        source_hash = metadata.get("source_hash")
+        if source_hash is not None and not re.fullmatch(r"[0-9a-f]{64}", source_hash):
             raise RuntimeError(f"Invalid source hash for {language}/{key}")
-        if item["status"] == "ready":
-            body = item.get("content")
-            if not isinstance(body, str) or not body or digest(body) != item.get("content_hash"):
-                raise RuntimeError(f"Invalid publication content for {language}/{key}")
-        records[key] = item
-    return {**payload, "records": records}
+        body = document.get("content")
+        if metadata["status"] == "ready":
+            if not source_hash or not isinstance(body, str) or not body or digest(body) != metadata.get("content_hash"):
+                raise RuntimeError(f"Document content changed during rendering for {language}/{key}")
+        item = {**metadata, "content": body if metadata["status"] == "ready" else None}
+        alias = document.get("alias") or str(document.get("id") or "")
+        if not alias:
+            raise RuntimeError(f"Missing document address for {language}/{key}")
+        previous = records.get(key)
+        if previous:
+            if {k: v for k, v in previous.items() if k != "aliases"} != item:
+                raise RuntimeError(f"Conflicting document source {key} for {language}")
+            previous["aliases"] = sorted(set(previous["aliases"]) | {alias})
+        else:
+            records[key] = {**item, "aliases": [alias]}
+    if not records:
+        raise RuntimeError(f"No public source-backed documents for {language}")
+    identity = {"sources": [{k: item[k] for k in ("source_key", "aliases", "source_hash")}
+                            for _, item in sorted(records.items())], "public_api_ids": sorted(api_ids)}
+    return {"records": records, "public_api_ids": sorted(api_ids),
+            "catalog_hash": digest(json.dumps(identity, sort_keys=True, ensure_ascii=False))}
 
 
 def digest(content: str) -> str:
@@ -1104,7 +1154,7 @@ def sync_document_pages(backend_dir: Path, output_dir: Path, previous: Path,
             record = catalog["records"][key]
             source = (backend_dir / "docs" / f"{key}.md").read_text(encoding="utf-8")
             status = record["status"]
-            if record["source_hash"] != digest(source):
+            if record["source_hash"] is not None and record["source_hash"] != digest(source):
                 status = "source_not_deployed"
             target = output_dir / language / relative
             old = previous / language / relative
@@ -1266,7 +1316,7 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--require-denylist", action="store_true")
-    parser.add_argument("--catalog-dir", type=Path, help="Read exported publication snapshots for offline verification")
+    parser.add_argument("--catalog-dir", type=Path, help="Read complete document-list snapshots for offline verification")
     parser.add_argument("--report", type=Path, help="Write publication completeness report outside the output tree")
     parser.add_argument("--dry-run", action="store_true", help="Validate and report without publishing generated files")
     parser.add_argument("--preview-dir", type=Path, help="Save dry-run output to a new directory for review")

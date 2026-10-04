@@ -7,10 +7,11 @@ links with `mint broken-links`. Navigation and site settings live in `docs.json`
 
 - PlatformBackend owns Markdown source files and OpenAPI definitions. Edit the
   source, not generated Docs pages.
-- The read-only `/api/v1/documents/publication/?lang=en` backend endpoint exports
-  public documents by stable source key, including standalone guides and MCP.
-  It includes exact-locale content, source SHA-256, and translation readiness.
-  Display-oriented API/sibling relations are not a publication contract.
+- Reuse the existing `/api/v1/documents/?lang=en` list, including normal
+  pagination. Its additive `content_source` metadata identifies the source file,
+  source SHA-256, exact-language readiness and content hash. Independent Text
+  guides and MCP pages are read directly rather than inferred from API siblings.
+  No new endpoint, response envelope or export mode is required.
 - Every configured locale's `guides/` and `mcp/` directories are generated.
   Existing Greek, Finnish and Serbian directories are also reconciled because
   their unlisted URLs remain accessible, without adding them to the language menu.
@@ -39,12 +40,13 @@ editorial changes without overwriting them.
 
 Hourly reconciliation picks up asynchronous source deployment and translation
 completion even when no new Git event occurs. Before switching this consumer on,
-deploy the backend publication endpoint; unavailable or malformed feeds fail
-closed and do not fall back to the old display API.
+deploy the additive metadata on the existing document list. Missing metadata or
+malformed/incomplete pages fail instead of being treated as a successful sync.
 
 For every generated page, the database source hash must match the checked-out
 Markdown and the target translation must be current. Catalog identity must also
-remain consistent across locale reads. There is no automatic language fallback.
+remain consistent across locale reads. The normal list keeps its display fallback; the Docs consumer checks metadata
+and never counts that fallback as a current translation.
 When a translation is pending, an existing page is retained for availability but
 is explicitly reported as incomplete; a missing page is not fabricated. Ready
 pages and public withdrawals can still publish. Exit status **2** means partial
@@ -82,6 +84,7 @@ include private-value checks in a dry run; without it the report explicitly mark
 that check unverified. Actual publication always requires the configured denylist.
 
 `--catalog-dir /path/to/snapshots` loads files named `zh-cn.json`, `en.json`, etc.
-from the same publication exporter for reproducible, offline verification. Reports
+containing complete responses from the same document list for reproducible,
+offline verification. Reports
 belong outside the generated output tree. No sync command writes the backend DB
 or generates translations.
