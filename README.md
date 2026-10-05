@@ -31,17 +31,12 @@ links with `mint broken-links`. Navigation and site settings live in `docs.json`
 
 ## Synchronization contract
 
-`Sync Ecosystem Contracts` is the only source-change trigger. The Docs workflow
-serializes all writers, checks out current `main` after acquiring the queue, and
-validates that an event SHA belongs to the current backend history. Old events
-cannot republish old source snapshots. A final source check rejects a backend
-revision that advanced during generation; normal Git push rejects concurrent
-editorial changes without overwriting them.
-
-Hourly reconciliation picks up asynchronous source deployment and translation
-completion even when no new Git event occurs. Before switching this consumer on,
-deploy the additive metadata on the existing document list. Missing metadata or
-malformed/incomplete pages fail instead of being treated as a successful sync.
+PlatformBackend's daily ecosystem CronJob is the only publication coordinator.
+It checks out a pinned current Backend source, runs this repository's existing
+generator, validates MDX, and opens or updates a PR. Mintlify publishes after
+normal review and merge. No cross-repository dispatch or hourly GitHub writer
+remains. Every daily pass also checks translation completion without requiring
+a new source commit.
 
 For every generated page, the database source hash must match the checked-out
 Markdown and the target translation must be current. Catalog identity must also
@@ -50,11 +45,11 @@ and never counts that fallback as a current translation.
 When a translation is pending, an existing page is retained for availability but
 is explicitly reported as incomplete; a missing page is not fabricated. Ready
 pages and public withdrawals can still publish. Exit status **2** means partial
-publication and fails the workflow's final completeness gate. Other nonzero
+publication and prevents the daily controller from advancing its checkpoint. Other nonzero
 statuses abort publication; **0** means every expected page is current.
 
-The workflow retains `docs-sync-report` for 14 days and puts pending page keys,
-locales, and reasons in the job summary. Generated output is staged and validated
+The generator writes a completeness report for the controller; incomplete
+publication is retried on the next daily run. Generated output is staged and validated
 before an atomic publish; interruption recovery includes navigation and all MCP
 locales. A separate MDX and local-link gate checks every site page before Git
 push, including editorial entry points. Plain Markdown braces are escaped outside code rather than interpreted as
@@ -88,3 +83,11 @@ containing complete responses from the same document list for reproducible,
 offline verification. Reports
 belong outside the generated output tree. No sync command writes the backend DB
 or generates translations.
+
+## Daily capability updates
+
+PlatformBackend `scripts/sync_ecosystem.py` is the only scheduled coordinator.
+One daily Kubernetes Job reviews Backend docs and API changes with Claude Code,
+updates existing files, and creates or updates one reviewable PR per repository.
+It never merges PRs or duplicates the Backend guide tree. Normal CI and review
+remain required; publication and sub-repository mirroring run after merge.
