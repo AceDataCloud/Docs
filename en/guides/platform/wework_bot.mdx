@@ -1,0 +1,56 @@
+---
+title: "WeCom Bot"
+description: "Platform integration guide - Ace Data Cloud"
+---
+
+Deploy your own WeCom account instance, use mobile WeCom to scan and log in, and read the account, contacts, conversations, and locally synchronized messages through REST API or MCP. Instances correspond to ordinary WeCom accounts, with no need for a private server or enterprise email domain configuration.
+
+Currently Alpha. Account reading has completed real conversation verification; self text sending and event readback have completed real acceptance; other contacts, group operations, and new instance recovery still need deployment environment acceptance. Media sending, quoted replies, real @ mentions, group member management, and delivery receipts are not yet available. Please refer to the value returned by the instance `/api/capabilities`.
+
+## Deployment and Login
+
+Enable the service under the Deployment category and select an instance duration plan. After deployment, open the management page and use the account owner's WeCom to scan and log in; if mobile confirmation or other login steps are required, open the remote desktop and enter the desktop password of that instance. API credentials and desktop passwords are independent. Login data is saved on the instance disk; rebuilding the container retains the disk; deleting the disk deletes the local session.
+
+Each instance is billed independently and runs according to the purchased duration. REST / MCP calls are not additionally billed per message; actual pricing is subject to the plan page. The current default reference is the duration plan for WeChat bots; pricing confirmation still needs to be completed based on runtime resources before final availability.
+
+## API and MCP
+
+Use the instance API address in the management page, and carry `Authorization: Bearer <instance API token>` for all account interfaces. These paths belong to dedicated instances, not a shared API gateway. The MCP address is the instance address plus `/mcp/`, using the same Bearer token.
+
+| Interface                                                       | Function                                          |
+| -------------------------------------------------------- | ------------------------------------------- |
+| `GET /api/status`, `GET /api/auth/status`                 | Whether the account is ready and the capability list                                 |
+| `GET /api/auth/qr`                                       | Current login QR code PNG Base64                          |
+| `GET /api/account`                                       | Current account                                        |
+| `GET /api/contacts?kind=all`                             | Internal colleagues and external contacts; internal / external can be specified          |
+| `GET /api/conversations`                                 | Local conversations, retaining original conversation IDs                              |
+| `GET /api/messages`                                      | Locally synchronized messages; conversation_id, after_rowid, limit parameters |
+| `POST /api/search`                                       | Contacts, conversations, and local text search                               |
+| `POST /api/messages`                                     | Asynchronous text sending task; Idempotency-Key must be provided               |
+| `POST /api/messages/send`                                | Same sending endpoint, supporting one or multiple targets                            |
+| `GET /api/groups/{conversation_id}`                      | Locally synchronized group information and members                                 |
+| `GET /api/tasks`                                         | Recent tasks and the result of each target                                 |
+| `GET /api/tasks/{id}`                                    | Query sending results                                      |
+| `POST /api/tasks/{id}/cancel`                            | Cancel tasks that have not yet started                                   |
+| `POST /api/runtime/pause`, `POST /api/runtime/resume`     | Pause automation; resume after owner verification                               |
+| `GET /api/diagnostics`, `GET /api/diagnostics/screenshot` | Instance status and current screen, both require authentication                              |
+| `GET /api/events?after=0`                                | Message events with resumable cursors                                  |
+| `WS /ws`                                                 | Message event stream, Bearer authentication                             |
+
+The sending body contains `target`, `type: "text"`, and `text`. `target` accepts a conversation ID, contact ID, enterprise user ID, or unique full name; IDs are preferred; when display names still cannot uniquely identify an object, the instance will reject the operation and will not guess the target. Contacts without local conversations will first have a conversation opened through the client, and the message will be sent after verifying the actual conversation ID. The request header `Idempotency-Key` consists of 8–128 letters, numbers, or `_.:-`. Repeated requests for the same operation must reuse the same key and the same request body.
+
+Replacing `target` with a `targets` array can send serially to 1–50 explicitly specified targets. The two cannot be provided at the same time. All targets complete identity resolution first, and different aliases pointing to the same object will be rejected. Subsequent sending stops after one target fails, and task results record `succeeded`, `failed`, `unknown`, or `not_attempted` item by item; do not treat partial success as complete success. This process also needs to complete real acceptance for specified contacts in the deployment environment.
+
+Tasks may be in queued, running, submitting, succeeded, failed, unknown, or cancelled states. `succeeded` means that, after submission, the exact text and server message ID were found in the corresponding conversation record; `delivered` remains null and does not mean the other party has received it. unknown means the result is unclear; please check the history record and do not resend with a new key. The instance will not automatically retry interrupted tasks.
+
+History only includes content already synchronized by the client and cannot guarantee the complete history. Non-text messages may return an unknown type, and attachment downloads are not yet available. Events retain the most recent 10,000 entries; `gap` means the cursor has exceeded the retention window. The first connection will not replay old history as new messages.
+
+`server_accepted` and `server_id` in message history can be used to verify whether the server has accepted a local message; when only a local record appears without a server ID, sending cannot be considered successful. These fields do not mean the recipient has received or read it. Event records retain the status at the time of generation; use the message history interface to query the current confirmation status.
+
+## Accounts and Credentials
+
+Only log in to accounts that you are authorized to operate. Configure the API token in trusted applications; it can access the account data of that instance. Do not publish passwords, QR codes, or chat screenshots in public locations. Pausing an instance will interrupt real-time events. After the account logs out or the device is removed on mobile, you need to log in again.
+
+Current text input supports only a single line; line breaks will be explicitly rejected before sending. When the client requires security verification or re-login, it should be completed by the account owner in the remote desktop; the instance will not bypass verification. Tasks after verification interruption may return unknown; query message records first, and do not resend with a new idempotency key.
+
+After detecting a security verification prompt, account logout, or change, the automation queue will be persistently paused. After completing mobile verification, you can continue tasks not yet executed through “Resume After Verification” in the instance console; tasks that have already been submitted but have uncertain results will not be resent. Normal remote work may also trigger WeCom security verification. The officially stated 24-hour window after verification during which it will not be locked again does not mean detection has been eliminated, nor does it mean the instance can guarantee long-term unattended operation.
