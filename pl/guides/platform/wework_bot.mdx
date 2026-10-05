@@ -1,0 +1,56 @@
+---
+title: "Robot WeCom"
+description: "Platform API guide - Ace Data Cloud"
+---
+
+Wdróż własną instancję konta WeCom, użyj mobilnego WeCom do logowania przez zeskanowanie kodu i odczytuj konto, kontakty, konwersacje oraz lokalnie zsynchronizowane wiadomości przez REST API lub MCP. Instancja odpowiada zwykłemu kontu WeCom i nie wymaga prywatnego serwera ani konfiguracji domeny firmowej poczty e-mail.
+
+Obecnie jest to Alpha. Odczyt konta zakończył prawdziwą weryfikację konwersacji; wysyłanie własnych tekstów oraz odczyt zwrotny zdarzeń zakończyły prawdziwy odbiór; inne kontakty, operacje grupowe i odzyskiwanie nowych instancji nadal wymagają odbioru środowiska wdrożeniowego. Wysyłanie mediów, odpowiedzi z cytatem, prawdziwe @, zarządzanie członkami grupy i potwierdzenia doręczenia nie są jeszcze dostępne. Za wiążącą uznaje się wartość zwracaną przez `/api/capabilities` instancji.
+
+## Wdrożenie i logowanie
+
+Aktywuj usługę w kategorii Deployment i wybierz pakiet czasu trwania instancji. Po wdrożeniu otwórz stronę zarządzania i użyj WeCom właściciela konta do zeskanowania kodu; jeśli wymagane jest potwierdzenie na telefonie lub inne kroki logowania, otwórz pulpit zdalny i wprowadź hasło pulpitu tej instancji. Dane uwierzytelniające API i hasło pulpitu są niezależne. Dane logowania są przechowywane na dysku instancji, a ponowne utworzenie kontenera zachowuje dysk; usunięcie dysku usunie lokalną sesję.
+
+Każda instancja jest rozliczana niezależnie i działa przez zakupiony czas. Wywołania REST / MCP nie są dodatkowo rozliczane za wiadomość, a rzeczywista cena zależy od strony pakietu. Obecnie domyślnie odwołuje się do pakietu czasu trwania robota WeChat, a przed ostatecznym udostępnieniem należy potwierdzić wycenę w połączeniu z zasobami operacyjnymi.
+
+## API i MCP
+
+Użyj adresu API instancji na stronie zarządzania, wszystkie interfejsy konta przekazują `Authorization: Bearer <token API instancji>`. Te ścieżki należą do dedykowanej instancji, a nie do współdzielonej bramy API. Adres MCP to adres instancji z dodanym `/mcp/`, używający tego samego tokenu Bearer.
+
+| Interfejs                                                       | Funkcja                                          |
+| -------------------------------------------------------- | ------------------------------------------- |
+| `GET /api/status`、`GET /api/auth/status`                 | Czy konto jest gotowe i lista możliwości                                 |
+| `GET /api/auth/qr`                                       | Aktualny kod QR logowania w Base64 PNG                          |
+| `GET /api/account`                                       | Aktualne konto                                        |
+| `GET /api/contacts?kind=all`                             | Wewnętrzni współpracownicy i kontakty zewnętrzne, można określić internal / external          |
+| `GET /api/conversations`                                 | Lokalne konwersacje z zachowaniem oryginalnego ID konwersacji                              |
+| `GET /api/messages`                                      | Lokalnie zsynchronizowane wiadomości; parametry conversation_id, after_rowid, limit |
+| `POST /api/search`                                       | Wyszukiwanie kontaktów, konwersacji i lokalnego tekstu                               |
+| `POST /api/messages`                                     | Asynchroniczne zadanie wysyłania tekstu, należy podać Idempotency-Key               |
+| `POST /api/messages/send`                                | Ten sam punkt wejścia wysyłania, obsługuje jeden lub wiele celów                            |
+| `GET /api/groups/{conversation_id}`                      | Lokalnie zsynchronizowane informacje o grupie i członkowie                                 |
+| `GET /api/tasks`                                         | Ostatnie zadania i wyniki dla każdego celu                                 |
+| `GET /api/tasks/{id}`                                    | Zapytanie o wynik wysyłania                                      |
+| `POST /api/tasks/{id}/cancel`                            | Anulowanie zadania, które jeszcze się nie rozpoczęło                                   |
+| `POST /api/runtime/pause`、`POST /api/runtime/resume`     | Wstrzymanie automatyzacji; wznowienie po weryfikacji właściciela                               |
+| `GET /api/diagnostics`、`GET /api/diagnostics/screenshot` | Stan instancji i bieżący ekran, oba wymagają uwierzytelnienia                              |
+| `GET /api/events?after=0`                                | Zdarzenia wiadomości z kursorem możliwym do wznowienia                                  |
+| `WS /ws`                                                 | Strumień zdarzeń wiadomości, uwierzytelnianie Bearer                             |
+
+Treść wysyłania zawiera `target`, `type: "text"` oraz `text`. `target` akceptuje ID konwersacji, ID kontaktu, ID użytkownika firmowego lub unikalną pełną nazwę; preferowane jest używanie ID; gdy wyświetlana nazwa nadal nie może jednoznacznie wskazać obiektu, instancja odrzuci operację i nie będzie zgadywać obiektu. Kontakt bez lokalnej konwersacji najpierw otworzy konwersację przez klienta, a następnie wyśle wiadomość po sprawdzeniu rzeczywistego ID konwersacji. Nagłówek żądania `Idempotency-Key` składa się z 8–128 liter, cyfr lub `_.:-`. Powtórzone żądania tej samej operacji muszą ponownie używać tego samego klucza i tej samej treści żądania.
+
+Zastąpienie `target` tablicą `targets` pozwala wysyłać seryjnie do 1–50 jednoznacznie określonych celów. Nie można podawać obu jednocześnie. Wszystkie cele najpierw kończą rozpoznanie tożsamości, a różne aliasy wskazujące ten sam obiekt zostaną odrzucone. Po niepowodzeniu jednego celu kolejne wysyłanie zostaje zatrzymane, a wynik zadania rejestruje dla każdego elementu `succeeded`, `failed`, `unknown` lub `not_attempted`; nie należy traktować częściowego sukcesu jako pełnego sukcesu. Ten proces nadal wymaga prawdziwego odbioru określonych kontaktów w środowisku wdrożeniowym.
+
+Zadania mogą znajdować się w stanie queued, running, submitting, succeeded, failed, unknown lub cancelled. `succeeded` oznacza, że po przesłaniu w rekordzie odpowiedniej konwersacji znaleziono dokładny tekst i ID wiadomości serwera, `delivered` nadal ma wartość null i nie oznacza, że druga strona ją otrzymała. unknown oznacza, że wynik jest niejednoznaczny, sprawdź historię i nie powtarzaj wysyłania z nowym kluczem. Instancja nie ponawia automatycznie przerwanych zadań.
+
+Historia zawiera tylko treści, które klient już zsynchronizował, i nie może gwarantować pełnej historii. Wiadomości nietekstowe mogą zwracać typ unknown, a pobieranie załączników nie jest jeszcze dostępne. Zdarzenia zachowują ostatnie 10 000 wpisów, `gap` oznacza, że kursor przekroczył okno retencji. Pierwsze połączenie nie odtworzy starej historii jako nowych wiadomości.
+
+`server_accepted` i `server_id` w historii wiadomości mogą służyć do sprawdzenia, czy serwer zaakceptował lokalną wiadomość; jeśli istnieje tylko lokalny rekord bez ID serwera, nie można uznać wysyłania za udane. Te pola nie oznaczają, że odbiorca otrzymał lub przeczytał wiadomość. Rekordy zdarzeń zachowują stan w chwili wygenerowania, aby sprawdzić bieżący stan potwierdzenia, należy użyć interfejsu historii wiadomości.
+
+## Konto i dane uwierzytelniające
+
+Loguj się tylko na konto, do obsługi którego właściciel ma uprawnienia. Skonfiguruj token API w zaufanych aplikacjach; może on uzyskać dostęp do danych konta tej instancji. Nie publikuj haseł, kodów QR ani zrzutów ekranu czatów w miejscach publicznych. Wstrzymanie instancji przerwie zdarzenia w czasie rzeczywistym. Po wylogowaniu konta lub usunięciu urządzenia po stronie telefonu wymagane jest ponowne logowanie.
+
+Obecne wprowadzanie tekstu obsługuje tylko jedną linię, a znaki nowej linii zostaną wyraźnie odrzucone przed wysłaniem. Gdy klient wymaga weryfikacji bezpieczeństwa lub ponownego logowania, właściciel konta powinien je ukończyć na pulpicie zdalnym; instancja nie ominie weryfikacji. Zadania po przerwaniu weryfikacji mogą zwrócić unknown, najpierw sprawdź rekordy wiadomości i nie wysyłaj ponownie z nowym kluczem idempotencji.
+
+Po wykryciu monitu o weryfikację bezpieczeństwa, wylogowania konta lub zmiany kolejka automatyzacji zostanie trwale wstrzymana. Po ukończeniu weryfikacji na telefonie można kontynuować niewykonane jeszcze zadania przez „Wznów po weryfikacji” w konsoli instancji; zadania, które zostały już przesłane, ale których wynik jest niepewny, nie zostaną ponowione. Zwykła praca zdalna również może wywołać weryfikację bezpieczeństwa WeCom. Opisane oficjalnie 24-godzinne okno braku ponownej blokady po weryfikacji nie oznacza wyeliminowania wykrywania ani nie oznacza, że instancja może zagwarantować długotrwałą pracę bez nadzoru.
