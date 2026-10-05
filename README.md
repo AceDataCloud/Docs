@@ -86,7 +86,7 @@ or generates translations.
 
 ## Daily capability updates
 
-PlatformBackend `scripts/sync_ecosystem.py` is the only scheduled coordinator.
+PlatformBackend `ecosystem.py` is the only scheduled coordinator.
 One daily Kubernetes Job reviews Backend docs and API changes with Claude Code,
 updates existing files, and creates or updates one reviewable PR per repository.
 It never merges PRs or duplicates the Backend guide tree. Normal CI and review
