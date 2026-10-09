@@ -1,236 +1,348 @@
 ---
-title: "串接「使用 Ace Data Cloud 登入」（OAuth 2.0）"
+title: "串接 Ace Data Cloud OAuth 2.0"
 ---
 
-讓你自己的產品支援「使用 Ace Data Cloud 登入」，並在使用者授權後，**代表使用者**讀寫其 Ace Data Cloud 資源（個人資料、API Token、訂閱、用量、訂單等）。底層是標準的 **OAuth 2.0 授權碼模式（Authorization Code）+ PKCE**，與 GitHub / Google 登入的串接方式完全一致——你已有的任何 OAuth 用戶端函式庫都能直接使用。
+讓使用者授權你的應用存取其 Ace Data Cloud 個人資料、服務訂閱、API Key、用量或訂單。使用標準 **Authorization Code + S256 PKCE**：應用開啟授權頁，使用者同意後收到一次性 `code`，再換取 OAuth access token。
 
-> **適合情境**：你正在開發一個第三方應用程式 / Agent / MCP 用戶端 / 自動化工作流程，想讓使用者用 Ace Data Cloud 帳號一鍵登入，並依需求存取他在平台上的資源，而不必讓使用者手動複製貼上 API Key。
+OAuth access token 用於存取帳戶資源介面；呼叫模型 API 使用相應的 API Key。OAuth 授權不會自動建立 API Key、開通服務或增加餘額。
 
-## 名詞 & 端點速查
+## 選擇串接方式
 
-所有端點都在 `https://auth.acedata.cloud`，可透過探索端點（Discovery）隨時取得最新位址：
+| 方式            | 適用情境                                | 授權完成後                                           |
+| ------------- | ----------------------------------- | ----------------------------------------------- |
+| 標準 OAuth 跳轉   | 獨立網站、桌面或行動用戶端；嵌入網站自行發起授權            | 瀏覽器回到應用登記的 `redirect_uri`，應用處理 `code` 和 `state` |
+| Studio 網站元件授權 | 網站嵌入 Studio 首頁，並希望使用訪客目前的 Studio 帳號 | Studio 向應用傳送授權結果訊息，應用不跳轉，原頁面保留                  |
+
+標準跳轉不要求 `embed=studio`、`embed_origin` 或 `postMessage`。Studio 元件模式由宿主建立授權頁並維護訊息橋；第三方按本文末尾的元件協定串接，不要自行拼接這兩個參數。
+
+## 端點與探索文件
 
 ```bash
 curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
 ```
 
-| 用途                 | 端點                                                |
-| ------------------ | ------------------------------------------------- |
-| 探索文件（Discovery）    | `GET /.well-known/oauth-authorization-server`     |
-| 使用者授權頁（瀏覽器跳轉）       | `GET https://auth.acedata.cloud/oauth2/authorize` |
-| 權杖端點（交換 / 重新整理 token） | `POST https://auth.acedata.cloud/oauth2/token`    |
-| 撤銷權杖               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
-| 使用者資訊（UserInfo）     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
-| 應用程式註冊管理（自助）         | `https://auth.acedata.cloud/user/oauth-apps`      |
+| 用途                | 位址                                                                                |
+| ----------------- | --------------------------------------------------------------------------------- |
+| 瀏覽器授權頁            | `https://auth.acedata.cloud/oauth2/authorize`                                     |
+| 換取／重新整理 OAuth token | `POST https://auth.acedata.cloud/oauth2/token`                                    |
+| 提交撤銷請求            | `POST https://auth.acedata.cloud/oauth2/revoke`                                   |
+| 目前使用者資訊            | `GET https://auth.acedata.cloud/api/v1/users/me`                                  |
+| OAuth 應用管理頁面      | [OAuth 應用](https://auth.acedata.cloud/user/oauth-apps)                            |
+| 已登入使用者的應用清單／註冊介面   | `https://auth.acedata.cloud/api/v1/oauth2/applications/`                          |
+| 授權頁使用的公開應用資料      | `GET https://auth.acedata.cloud/api/v1/oauth2/application/<client_id>/`           |
+| 使用者的現有 API Key     | `GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;使用者ID>&limit=100` |
 
-支援的功能：`response_type=code`、`grant_types=authorization_code, refresh_token`、`code_challenge_methods=S256, plain`、用戶端驗證方式 `client_secret_post`（機密用戶端）/ `none`（PKCE 公開用戶端）。
+應用管理介面需要帳戶登入驗證，不是匿名動態註冊（DCR）介面。MCP 服務自己的探索／註冊位址與本表中的帳戶 OAuth 端點是不同入口；連線具體 MCP 時依該服務的文件和探索結果操作。
 
-## 權限範圍（Scope）
+探索文件用於取得端點與協定能力。目前流程回傳 OAuth token，不回傳 `id_token`；不要僅因存在 `openid` scope 就依完整 OpenID Connect 登入流程處理。
 
-依「最小權限」申請，使用者會在授權頁看到你申請的每一項權限。
+## 權限範圍：使用目前 scope 名稱
 
-**身分類（OIDC 相容）**
+`scope` 是以空格分隔、區分大小寫的權限名稱。新應用使用 `profile:read`、`email:read`、`phone:read` 等具體權限。
 
-| Scope     | 含義      | `/users/me` 回傳欄位                                           |
-| --------- | ------- | ---------------------------------------------------------- |
-| `openid`  | 使用者唯一識別  | `id`                                                       |
-| `profile` | 基本資料    | `username`、`nickname`、`avatar`、`is_verified`、`date_joined` |
-| `email`   | 電子郵件      | `email`                                                    |
-| `phone`   | 手機號碼（敏感） | `phone`、`region`                                           |
+### 從哪裡取得可申請的權限
 
-**平台資源類**
+登入後，OAuth 應用清單介面 `GET /api/v1/oauth2/applications/` 回傳 `available_scopes`；應用管理頁面的權限選擇器使用同一份目錄。這是一般自助應用應採用的可選範圍。
 
-| Scope                                      | 含義                     |
-| ------------------------------------------ | ---------------------- |
-| `applications:read` / `applications:write` | 讀取 / 修改 使用者的服務訂閱與額度       |
-| `credentials:read` / `credentials:write`   | 讀取 / 建立撤銷 使用者的 API Token |
-| `usage:read`                               | 讀取使用者的呼叫歷程               |
-| `orders:read` / `orders:write`             | 讀取訂單 / 下單並發起付款          |
+**Discovery 的 `scopes_supported` 包含平台識別的全部權限名稱，不代表你的應用可以申請其中的每一項。** 實際授權同時檢查：
 
-**聚合類（自動展開）**
+1. 權限是否允許委派給該應用類型；
+2. 權限是否已登記在這個 OAuth 應用的允許範圍內；
+3. 目前使用者是否擁有請求的權限。
 
-| Scope            | 展開為                                                                     |
-| ---------------- | ----------------------------------------------------------------------- |
-| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
-| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
-| `platform`       | `platform:read` + `platform:write`                                      |
+未知、未登記、不允許委派或使用者不具備的權限會回傳 `invalid_scope`。授權碼兌換及重新整理時也會重新檢查，不會自動補齊或提升權限。
 
-**特殊**
+### 一般自助應用可選權限
 
-| Scope            | 含義                                                 |
-| ---------------- | -------------------------------------------------- |
-| `offline_access` | 核發 **Refresh Token**（未申請則只發放 Access Token，過期需重新授權） |
+以下為目前目錄（2026-10-09）；串接時以 `available_scopes` 為準。
 
-> 典型組合：第三方「一鍵登入」=`openid profile`；MCP / IDE 用戶端需要自動設定 Key =`openid profile credentials:read credentials:write`；完整管理後台 =`openid profile email platform offline_access`。
+| Scope                                            | 用途                                      |
+| ------------------------------------------------ | --------------------------------------- |
+| `profile:read` / `profile:write`                 | 讀取／更新個人資料                               |
+| `email:read`                                     | 讀取電子郵件                                  |
+| `phone:read`                                     | 讀取手機號碼及地區                                |
+| `billing-profile:read` / `billing-profile:write` | 讀取／管理帳單資料                               |
+| `applications:read` / `applications:write`       | 讀取／管理服務訂閱                               |
+| `credentials:read` / `credentials:write`         | 讀取／管理 API Key                           |
+| `usage:read`                                     | 讀取呼叫記錄                                  |
+| `orders:read` / `orders:write`                   | 讀取／建立和管理訂單                              |
+| `auto-recharge:read` / `auto-recharge:write`     | 讀取／管理自動儲值設定                             |
+| `recharge-cards:redeem`                          | 兌換儲值卡                                   |
+| `coin:read`                                      | 讀取代幣相關資訊                                |
+| `distribution:read`                              | 讀取分銷資訊                                  |
+| `connections:read` / `connections:write`         | 讀取／管理連線                                 |
+| `skills:read` / `skills:write`                   | 讀取／管理技能                                 |
+| `openid`                                         | 目前實作也允許 UserInfo 回傳基礎資料；不回傳 ID Token    |
+| `offline_access`                                 | 請求 refresh token，以便在 access token 過期後重新整理 |
 
-## 第 1 步：註冊一個 OAuth 應用程式
+例如，只讀取個人資料用 `profile:read`；需要電子郵件再加 `email:read`；讀取已有 API Key 用 `profile:read credentials:read`。只有確實需要建立或修改 Key 時才申請 `credentials:write`，需要重新整理時再加 `offline_access`。
 
-開啟 [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) →「建立應用程式」，填寫：
+部分權限僅供平台核准的受信任應用使用，例如 `sites:read`、`sites:write`、`platform-tokens:read`；另一些權限不開放給一般第三方 OAuth 應用。用戶端類型 `public`／`confidential` 描述的是能否保管 secret，與應用是否受信任無關。自助建立應用不能自行開啟受信任權限。
 
-1. **應用程式名稱 / 描述 / Logo**：會顯示在使用者的授權同意頁。
-2. **用戶端類型（Client Type）**：
-   - **機密（confidential）**——你有後端，能安全保管 `client_secret`（Web 服務、後端服務）。
-   - **公開（public）**——純前端 / 桌面 / CLI / 行動裝置，**無法**保管密鑰，必須使用 **PKCE**。
-3. **回呼位址（Redirect URIs）**：授權完成後使用者被重新導向回的位址，**必須與你發起授權時傳入的 `redirect_uri` 完全一致**，可填寫多個。
-4. **權限範圍（Scopes）**：勾選上一節中你需要的 scope。
+`account` 是指定的官方帳戶管理 MCP 使用的帳戶權限選擇器，不是第三方應用的「全部權限」scope，不能與其他 scope 混用。第三方應明確列出需要的具體權限。
 
-儲存後取得 **`client_id`**；機密用戶端還會**一次性**顯示 **`client_secret`**——立即儲存，關閉後無法再次查看（可在詳情頁「輪換密鑰 / Rotate Secret」重新產生，舊密鑰立即失效）。
+### 從舊文件遷移
 
-> 每個帳號最多可建立 **20** 個 OAuth 應用程式。
+| 舊寫法                                         | 目前接法                       |
+| ------------------------------------------- | -------------------------- |
+| `profile`                                   | `profile:read`             |
+| `email`                                     | `email:read`               |
+| `phone`                                     | `phone:read`               |
+| `platform`、`platform:read`、`platform:write` | 逐項列出實際需要的具體權限，沒有通用的「全選」替代值 |
 
-## 第 2 步：將使用者重新導向至授權頁
+舊名稱不作為相容別名接受。同步更新 OAuth 應用登記的 scopes、授權 URL 和自己的權限判斷；修改應用設定不會給已簽發 token 增加權限，需要使用者重新授權。
 
-在你的應用程式中，將使用者瀏覽器跳轉至授權頁，帶上查詢參數：
+## 第 1 步：註冊 OAuth 應用
 
+開啟 [OAuth 應用管理](https://auth.acedata.cloud/user/oauth-apps)，建立應用並填寫：
+- 名稱、描述、應用程式 Logo：顯示在授權頁的應用程式一側。
+- 用戶端類型：純前端、行動或桌面用戶端選擇 **Public**；能在後端保管 secret 的服務選擇 **Confidential**。
+- 回呼地址：正式環境使用 HTTPS，並登記應用程式真正處理回呼的完整 URL。
+- 權限：從頁面提供的目錄中選擇實際需要的 scopes。
+
+儲存 `client_id`。Confidential 用戶端將 `client_secret` 儲存在伺服器端，不能放到 HTML、前端建置變數或 URL 中。Public 用戶端換取 token 不使用 secret，即使註冊回應包含該欄位，也不能把它當作用戶端可以保密的憑據。
+
+`redirect_uri` 在註冊、授權和換 token 時必須精確一致，包括路徑、尾端斜線和查詢參數。每個帳號最多建立 20 個應用程式。Secret 只在建立／輪換時顯示；輪換後舊 secret 無法繼續進行需要用戶端驗證的兌換。
+
+## 第 2 步：按鈕發起授權
+
+每次點擊連線，產生新的隨機 `state` 與 `code_verifier`，計算：
+
+```text
+code_challenge = BASE64URL(SHA256(code_verifier))
 ```
+
+將 `state`、verifier 和回呼地址儲存在應用程式自己的工作階段中，再用 URL 編碼後的參數開啟授權頁：
+
+```text
 https://auth.acedata.cloud/oauth2/authorize
   ?response_type=code
-  &client_id=<你的 client_id>
-  &redirect_uri=<你注册的回调地址>
-  &scope=openid%20profile%20credentials:read
-  &state=<随机防 CSRF 串>
-  &code_challenge=<PKCE 挑战值>          # 公开客户端必填
-  &code_challenge_method=S256            # 公开客户端必填
+  &client_id=<client_id>
+  &redirect_uri=<完整回呼地址>
+  &scope=profile%3Aread%20credentials%3Aread
+  &state=<本次隨機值>
+  &code_challenge=<本次S256挑戰值>
+  &code_challenge_method=S256
 ```
 
-- `state`：自行產生的隨機字串，回呼時原樣帶回，用來防範 CSRF，**務必驗證**。
-- **PKCE（公開用戶端必做，機密用戶端也建議）**：先產生隨機 `code_verifier`，再計算
-  `code_challenge = BASE64URL( SHA256( code_verifier ) )`，將 `code_challenge` 放入授權 URL，
-  `code_verifier` 自己保留至第 4 步使用。
+Public 用戶端必須傳送 S256 PKCE。雖然 Discovery 還列出 `plain`，Public 用戶端不能使用它。Confidential 用戶端也建議使用 S256；發起授權時使用了 PKCE，兌換時就必須提交對應 verifier。
 
-使用者登入並點擊「同意」後，瀏覽器會被重新導向回：
+使用者同意後回到 `redirect_uri`，查詢參數包含 `code` 和原樣回傳的 `state`。拒絕時回傳 `error=access_denied`、錯誤說明及 `state`。處理回呼前先驗證 state 與本次工作階段相符。授權碼有效期為 10 分鐘，且只能兌換一次；失敗後應重新發起連線，不要反覆重新整理舊回呼 URL。
 
-```
-<redirect_uri>?code=<授权码>&state=<原样返回的 state>
-```
+## 第 3 步：換取 OAuth token
 
-若使用者拒絕：`<redirect_uri>?error=access_denied&error_description=...&state=...`。
-
-> 授權碼有效期限為 **10 分鐘**，且**只能使用一次**。
-
-## 第 3 步：使用授權碼交換權杖
-
-在你的**後端**（機密用戶端）或用戶端（PKCE 公開用戶端）使用 `code` 呼叫權杖端點。
-
-**機密用戶端（帶 client_secret）：**
+Public 用戶端直接從瀏覽器或用戶端兌換；Confidential 用戶端在自己的後端兌換。請求本文支援表單編碼，以下變數代表應用程式本次授權取得的資料：
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<上一步拿到的 code> \
-  -d client_id=<你的 client_id> \
-  -d client_secret=<你的 client_secret> \
-  -d redirect_uri=<和第 2 步完全一致的回调地址>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI" \
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "code_verifier=$PKCE_VERIFIER"
 ```
 
-**公開用戶端（PKCE，無 client_secret）：**
-```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<code> \
-  -d client_id=<你的 client_id> \
-  -d code_verifier=<第 2 步生成的 code_verifier> \
-  -d redirect_uri=<回调地址>
-```
+Confidential 用戶端還需在伺服器端增加 `client_secret` 表單欄位。目前支援 `client_secret_post`，不要將 HTTP Basic 用戶端驗證當作已支援的方式。
 
-成功回傳（`refresh_token` 僅在申請了 `offline_access` 時出現）：
+成功回應中讀取 `access_token`、`token_type`、`expires_in` 和實際授予的 `scope`。只有請求並獲准 `offline_access` 才有 `refresh_token`。不要把 OAuth access token 當作模型 API 的 API Key，也不要把 token、verifier 或授權碼寫入日誌、分析事件或分享連結。
 
-```json
-{
-  "access_token": "<JWT>",
-  "token_type": "Bearer",
-  "expires_in": 1296000,
-  "scope": "openid profile credentials:read",
-  "refresh_token": "<JWT，仅 offline_access 时>"
-}
-```
+## 第 4 步：讀取使用者資訊和 API Key
 
-`access_token` 是一個 JWT，內含 `scope` 宣告；有效期 **15 天**（`expires_in` 秒數）。Refresh Token 有效期 **30 天**。
-
-## 第 4 步：用 Access Token 呼叫介面
-
-把權杖放進 `Authorization: Bearer` 標頭即可。
-
-**讀取使用者資訊（UserInfo，欄位依已授權 scope 篩選）：**
+先使用 OAuth access token 請求 UserInfo：
 
 ```bash
 curl https://auth.acedata.cloud/api/v1/users/me \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-**呼叫平台資源介面**（`platform.acedata.cloud`，依 scope 驗證）。例如已獲 `credentials:read`：
+回傳欄位取決於 scope：`id` 是使用者識別；`profile:read` 或 `openid` 可讀取基本資料（如 `username`、`nickname`、`avatar`、`is_verified`、`date_joined`、`registration_method`）；電子郵件需要 `email:read`，手機號碼及地區需要 `phone:read`。不要依賴未授權欄位總是存在。
+
+需要已有 API Key 且獲准 `credentials:read` 時，用 UserInfo 的 `id` 作為篩選條件：
 
 ```bash
-curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<UserInfo返回的id>" \
-  -H "Authorization: Bearer <access_token>"
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=$USER_ID&limit=100&offset=0" \
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-平台後端會驗證 JWT 裡的 `scope` 宣告——權杖只能存取使用者授權過的資源。若存取了未授權的資源，會回傳 `403`。
+回傳清單使用 `count` 和 `items`，Key 欄位是 **`items[*].token`**，不是 `data[0].value`。`user_id=me` 不是這個介面的有效使用者 ID。多頁資料按 `offset`／`limit` 繼續讀取，不要把第一頁當作全部憑證。
 
-## 重新整理權杖
+根據應用程式、服務和有效狀態選擇適用的憑證，不要盲目取第一筆。清單為空不代表授權失敗；使用者可能尚未建立適用的 Key。OAuth access token 的權限控制與 API Key 自身的服務範圍、額度和過期條件是不同限制。
 
-Access Token 過期後，用 Refresh Token 換一對新權杖（需當初申請了 `offline_access`）：
+**允許讀取 API Key 意味著第三方能夠儲存並使用它。撤銷 OAuth 請求或清除應用程式登入狀態不會使已複製的 API Key 失效；需要使用者在憑證管理中另外撤銷或輪換該 Key。**
+
+## 可執行的 Public / PKCE 瀏覽器範例
+
+將下列頁面部署到你登記的 `REDIRECT_URI`，替換 `CLIENT_ID` 和回呼地址。按鈕發起標準授權，回到同一頁面後讀取個人資料和既有 Key 數量。範例不顯示、不持久化 Key；正式應用程式根據實際用途消費結果。先在獨立瀏覽器頁面驗證，再按後面的 iframe 要求驗收。
+```html
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>连接 Ace Data Cloud</title>
+<button id="connect" type="button">连接账号</button>
+<p id="status" role="status">尚未连接</p>
+<script type="module">
+const CLIENT_ID = '替换为你的 client_id';
+const REDIRECT_URI = 'https://your-app.example/connect';
+const AUTH_ORIGIN = 'https://auth.acedata.cloud';
+const button = document.querySelector('#connect');
+const status = document.querySelector('#status');
+const storageKey = state => `ace-oauth:${state}`;
+
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`接口返回 HTTP ${response.status}`);
+  return response.json();
+}
+
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  try {
+    const state = base64url(crypto.getRandomValues(new Uint8Array(24)));
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    sessionStorage.setItem(storageKey(state), JSON.stringify({
+      verifier, redirectUri: REDIRECT_URI, createdAt: Date.now()
+    }));
+    const url = new URL('/oauth2/authorize', AUTH_ORIGIN);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
+      scope: 'profile:read credentials:read', state,
+      code_challenge: base64url(new Uint8Array(digest)), code_challenge_method: 'S256'
+    }).toString();
+    window.location.assign(url);
+  } catch {
+    status.textContent = '无法开始连接，请检查浏览器存储设置后重试。';
+    button.disabled = false;
+  }
+});
+
+async function handleCallback() {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('code') && !url.searchParams.has('error')) return;
+  button.disabled = true;
+  try {
+    const state = url.searchParams.get('state');
+    const raw = state && sessionStorage.getItem(storageKey(state));
+    if (!raw) throw new Error('授权会话不匹配，请重新连接。');
+    const transaction = JSON.parse(raw);
+    const age = Date.now() - transaction.createdAt;
+    if (!Number.isFinite(age) || age < 0 || age > 10 * 60 * 1000 ||
+        transaction.redirectUri !== REDIRECT_URI || !transaction.verifier) {
+      throw new Error('授权会话已失效，请重新连接。');
+    }
+    sessionStorage.removeItem(storageKey(state));
+    const code = url.searchParams.get('code');
+    const denied = url.searchParams.get('error');
+    for (const key of ['code', 'state', 'error', 'error_description']) url.searchParams.delete(key);
+    window.history.replaceState({}, '', url);
+    if (denied) throw new Error('未完成授权，可以重新连接。');
+    if (!code) throw new Error('回调缺少授权码，请重新连接。');
+    status.textContent = '正在连接…';
+    const token = await requestJson(`${AUTH_ORIGIN}/oauth2/token`, {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'authorization_code', client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI, code, code_verifier: transaction.verifier
+      })
+    });
+    if (!token.access_token) throw new Error('未取得授权令牌。');
+    const headers = { Authorization: `Bearer ${token.access_token}` };
+    const profile = await requestJson(`${AUTH_ORIGIN}/api/v1/users/me`, { headers });
+    if (!profile.id) throw new Error('未取得用户标识。');
+    const keysUrl = new URL('https://platform.acedata.cloud/api/v1/credentials/');
+    keysUrl.search = new URLSearchParams({ user_id: profile.id, limit: '100' }).toString();
+    const credentials = await requestJson(keysUrl, { headers });
+    if (!Array.isArray(credentials.items)) throw new Error('凭证列表格式不符。');
+    const keyCount = credentials.items.filter(item => typeof item.token === 'string' && item.token).length;
+    status.textContent = `已连接 ${profile.nickname || profile.username || profile.id}；本页有 ${keyCount} 条 API Key。`;
+  } catch (error) {
+    status.textContent = `连接未完成：${error.message || '网络异常'} 请重新点击连接。`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+await handleCallback();
+</script>
+</html>
+```
+
+範例的回呼和入口必須位於相同來源、同一瀏覽器分頁／iframe，才能讀取先前儲存的 `sessionStorage`。正式環境應用程式應在自己的工作階段方案中管理權杖，處理過期，並在收到回應後清除授權 URL 參數；頁面主介面應先渲染，網路失敗僅影響連線狀態。
+
+## 白牌網站中的 iframe
+
+### 客戶網站自行跳轉授權頁
+
+使用標準 OAuth 參數和自己的回呼處理即可；`window.location.assign()` 導覽目前的 iframe，父頁面保留在白牌網域。無需為了圖示新增 `embed=studio` 或實作 Studio 訊息協定。
+
+需要符合以下條件：
+
+- 應用程式頁面和回呼頁面使用 HTTPS，實際可存取，並允許白牌父網域透過 iframe 嵌入；檢查雙方的 `Content-Security-Policy: frame-ancestors` 與 `X-Frame-Options`。
+- sandbox 允許頁面所需的指令碼、表單和來源／儲存能力。支援彈出式登入時還需要相應的彈出視窗能力；優先使用 Studio 提供的 Website 元件設定。
+- 瀏覽器允許目前嵌入情境使用授權狀態所需的儲存。白牌站登入狀態與 AuthFrontend 登入狀態可能不同，不應假設登入了白牌站就已登入授權頁。
+- 回呼中的 token 交換服務可用，跨來源請求允許應用程式來源；DNS、CORS、HTTP 錯誤都必須顯示可重試的狀態，不能讓整個頁面停止渲染。
+
+授權頁左側讀取 OAuth 應用程式 Logo；右側在瀏覽器可提供父來源且父網域通過已驗證網站校驗時讀取該 Site 的 favicon／logo，否則顯示預設圖示。這只決定品牌顯示，不建立登入工作階段，也不會向客戶頁面提供帳戶權限。
+
+**目前限制：一般 OAuth 在 iframe 內需要重新登入時，登入完成後繼續回到授權頁的流程尚有缺口。** 上線前必須分別驗收「Auth 已登入」和「Auth 未登入／已過期」。在該缺口修復並驗證前，首次登入可使用獨立頁面完成標準 OAuth，或採用下面的 Studio 元件授權；不要僅憑已登入的測試結果承諾所有 iframe 情境可用。
+
+### 使用 Studio 目前帳號授權
+
+在 Studio「設定 → 首頁 → 網站元件」開啟 OAuth，填寫 `client_id` 和已登記的回呼位址。網站與回呼必須使用相同 HTTPS 來源，並與 Studio 來源不同。第三方頁面需要：
+
+1. 向確切的父站點 origin 傳送 `acedatacloud:oauth:ready`，接收並校驗 `acedatacloud:oauth:init`。
+2. 按鈕產生 state 與 PKCE verifier，傳送 `acedatacloud:oauth:authorize`（state、S256 challenge）；verifier 保留在自己的頁面內。
+3. 校驗父視窗、origin 和 state，處理 `acedatacloud:oauth:result` 中的 code 或 error，並依標準 token 端點兌換。
+Studio 在元件區域顯示授權頁，使用者同意後以訊息傳回授權碼，應用程式不需要跳轉。沒有登入時傳回 `login_required`，拒絕時傳回 `access_denied`，等待逾時傳回 `authorization_timeout`。帳號變更會重建應用程式 iframe 並取消未完成授權。
+
+元件目前請求 `profile:read credentials:read`，不包含 `offline_access`。不要假設一定能收到 refresh token。`embed=studio`、`embed_origin` 由 Studio 宿主與授權頁維護，客戶頁面只需遵守訊息協定。
+
+完整按鈕範例見 [Studio 網站元件 OAuth 串接指南](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md)。
+
+## 生命週期、重新整理和撤銷
+
+Access token 的預設有效期為 15 天，應以每次回應的 `expires_in` 安排重新整理或重新授權；refresh token 預設 30 天，期限受服務設定影響。不要把這兩個值硬編碼為永久承諾。
+
+獲准 `offline_access` 後，可呼叫：
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=refresh_token \
-  -d refresh_token=<你的 refresh_token>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=refresh_token \
+  --data-urlencode "refresh_token=$OAUTH_REFRESH_TOKEN"
 ```
 
-回傳結構同第 3 步；scope 會從原授權中**原樣保留**。重新整理後舊 Refresh Token 失效（輪換），請儲存新的。
+重新整理會傳回新的 token，應用程式應儲存最新值。重新整理時會檢查應用程式是否仍有效、使用者是否可用、權限是否仍獲准。失敗時清除自己的連線狀態並重新授權。
 
-## 撤銷權杖
+**目前 OAuth 重新整理實作不保證舊 refresh token 在重新整理後立即失效。** 不要將拿到新 token 當作舊 token 已被撤銷，也不要以輪換 secret 取代終止既有 token。
+
+撤銷請求的呼叫方式是：
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/revoke \
-  -d token=<access_token 或 refresh_token>
+curl https://auth.acedata.cloud/oauth2/revoke \
+  --data-urlencode "token=$OAUTH_ACCESS_TOKEN"
 ```
 
-## 真實案例：我們自己的 MCP 伺服器就是這樣串接的
+**目前撤銷端點傳回 HTTP 200，但沒有實作已簽發 JWT 的即時失效。** 應用程式應清除自己儲存的 token，不能把 200 當作所有已簽發 token 或 API Key 已失效的證明。涉及已外洩或已複製的 API Key，應單獨撤銷或輪換對應憑證。
 
-Ace Data Cloud 的 15+ 個 MCP 伺服器（NanoBanana、Midjourney、Suno、Seedance、Kling…）在 Claude Desktop / Cursor 裡出現的「Sign in with Ace Data Cloud」連線，走的就是這套流程：它們都是註冊為 **公開（PKCE）** 類型的 OAuth 應用程式，申請 `credentials` 相關 scope，使用者授權後 MCP 伺服器即可代表使用者呼叫 `api.acedata.cloud`——無需使用者手動貼上 API Key。你的串接方式和它們完全一樣。
+## 常見錯誤與驗收
 
-## 常見錯誤
+| 現象／錯誤                         | 排查                                                                    |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `invalid_scope`               | 使用現行權限名稱；檢查應用程式登記範圍、委派限制及使用者權限。Discovery 全目錄不是應用程式可選目錄                      |
+| `invalid_request`             | 必填參數、精確回呼地址、Public 用戶端 S256 challenge 和 method                        |
+| `invalid_client`              | client ID、應用程式狀態、Confidential 用戶端 secret；檢查是否錯誤使用了 Basic 驗證             |
+| `invalid_grant`               | code 過期／已使用、verifier 或 redirect URI 不符合；重新整理時還檢查應用程式和權限變更                 |
+| `access_denied`               | 使用者拒絕，恢復連線按鈕，不要循環彈出授權                                                  |
+| `unsupported_grant_type`      | 目前支援 `authorization_code`、`refresh_token`                             |
+| HTTP 401／403                  | 區分無效登入狀態、token、授權 scope 與資源本身的存取權限                                     |
+| `Failed to fetch`、DNS／CORS 錯誤 | 核對真實請求主機及客戶後端可用性，不能歸因於「使用者沒有 Key」                                      |
+| 已授權但讀不到 Key                   | 使用 `platform.acedata.cloud`、真實 user ID、`items[*].token`；區分空清單、分頁和失敗回應 |
+| 授權傳回後整頁空白                     | 頁面先渲染；回呼、token、UserInfo 和憑證請求各自處理錯誤；不要讓初始化例外停止整頁                      |
+| iframe 登入後不繼續                 | 按上文現有限制處理，測試未登入、過期、拒絕和重新連線情境                                          |
 
-錯誤回應統一為 `{ "error": "<code>", "error_description": "&lt;人類可讀說明>" }`：
-
-| error                    | 含義 / 排查                                                         |
-| ------------------------ | --------------------------------------------------------------- |
-| `invalid_request`        | 缺少或不合法參數（如沒傳 `code` / `client_id`）                               |
-| `invalid_client`         | `client_id` 不存在、應用程式被停用，或 `client_secret` 不對                      |
-| `invalid_grant`          | 授權碼不存在 / 已過期（>10 分鐘）/ 已被用過 / PKCE 驗證失敗 / `redirect_uri` 與授權時不一致 |
-| `access_denied`          | 使用者在授權頁點了「拒絕」                                                    |
-| `unsupported_grant_type` | `grant_type` 不是 `authorization_code` 或 `refresh_token`          |
-
-## 限制速查
-
-| 項目                 | 值                               |
-| ----------------- | ------------------------------- |
-| 每帳號最多 OAuth 應用程式數   | 20                              |
-| 授權碼有效期            | 10 分鐘，單次使用                      |
-| Access Token 有效期  | 15 天                            |
-| Refresh Token 有效期 | 30 天（輪換）                        |
-| `redirect_uri`    | 必須與註冊值精確相符                      |
-| `client_secret`   | 僅建立 / 輪換時顯示一次，伺服器端以 SHA-256 雜湊儲存 |
-
-## 在 Studio 首頁嵌入第三方 OAuth 應用程式
-
-Studio 的「設定 → 首頁 → 網站元件」可啟用 OAuth，設定第三方應用程式的 `client_id` 和已登記的回呼地址。
-網站與回呼必須使用 HTTPS、具有相同的來源（協定、網域名稱和連接埠），並與 Studio 使用不同的來源。
-設定中不得填寫 `client_secret`；應用程式密鑰只能存放在第三方後端。
-
-元件申請的權限為 `profile:read credentials:read`。每位訪客需要個別同意；站長設定元件不代表訪客授權。
-第三方頁面產生隨機 `state` 和 PKCE verifier，向 Studio 傳送 S256 challenge。Studio 在元件區域承載官方授權頁，
-使用者同意後，第三方收到一次性授權碼，呼叫 token 端點換取 OAuth access token，隨後存取
-`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;使用者ID>` 讀取現有 API Key。
-使用者 ID 來自前一步 `GET https://auth.acedata.cloud/api/v1/users/me` 回傳的 `id`；憑證清單介面不接受 `user_id=me`。
-Studio 不向第三方傳送自己的登入 token 或直接讀取並注入使用者的 Key。
-
-公開用戶端必須使用 **S256 PKCE**。換取 token 時必須傳入與授權請求完全一致的 `redirect_uri`。
-授權碼只能兌換一次。授權前會檢查回呼地址是否已登記。
-
-第三方頁面需要實作訊息協定；任意現成網頁不能僅靠填寫 URL 自動接入。
-完整範例見 [Studio OAuth 元件串接指南](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md)。
-
-**授權讀取 API Key 等於允許第三方儲存並使用該 Key。取消 OAuth 授權不會使第三方已複製的 Key 失效；
-使用者需要另外撤銷或輪換 Key。**
+交付前至少驗證：正確回呼、拒絕、錯誤 state、過期／已使用 code、無 Key、網路失敗、token 過期、所需 scope 缺失，以及 iframe 情境下的首次登入與帳號切換。測試證據中不要儲存完整 code、token 或 API Key。

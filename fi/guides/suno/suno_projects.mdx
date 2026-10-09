@@ -3,149 +3,708 @@ title: "Suno Studio -projektin integrointiopas"
 description: "Suno Music Generation API guide - Ace Data Cloud"
 ---
 
-Suno Studio -projektin API hallinnoi moniraitaisia musiikkiprojekteja yhden päätepisteen kautta:
+`POST https://api.acedata.cloud/suno/projects` on Beta-rajapinta moniraitaprojektien hallintaan. Yksi päätepiste erottaa luomisen, tallentamisen, ehdokkaiden generoinnin, ehdokkaiden vahvistamisen ja viennin `action`-kentän avulla. Kutsujan tarvitsee käyttää vain alla olevia julkisia kenttiä, eikä sen tarvitse täyttää taustalla olevan generointipalvelun sisäistä pyyntörakennetta.
 
 ```http
 POST /suno/projects
 Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
+Idempotency-Key: 每次修改操作使用新的 UUID
 ```
 
-Pyynnön `action` määrittää toimenpidetyypin. Projektin ensisijainen avain käyttää yhtenäisesti arvoa `id`; `version_id` tarkoittaa nykyistä projektiversiota, ja kaikissa muokkaus- ja vientitoiminnoissa on lähetettävä uusin versio samanaikaisten päällekirjoitusten välttämiseksi.
+Lukuun ottamatta `retrieve`-toimintoa, **jokainen toiminto edellyttää** `Idempotency-Key`-avainta. Sama avain ja sama pyyntö palauttavat vain alkuperäisen tuloksen; sama avain eri pyynnöllä palauttaa 409:n. Jos maksullisessa generoinnissa ilmenee verkon aikakatkaisu tai vahvistuksen tulos on epävarma, tee ensin kysely alkuperäisellä tehtävätunnuksella tai samalla idempotenssiavaimella; avainta ei saa vaihtaa ja lähetystä tehdä suoraan uudelleen.
 
-## Toimintojen yleiskatsaus
+## Erota ensin nämä tunnukset ja aikayksiköt
 
-| action             | Tila  | Käyttötarkoitus                      |
-| ------------------ | --- | ----------------------- |
-| `create`           | Synkroninen  | Luo tyhjän projektin                   |
-| `retrieve`         | Synkroninen  | Lukee projektin ja täydellisen muokattavan `state`-tilan      |
-| `save`             | Synkroninen  | Tallentaa koko projektin tilan                |
-| `upload`           | Asynkroninen  | Alustaa projektiin lisättävän materiaalin HTTPS-audio-osoitteesta |
-| `add_track`        | Asynkroninen  | Lisää olemassa olevan äänen projektiin               |
-| `generate_track`   | Asynkroninen  | Luo uusia ääniraitaehdokkaita määritetylle alueelle            |
-| `replace_section`  | Asynkroninen  | Luo paikallisia korvausehdokkaita                |
-| `commit_candidate` | Asynkroninen  | Siirtää valitun ehdokkaan projektiin             |
-| `remove_track`     | Synkroninen  | Poistaa määritetyn raidan                  |
-| `render`           | Asynkroninen  | Vie tallennetun version kokonaisena kappaleena           |
+| Nimi                             | Mistä se saadaan                                                                                      | Missä sitä käytetään                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| `id`                           | `create`-vastauksen `data.id`                                                                      | Kaikissa nykyisen projektin myöhemmissä pyynnöissä                                      |
+| `version_id`                   | Viimeisimmän `retrieve`-, `save`-, `add_track`-, `commit_candidate`- tai `remove_track`-toiminnon `data.version_id` | Muokkauksessa, ehdokkaiden generoinnissa ja viennissä; on käytettävä uusinta versiota                              |
+| `audio_id` / `source_audio_id` | `upload`-toiminnon lopputilan `response.data.candidate.audio_id` tai olemassa olevan valmiin äänen tunnus                                | Alkuperäiseen ääneen viittaamiseen `add_track`-toiminnossa, generoinnissa tai korvauksessa                          |
+| `render_audio_id`              | `render`-toiminnon lopputilan `response.data.audio_id`                                                       | Projektimiksausviitteenä `generate_track`-toiminnossa                         |
+| `operation_id`                 | `generate_track`- tai `replace_section`-toiminnon lopputilan `response.data.operation_id`                       | `commit_candidate`-toiminnossa; yleensä sama kuin generointitehtävän `task_id`, mutta palautusarvo on luettava |
+| `candidate_id`                 | Generoinnin lopputilan `response.data.candidates[].id`                                                       | Yhden ehdokkaan valitsemiseen ja vahvistamiseen                                         |
+| `track_id`                     | Projektin `data.state.tracks[].id`                                                                | Ehdokkaan vahvistamiseen tai raidan poistamiseen                                        |
+| `task_id`                      | Asynkronisen toiminnon lähetysvastaus                                                                                   | Lopputilan kyselyyn `/suno/tasks`-palvelusta; se ei ole projektin tunnus                   |
 
-Asynkroniset toiminnot palauttavat välittömästi `task_id`:n. Käytä maksutonta `/suno/tasks`-rajapintaa kyselyyn tai välitä `callback_url` vastaanottaaksesi lopputilan tuloksen.
+`start_seconds` / `end_seconds` ovat **lähdeäänen sisäisiä sekunteja**; `start_beats` / `end_beats` ovat **projektin aikajanan iskujen määriä**. `state.timing.bps` on iskujen määrä sekunnissa, oletusarvoisesti 2. Esimerkiksi 41 sekunnin katkelma, joka alkaa iskusta 0, päättyy oletusarvoisesti iskuun 82. `generate_track`-toiminnon sekuntialueella määritetään generointiviite, eikä se takaa, että ehdokas on vain kyseisen alueen pituinen.
 
-## Luominen ja lukeminen
+## Toimintojärjestys ja tulosten arviointi
 
-```json
-{"action":"create","title":"My Studio Project"}
+| Järjestys  | `action`                             | Tarkoitus                         | Palautustapa         |
+| --- | ------------------------------------ | -------------------------- | ------------ |
+| 1   | `create`                             | Luo tyhjän projektin                      | Synkroniset projektitiedot       |
+| 2   | `retrieve`                           | Lukee uusimman version ja täydellisen `state`-tilan          | Synkroniset projektitiedot       |
+| 3   | `save`                               | Ensimmäinen tallennus tai muokatun `state`-tilan kokonaisvaltainen tallennus      | Synkroniset projektitiedot       |
+| 4   | `upload`                             | Luo materiaalin HTTPS-ääniosoiteesta           | Asynkroninen tehtävä         |
+| 5   | `add_track`                          | Lisää materiaaliäänen projektiin                  | Asynkroninen tehtävä, päivittää version    |
+| 6   | `save`                               | Jos haluat vastaanottaa uusia raitaehdokkaita, tallenna ensin tyhjä kohderaita        | Synkroniset projektitiedot, päivittää version  |
+| 7   | `render`                             | Vie nykyiset kuunneltavat raidat ja hakee miksauksen `audio_id`-viitteen | Asynkroninen tehtävä         |
+| 8   | `generate_track` tai `replace_section` | Generoi vastaavasti uuden raitaehtokkaan tai osittaisen korvausehdokkaan            | Asynkroninen tehtävä, ei vielä muuta projektia  |
+| 9   | `commit_candidate`                   | Valitsee ja vahvistaa yhden ehdokkaan                  | Asynkroninen tehtävä, päivittää version onnistumisen jälkeen |
+| Valinnainen  | `remove_track`                       | Poistaa määritetyn raidan                     | Synkroniset projektitiedot, päivittää version  |
+
+Jos tehdään vain osittainen korvaus, olemassa oleva käytettävissä oleva lähdeääni riittää eikä `render`-toimintoa tarvitse tehdä ensin; jos lähdeääni on jo projektissa, myös `upload` ja `add_track` voidaan ohittaa. `render_audio_id` on vain `generate_track`-toiminnon pakollinen viite.
+
+Asynkronista toimintoa lähetettäessä palautetaan ensin `{ "task_id": "...", "trace_id": "..." }`, mikä **ei tarkoita, että generointi onnistui**. Kysely:
+
+```http
+POST /suno/tasks
+Content-Type: application/json
+
+{"action":"retrieve","id":"上一步返回的 task_id"}
 ```
 
-Kaikissa muokkaustoiminnoissa on lähetettävä yksilöllinen `Idempotency-Key`-otsake. Onnistuneen luomisen jälkeen vastauksen `data.id` on Project ID. Uudella tyhjällä projektilla ei välttämättä ole `version_id`:tä ennen ensimmäistä tallennusta.
+Tehtävätietueessa on oltava `finished_at`, ja sen `response.success`-arvon on oltava `true`, jotta toiminto katsotaan onnistuneeksi; kun `response.success=false`, lue `response.error`. Vaikka `save` saattaa sisältää `task_id`-arvon, se suoritetaan synkronisesti tässä rajapinnassa. `upload`, `render`, `generate_track` ja `replace_section` eivät muuta projektiversiota; `save`, `add_track`, `commit_candidate` ja `remove_track` -toimintojen onnistumisen jälkeen on haettava uusi `version_id`.
 
-```json
-{"action":"retrieve","id":"PROJECT_ID"}
-```
+## Pyyntöparametrit
 
-Lukuvastaus sisältää täydellisen `state`-tilan. Uusi tyhjä projekti palauttaa arvon `{"tracks":[],"timing":{"bps":2}}`, jota voidaan käyttää suoraan ensimmäiseen tallennukseen. `timing.bps` tarkoittaa iskuja sekunnissa, oletusarvo on 2 (120 BPM), ja sen on oltava positiivinen luku; leikkeiden `startBeats`, `endBeats` ja `readStartBeats` käyttävät projektin iskuyksikköä, eikä äänen analyysin tahtiasemia voi suoraan pitää aikajanan koordinaatteina.
+### Yleiset kentät ja pyyntöotsakkeet
 
-## Koko tilan tallentaminen
+| Parametri                | Tyyppi ja soveltamisala                                                                                   | Kuvaus                                                              |
+| ----------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `action`          | Pakollinen merkkijono                                                                                     | Kiinteästi yksi tällä sivulla luetelluista toimintojen nimistä; yksi pyyntö suorittaa vain yhden toiminnon.                                      |
+| `id`              | Pakollinen merkkijono paitsi `create`-toiminnossa                                                                         | Projektin tunnus, peräisin arvosta `create.data.id`.                                      |
+| `version_id`      | Pakollinen merkkijono muokkauksessa, ehdokkaiden generoinnissa ja viennissä; voidaan jättää pois ensimmäisessä tyhjän projektin `save`-toiminnossa                                                         | Käytä uusinta versiota, vanha versio hylätään. `retrieve` ei tarvitse sitä.                                 |
+| `Idempotency-Key` | Pakollinen pyyntöotsake paitsi `retrieve`-toiminnossa, 1–128 merkkiä                                                              | Käytä uutta avainta jokaisessa uudessa toiminnossa; sama avain ja sama pyyntö palauttavat alkuperäisen tuloksen ilman uutta generointia tai veloitusta.                                   |
+| `async`           | Valinnainen looginen arvo toimintoihin `upload`, `add_track`, `generate_track`, `replace_section`, `commit_candidate` ja `render` | Nämä toiminnot ovat aina asynkronisia; `false` ei muuta generointia synkroniseksi.                                    |
+| `callback_url`    | Valinnainen URL yllä mainittuja valinnaisia asynkronisia kenttiä sisältävissä toiminnoissa                                                                       | Vastaanottaa lopputilailmoituksen; jos se jätetään pois, kysely tehdään `task_id`-arvolla `/suno/tasks`-palvelusta. `response.success` on silti tarkistettava. |
+
+### Projekti ja materiaalit
+| `action`       | Erityisparametrit              | Tyyppi ja ehdot                         | Kuvaus                                                              |
+| -------------- | --------------------------- | -------------------------------- | ------------------------------------------------------------------ |
+| `create`       | `title`                     | Pakollinen merkkijono, 1–200 merkkiä    | Uuden projektin otsikko.                                           |
+| `retrieve`     | Ei mitään                   | —                                | Tarvitaan vain `action` ja projektin `id`; palauttaa täysin muokattavan `state`-tilan. |
+| `save`         | `state`                     | Pakollinen objekti                       | **Korvaa kokonaan** projektin tilan, ei ole osittainen korjaus. Muokkaa viimeisimmän `retrieve.data.state`-tilan pohjalta ja lähetä kokonaisuudessaan, säilyttäen tuntemattomat kentät. |
+| `save`         | `title`                     | Valinnainen merkkijono                   | Projektin otsikko; jos jätetään pois, käytetään `state.title`-arvoa, ja jos sitä ei myöskään ole, käytetään oletusotsikkoa. |
+| `upload`       | `audio_url`                 | Pakollinen HTTPS-URL                     | Julkisesti käytettävissä olevan äänimateriaalin osoite; onnistumisen jälkeen lue lopputilan `candidate.audio_id`. Kutsujalla tulee olla oikeus käyttää materiaalia. |
+| `add_track`    | `audio_id`                  | Pakollinen merkkijono                    | Valmiin materiaalin audio-ID, ei URL.                               |
+| `add_track`    | `name` / `color`            | Valinnainen merkkijono                   | Uuden raidan nimi, väri; nimi oletuksena äänitallenteen otsikko, väriksi suositellaan `#RRGGBB`, oletuksena `#7251F7`. |
+| `add_track`    | `title`                     | Valinnainen merkkijono                   | Muuttaa samalla projektin otsikkoa; jätetään yleensä pois.          |
+| `add_track`    | `start_beats` / `end_beats` | Valinnainen ei-negatiivinen luku, `end_beats > start_beats` | Katkelman sijainti projektin aikajanalla. Alkupisteen oletusarvo on 0; loppupisteen oletusarvo on `alkupiste + äänen kesto × timing.bps`. |
+| `add_track`    | `gain`                      | Valinnainen ei-negatiivinen luku, oletus 1 | Katkelman ja uuden raidan äänenvoimakkuuskerroin.                   |
+| `remove_track` | `track_id`                  | Pakollinen merkkijono                    | Poistettavan olemassa olevan raidan ID. Käytä onnistumisen jälkeen palautettua uutta versiota. |
+
+`state.timing.bps`-arvon on oltava positiivinen luku, oletusarvo on 2. `state.tracks` on raitataulukko; olemassa olevien äänikatkelmien `clipId` viittaa audio-ID:hen, `startBeats`, `endBeats` ja `readStartBeats` käyttävät projektin iskujen yksikköä. Turvallisin muokkaustapa on lukea koko `state`, muokata vain kohderaitaa tai -katkelmaa ja tehdä sitten kokonaisvaltainen `save`. Uudella tyhjällä kohderaidalla tulisi olla vähintään yksilöllinen `id`, `type:"audio"` ja `clips:[]`; todellinen käyttökelpoinen täydellinen muoto on esitetty jäljempänä vaiheessa 5. Älä käytä äänianalyysin tuloksissa olevia iskupisteitä suoraan projektin aikajanan koordinaatteina.
+
+### Luominen, lähettäminen ja vienti
+| `action`                             | Erityiset parametrit                  | Tyyppi ja ehdot                               | Kuvaus                                                                                                                                                        |
+| ------------------------------------ | ---------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate_track` / `replace_section` | `source_audio_id`                  | Pakollinen merkkijono                         | Valmiin lähdeäänen ID. Lisää lähdeääni ensin projektiin, jotta myöhemmät ehdokkaat löytävät vastaavan sijainnin.                                                                                                                        |
+| `generate_track` / `replace_section` | `model`                            | Pakollinen luettelomerkkijono                  | Vaihtoehdot `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild`, `chirp-v6-mini`. Mallin ja toiminnon saatavuus määräytyy tehtävän lopputilan mukaan; muihin malleihin ei automaattisesti vaihdeta. |
+| `generate_track` / `replace_section` | `start_seconds` / `end_seconds`    | Pakollinen numero, `0 ≤ start_seconds &lt; end_seconds` | Lähdeäänen alku- ja loppusekunnit; korvattaessa loppupiste ei myöskään saa ylittää lähdeäänen todellista kestoa. Ne eivät ole projektin iskujen määriä eivätkä takaa ehdokastulosteen kestoa.                                                                                                         |
+| `generate_track`                     | `render_audio_id`                  | Pakollinen merkkijono                         | Nykyisen projektin onnistuneen `render`-toiminnon jälkeinen `response.data.audio_id`, jota käytetään miksauksen viitteenä generoinnissa.                                                                                                   |
+| `generate_track`                     | `stem_control_tags`                | Pakollinen merkkijono                         | Uuden stemman kuvaus, esimerkiksi `add Piano`, `add Drums`, `add Bass`; ei ole kiinteä luettelo.                                                                                                      |
+| `generate_track`                     | `batch_size`                       | Valinnainen kokonaisluku 1–4, oletus 2         | Pyydettyjen ehdokkaiden määrä.                                                                                                                                                |
+| `generate_track`                     | `instrumental` / `vocal_gender`    | Valinnainen totuusarvo／luettelomerkkijono     | `instrumental` on oletuksena `true`; lauluäänitoiveeksi voi antaa `f`, `m`, `unspecified`, oletus on `unspecified`. Se, noudatetaanko toivetta, määräytyy todellisen äänen perusteella.                                                                     |
+| `generate_track` / `replace_section` | `title` / `tags` / `negative_tags` | Valinnainen merkkijono                         | Ehdokkaan otsikko, halutun tyylin kuvaus, vältettävät tyylitunnisteet. Kun `tags` ja `negative_tags` jätetään pois, välitä tyhjä merkkijono.                                                                                                  |
+| `generate_track`                     | `prompt`                           | Valinnainen merkkijono                         | Uuden stemman teksti- tai sanoituskehote; puhtaassa instrumentaalissa voidaan jättää pois.                                                                                                                                       |
+| `replace_section`                    | `prompt` / `replacement_lyrics`    | Valinnainen merkkijono                         | Ensimmäinen on alkuperäisen kappaleen sanoitus tai kontekstiteksti, toinen on korvattavan välin uusi sanoitus; kun ne jätetään pois, välitä tyhjä merkkijono.                                                                                                                      |
+| `replace_section`                    | `fixed`                            | Valinnainen totuusarvo, oletus `false`         | Pyytää kiinteän pituisen korvauksen; kun arvo on `true`, välin on oltava alle 26 sekuntia, eikä valittu malli ehkä tue sitä. Tässä todellisessa esimerkissä käytetään oletustilaa, eikä `fixed=true`-asetusta ole vielä vahvistettu.                                                                                    |
+| `commit_candidate`                   | `operation_id` / `candidate_id`    | Pakollinen merkkijono                         | Ota vastaavasti generoinnin lopputilan `data.operation_id` ja valitun `data.candidates[].id`; ehdokkaan on kuuluttava nykyiseen projektiversioon.                                                                                    |
+| `commit_candidate`                   | `track_id`                         | Pakollinen merkkijono                         | Uuden raidan ehdokas tulee lähettää **ennen generointia tallennetulle tyhjälle raidalle**; paikallisen korvauksen ehdokas lähetetään alkuperäiselle raidalle, joka sisältää yksilöllisen lähdeleikkeen.                                                                                                              |
+| `commit_candidate`                   | `start_beats` / `end_beats`        | Valinnainen ei-negatiivinen numero vain uuden raidan ehdokkaalle | Määrittää uuden leikkeen sijainnin projektin aikajanalla; pois jätettäessä käytetään lähdeleikkeen alkupistettä ja loppupiste lasketaan ehdokkaan todellisen keston mukaan. Ei saa mennä päällekkäin kohderaidan olemassa olevien leikkeiden kanssa. **Paikallisen korvauksen ehdokkaan on jätettävä nämä pois**.                                                                                      |
+| `commit_candidate`                   | `name` / `gain`                    | Valinnainen merkkijono／ei-negatiivinen numero vain uuden raidan ehdokkaalle | Generoidun leikkeen nimi ja äänenvoimakkuuskerroin, `gain` on oletuksena 1.                                                                                                                                  |
+| `render`                             | `title`                            | Pakollinen merkkijono                         | Vietävän äänen otsikko.                                                                                                                                                   |
+| `render`                             | `lyrics` / `tags`                  | Valinnainen merkkijono                         | Sanoitusteksti ja tyylikuvaus vietäessä; sanoitusten oletusarvo on `[Instrumental]`.                                                                                                                      |
+| `render`                             | `start_beats` / `end_beats`        | Valinnainen ei-negatiivinen numero, lopun on oltava alkua suurempi | Vie projektin iskualueen; pois jätettäessä käytetään kaikkien kuultavien leikkeiden aikaisinta alkupistettä ja myöhäisintä loppupistettä. Hiljaiset leikkeet eivät osallistu, ja solo-raitojen ollessa olemassa valitaan vain solo-raidat.                                                                                             |
+
+Generointi tuottaa vain ehdokkaita, **eikä sijoita niitä automaattisesti projektiin**. `commit_candidate` tarkistaa, että ehdokas kuuluu edelleen nykyiseen versioon. Paikallisen korvauksen ehdokas voidaan lähettää automaattisesti vain, kun sen todellinen kesto voidaan luotettavasti sovittaa koko lähdeääneen tai valittuun väliin; jos ne eivät täsmää, alkuperäinen projekti säilytetään ja palautetaan virhe, eikä leikkeitä voi pakottaa yhteen arvaamalla manuaalisesti iskujen määrää.
+
+## 2026-10-09 Todelliset pyynnöt ja vastaukset
+
+Seuraavat pyyntörungot ja vastauskentät ovat peräisin saman projektin todellisista kutsuista. Kunkin JSON-ryhmän järjestys on pyyntö, hyväksyntävastaus (jos asynkroninen), tehtävän lopputilan vastaus. Luettavuuden vuoksi vastauksista on poimittu vain tämän työnkulun edellyttämät kentät; tili-, käyttö- ja kesto-kenttiä ei näytetä. Esimerkki-ID:t kuuluvat tähän testisovellukseen; integroinnissa on käytettävä omien pyyntöjen palauttamia ID:itä ja uutta `Idempotency-Key`-arvoa.
+
+### 1. Tyhjän projektin luominen ja lukeminen: `create`, `retrieve`
+
+`create`-pyyntö:
 
 ```json
 {
-  "action":"save",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "title":"Edited Project",
-  "state":{"tracks":[],"timing":{"bps":2}}
+  "action": "create",
+  "title": "Suno Projects Documentation Verification 2026-10-09"
 }
 ```
-
-Uuden tyhjän projektin ensimmäisessä tallennuksessa `version_id` voidaan jättää pois; kun ensimmäinen tallennus on luonut version, myöhemmissä tallennuksissa on lähetettävä uusin arvo. Jos versio on jo muuttunut, rajapinta palauttaa HTTP 409:n. Tee tällöin uudelleen `retrieve`, yhdistä muutokset ja lähetä ne uudella idempotenssiavaimella; älä yritä vanhaa pyyntöä sokeasti uudelleen.
-
-## Raitojen lataaminen ja lisääminen
 
 ```json
 {
-  "action":"upload",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "audio_url":"https://cdn.example.com/reference.mp3",
-  "async":true
+  "success": true,
+  "trace_id": "42408a82-988b-4127-ba68-9b89348a7c56",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "title": "Suno Projects Documentation Verification 2026-10-09",
+    "state": {
+      "tracks": [],
+      "timing": {
+        "bps": 2
+      }
+    }
+  }
 }
 ```
 
-Onnistuneen latauksen jälkeen lue ääni-ID osoitteesta `response.data.candidate.audio_id`. Lisää se sitten projektiin:
+Kutsu `retrieve` tehdään välittömästi:
+
+```json
+{
+  "action": "retrieve",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
+}
+```
+
+```json
+{
+  "success": true,
+  "trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "title": "Suno Projects Documentation Verification 2026-10-09",
+    "state": {
+      "tracks": [],
+      "timing": {
+        "bps": 2
+      }
+    }
+  }
+}
+```
+
+### 2. Ensimmäinen tallennus: `save`
+
+Uudella projektilla ei ole `version_id`-arvoa, joten se jätetään pois ensimmäisessä tallennuksessa:
+```json
+{
+  "action": "save",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "title": "Suno Projects Documentation Verification 2026-10-09",
+  "state": {
+    "tracks": [],
+    "timing": {
+      "bps": 2
+    }
+  }
+}
+```
+
+```json
+{
+  "success": true,
+  "task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
+  "trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+    "state": {
+      "timing": {
+        "bps": 2
+      },
+      "tracks": []
+    }
+  }
+}
+```
+
+### 3. Lataa materiaali: `upload`
+
+```json
+{
+  "action": "upload",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+  "audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
+  "async": true
+}
+```
+
+Lähetysvastaus osoittaa vain, että pyyntö on vastaanotettu:
+
+```json
+{
+  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
+}
+```
+
+```json
+{
+  "success": true,
+  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "candidate": {
+      "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+      "title": "suno_demo",
+      "duration": 41,
+      "audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
+    }
+  }
+}
+```
+
+### 4. Lisää lähderaita: `add_track`
 
 ```json
 {
   "action": "add_track",
-  "id": "PROJECT_ID",
-  "version_id": "CURRENT_VERSION_ID",
-  "audio_id": "AUDIO_ID",
-  "name": "Backing Vocals"
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+  "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+  "name": "Source demo",
+  "start_beats": 0
 }
 ```
 
-Raidan lisääminen säilyttää oletusarvoisesti äänen toistonopeuden ja muuntaa äänen keston iskujen määräksi projektin `timing.bps`-arvon perusteella. Jokaisen `save`-, `add_track`-, `commit_candidate`- tai `remove_track`-toiminnon jälkeen on käytettävä vastauksen uutta `version_id`:tä.
-
-## Luominen ja korvaaminen
-
-`generate_track` luo ääniraitaehdokkaita projektin alueelle; `replace_section` palauttaa kaksi paikallista korvausehdokasta. Kumpikaan toiminto ei valitse taiteellista tulosta automaattisesti. Mallien on käytettävä julkisia nimiä: `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild` tai `chirp-v6-mini`; tietyn toiminnon saatavuus määräytyy edelleen tehtävän lopputilan mukaan, ja tukemattomat nimet palauttavat 400-virheen ennen lähetystä. Toiseen malliin ei vaihdeta automaattisesti.
+Lähetysvastaus:
 
 ```json
 {
-  "action":"replace_section",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "source_audio_id":"AUDIO_ID",
-  "start_seconds":35.12,
-  "end_seconds":48.76,
-  "model":"chirp-v6",
-  "replacement_lyrics":"新的歌词片段",
-  "async":true
+  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
 }
 ```
-
-`generate_track`-toiminnon on lisäksi annettava `render_audio_id` (valmis projektin viety ääni), `stem_control_tags` ja lähdeäänen `source_audio_id`. `batch_size` on 1–4, oletusarvo on 2; `start_seconds` ja `end_seconds` ovat lähdeäänen sekunteja. Korvausalueen, jossa `fixed=true`, on oltava alle 26 sekuntia.
-
-Lähetä ehdokas valinnan jälkeen:
 
 ```json
 {
-  "action":"commit_candidate",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "operation_id":"OPERATION_ID",
-  "candidate_id":"CANDIDATE_ID",
-  "track_id":"TRACK_ID"
+  "success": true,
+  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
+    "track": {
+      "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+      "name": "Source demo",
+      "clips": [
+        {
+          "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+          "startBeats": 0,
+          "endBeats": 82
+        }
+      ]
+    }
+  }
 }
 ```
 
-Ehdokkaat on sidottu projektiversioon luomishetkellä. Kun projekti on jo muuttunut, vanhaa ehdokasta ei voi lähettää suoraan.
+### 5. Tallenna tyhjä raita ehdokkaiden vastaanottamista varten
 
-Paikallinen korvausehdokas lähetetään alkuperäiselle raidalle, joka sisältää yksilöllisen lähdeleikkeen, ja kokonainen take-ehdokas säilyttää alkuperäisen sijainnin sekä korvaa alkuperäisen leikkeen; alue-ehdokas korvaa vain pyydetyn alueen ja säilyttää edeltävät sekä seuraavat leikkeet. Kun kestoa ei voida sovittaa luotettavasti, palautetaan 400 ja alkuperäinen projekti säilytetään; älä tällöin lähetä `start_beats`- tai `end_beats`-arvoja. Uuden raidan ehdokas on lähetettävä ennalta tallennetulle tyhjälle raidalle, ja se käyttää oletusarvoisesti lähdeleikkeen aloituskohtaa, tai sille annetaan erikseen päällekkäisyyksiä sisältämätön alue; olemassa olevien leikkeiden päällekkäisyys samalla raidalla palauttaa 400-virheen. Älä luo ensin ja luo uutta raitaa vasta sitten, sillä version muutos vanhentaa ehdokkaan.
-
-## Koko kappaleen vienti
+`generate_track`-ehdokkaat on sidottu nykyiseen projektiversioon. Käytä tällä kertaa `retrieve`-kutsulla saatua **kokonaista** `state`-tilaa perustana, lisää seuraava todellinen tyhjä raita kohtaan `state.tracks` ja tallenna sitten `save`-kutsulla; säilytä muut olemassa olevat kentät ennallaan:
 
 ```json
 {
-  "action":"render",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "title":"Final Mix",
-  "lyrics":"[Instrumental]",
-  "async":true,
-  "callback_url":"https://example.com/webhooks/suno"
+  "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+  "type": "audio",
+  "name": "Generated piano",
+  "clips": [],
+  "takeLanes": [],
+  "mute": false,
+  "solo": false,
+  "amplitude": 1,
+  "instrument": {
+    "type": "song"
+  },
+  "color": "#7251F7"
 }
 ```
 
-Palvelin lukee määritetyn version virallisen projektitilan ja kokoaa vientiparametrit. Kun `start_beats` ja `end_beats` jätetään pois, oletusarvoisesti viedään kaikkien kuultavien leikkeiden aikaisimmasta aloituskohdasta myöhäisimpään päätepisteeseen; mykistetyt raidat/leikkeet eivät sisälly, ja kun solo-raitoja on olemassa, valitaan vain solo-raidat. Tyhjä projekti tai projekti ilman kelvollisia kuultavia raitoja palauttaa 400-virheen. Lopputilan tulos sisältää `render_id`:n, `audio_id`:n, `audio_url`:n ja keston. Projekti on sidottu luomishetken suoritusympäristöön, eikä sitä voi siirtää ympäristöjen välillä tai vaihtaa automaattisesti vikatilanteessa.
+```json
+{
+  "success": true,
+  "task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
+  "trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
+  }
+}
+```
 
-> Voit ladata tai käsitellä vain ääntä, johon sinulla on laillinen käyttöoikeus. Projektin API on tällä hetkellä Beta-vaiheessa; tallenna tärkeiden tulosten lopulliset ääni-URL-osoitteet pysyvästi.
-
-## Kysely ja virheistä palautuminen
+### 6. Vie referenssimiksaus: `render`
 
 ```json
-{"action":"retrieve","id":"TASK_ID"}
+{
+  "action": "render",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+  "title": "Suno Projects Docs Source Mix",
+  "lyrics": "[Instrumental]",
+  "async": true
+}
 ```
-Lähetä yllä oleva pyyntö osoitteeseen `/suno/tasks`. Projects-tehtävässä `finished_at`-arvon olemassaolo ja `response.success=true` tarkoittavat onnistumista; `response.success=false` tarkoittaa epäonnistumista. Lähetyksen palauttama HTTP 200 tai `task_id` tarkoittaa vain, että pyyntö on vastaanotettu, ei sitä, että ääni on valmis.
 
-Sama `Idempotency-Key` ja sama pyyntö palauttavat alkuperäisen tuloksen (mukaan lukien epäonnistumisen), eivätkä automaattisesti luo uudelleen tai veloita kahdesti. Jos haluat yrittää uudelleen nimenomaisesti epäonnistunutta toimintoa, hae ensin alkuperäinen tehtävä ja varmista epäonnistuminen, ja käytä sitten uutta avainta; älä lähetä uudelleen, kun alkuperäinen tehtävä on edelleen käsittelyssä tai tulos on epävarma.
+Lähetysvastaus:
 
-Virheluokkiin kuuluvat `studio_unavailable` / `studio_model_unavailable` (503, ei voida käsitellä tilapäisesti tai malli ei ole käytettävissä), `studio_model_unsupported` (400, malli ei tue tätä toimintoa), `studio_state_invalid` (400, projektin tila tai vientialue on virheellinen), `too_many_requests` (429), `studio_audio_unavailable` (403, viitattua ääntä ei voida käyttää projektin vientiin) ja `content_rejected` (403). Säilytä `trace_id` vianmääritystä varten.
+```json
+{
+  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
+}
+```
+
+```json
+{
+  "success": true,
+  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+    "render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+    "audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+    "duration": 41,
+    "audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
+  }
+}
+```
+
+### 7. Luo uuden raidan ehdokas: `generate_track`
+```json
+{
+  "action": "generate_track",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+  "render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+  "model": "chirp-v5",
+  "start_seconds": 12,
+  "end_seconds": 20,
+  "stem_control_tags": "add Piano",
+  "title": "Documentation Piano Take",
+  "tags": "gentle piano, instrumental",
+  "batch_size": 2,
+  "async": true
+}
+```
+
+Lähetysvastaus:
+
+```json
+{
+  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
+}
+```
+
+```json
+{
+  "success": true,
+  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+    "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+    "candidates": [
+      {
+        "id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+        "title": "Documentation Piano Take",
+        "state": "complete",
+        "duration": 41.76,
+        "audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
+      },
+      {
+        "id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
+        "title": "Documentation Piano Take",
+        "state": "complete",
+        "duration": 40.96,
+        "audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
+      }
+    ]
+  }
+}
+```
+
+Tässä pyydettiin lähdeäänen sekunteja 12–20 luontiviitteeksi, palautetut ehdokasäänet ovat todellisuudessa noin 41 sekuntia; `start_seconds`/`end_seconds` eivät ole tulosteen keston takuu.
+
+### 8. Ota käyttöön yksi ehdokas: `commit_candidate`
+
+```json
+{
+  "action": "commit_candidate",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+  "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+  "candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+  "async": true
+}
+```
+
+Lähetysvastaus:
+
+```json
+{
+  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
+}
+```
+
+```json
+{
+  "success": true,
+  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+    "committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+    "state": {
+      "tracks": [
+        {
+          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+          "clips": [
+            {
+              "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+              "startBeats": 0,
+              "endBeats": 82
+            }
+          ]
+        },
+        {
+          "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+          "clips": [
+            {
+              "clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+              "startBeats": 0,
+              "endBeats": 83.52
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+### 9. Luo paikallisen korvauksen ehdokas: `replace_section`
+
+```json
+{
+  "action": "replace_section",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+  "model": "chirp-v5",
+  "title": "Documentation Verse Edit",
+  "tags": "dreamy Chinese pop",
+  "prompt": "[Verse 1]\n晨光洒在海边\n浪花笑得灿烂\n你和我在沙滩\n钟表停止转动\n冰淇淋在融化\n手牵手去散步\n[Chorus]\n风儿轻轻吹过\n心跳不停鼓\n夏天夏天\n时间停在这一天\n笑声回荡\n微蓝天空在身旁",
+  "replacement_lyrics": "我们走在海边\n微风吹过晴天",
+  "start_seconds": 12,
+  "end_seconds": 20,
+  "async": true
+}
+```
+
+Lähetysvastaus:
+
+```json
+{
+  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
+}
+```
+```json
+{
+  "success": true,
+  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+    "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+    "candidates": [
+      {
+        "id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+        "title": "Documentation Verse Edit",
+        "state": "complete",
+        "duration": 36,
+        "audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
+      },
+      {
+        "id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
+        "title": "Documentation Verse Edit",
+        "state": "complete",
+        "duration": 36,
+        "audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
+      }
+    ]
+  }
+}
+```
+
+### 10. Tämän korvauksen ehdokkaita ei voida lähettää: säilytä todellinen epäonnistunut tulos
+
+Tässä `replace_section` valitsi 8 sekunnin alueen, mutta molemmat ehdokkaat ovat todellisuudessa 36 sekuntia, mikä ei vastaa alkuperäisen äänen 41 sekuntia eikä valittua 8 sekuntia. Todellinen pyyntö yhden ehdokkaan lähettämiseksi ja lopputila ovat seuraavat:
+
+```json
+{
+  "action": "commit_candidate",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+  "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+  "candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+  "track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+  "async": true
+}
+```
+
+Lähetysvastaus:
+
+```json
+{
+  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
+}
+```
+
+```json
+{
+  "success": false,
+  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
+  "error": {
+    "code": "bad_request",
+    "message": "Candidate duration does not match the source or selected section. Keep the original track and inspect the candidate before editing."
+  }
+}
+```
+
+Tämän vuoksi alkuperäistä raitaa ei muutettu. Kun tämä virhe kohdataan, ehdokas tulee säilyttää kuuntelua ja manuaalista käsittelyä varten, sitä ei tule pitää projektin onnistuneesti liitettynä osana eikä maksullista generointia tule lähettää automaattisesti uudelleen.
+
+### 11. Testiraidan poistaminen ja takaisinlukeminen: `remove_track`, `retrieve`
+
+```json
+{
+  "action": "remove_track",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
+}
+```
+
+```json
+{
+  "success": true,
+  "trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+    "removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+    "state": {
+      "tracks": [
+        {
+          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+        }
+      ]
+    }
+  }
+}
+```
+
+`retrieve`-toiminnon todellinen tulos uudelleen:
+
+```json
+{
+  "success": true,
+  "trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+    "state": {
+      "tracks": [
+        {
+          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+        }
+      ]
+    }
+  }
+}
+```
+
+### 12. Vientirajoitukset ja palautumisen varmennus
+
+Uuden raitae­hdokkaan lähettämisen jälkeen koko kappaleen vienti, joka sisältää kyseisen ehdokkaan, hylättiin. Todellinen pyyntö ja lopputila:
+
+```json
+{
+  "action": "render",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+  "title": "Suno Projects Docs Mix With Piano",
+  "lyrics": "[Instrumental]",
+  "async": true
+}
+```
+
+Lähetysvastaus:
+
+```json
+{
+  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
+}
+```
+
+```json
+{
+  "success": false,
+  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
+  "error": {
+    "code": "studio_audio_unavailable",
+    "message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
+  }
+}
+```
+
+Kyseisen ehdokasraidan poistamisen jälkeen alkuperäinen lähderaita on edelleen olemassa, ja vienti onnistui uudelleen käyttämällä uusinta versiota:
+
+```json
+{
+  "action": "render",
+  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+  "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+  "title": "Suno Projects Docs Mix After Remove",
+  "async": true
+}
+```
+
+Lähetysvastaus:
+
+```json
+{
+  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
+}
+```
+```json
+{
+  "success": true,
+  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+    "render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+    "audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+    "duration": 41,
+    "audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
+  }
+}
+```
+
+Yllä olevan onnistuneen palautuksen äänilinkit voivat kaikki lukea mediatavuja tämän varmennuksen aikana; luotujen ja korvattujen ehdokaslinkkien ensimmäiset 1 024 tavua palauttavat HTTP 206:n, `audio/mpeg`-muodossa, ja vientilinkit palauttavat HTTP 206:n, `audio/mp4`-muodossa. Tämä todistaa vain, että linkit ovat luettavissa, eikä tarkoita, että kyseisen ehdokkaan sisältävä projekti voidaan varmasti viedä.
+
+## Virheet ja palautuminen
+
+| Tulos                                                                            | Merkitys                          | Seuraava vaihe                                    |
+| ----------------------------------------------------------------------------- | --------------------------- | -------------------------------------- |
+| `project_version_conflict` / `project_candidate_stale`（409）                   | Projektin versio on muuttunut tai ehdokas ei kuulu nykyiseen versioon.         | `retrieve` uusin projekti ja suunnittele muutokset uudelleen; älä toista vanhaa ehdokasta.        |
+| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（yleensä 400）   | Parametrit, raidan tila, ehdokkaan kesto tai malli eivät vastaa toimintoa.      | Tarkista tehtävän lopputilan virhe ja korjaa syöte; säilytä alkuperäinen projekti, jos ehdokasta ei voida yhdistää turvallisesti.          |
+| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | Viitattua ääntä ei voi käyttää kyseisessä projektitoiminnossa, käyttöoikeus puuttuu tai sisältötarkistus hylkäsi sen. | Tarkista äänilähde ja tehtävän `trace_id`; älä rinnasta jo luotua ehdokasta koko kappaleen vietävyyteen. |
+| `too_many_requests`（429）                                                      | Pyyntöön kohdistuu nopeusrajoitus.                   | Kysy ensin alkuperäinen tehtävä ja päätä sitten, aloitetaanko uusi toiminto uudella idempotenssiavaimella.                |
+| `studio_unavailable` / `studio_model_unavailable`（503）                        | Projektin käsittely tai valittu malli ei ole tilapäisesti käytettävissä.             | Säilytä alkuperäisen tehtävän tulos; yritä myöhemmin uudelleen eksplisiittisesti, älä vaihda mallia automaattisesti.                |
+| `studio_processing_failed` / aikakatkaisu（500/504）                                      | Käsittely epäonnistui tai lopputila on epävarma.                 | Kysy `task_id`:n tai alkuperäisen idempotenssiavaimen perusteella, jotta vältät maksullisen luomisen toistamisen.          |
+
+Projektit ja ehdokkaat ovat sidottuja ne luoneeseen sovellukseen ja suoritusympäristöön, eikä niiden käyttöä eri sovelluksissa tai automaattista vikasietosiirtymää voida olettaa. Tallenna onnistuneesti viedyn lopullisen äänen URL pysyvästi ja säilytä `trace_id` vianmääritystä varten.

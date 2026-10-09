@@ -1,236 +1,348 @@
 ---
-title: "「Ace Data Cloud でログイン」（OAuth 2.0）を統合する"
+title: "Ace Data Cloud OAuth 2.0 の統合"
 ---
 
-あなた自身のプロダクトで「Ace Data Cloud でログイン」をサポートし、ユーザーの認可後、**ユーザーに代わって**その Ace Data Cloud リソース（プロフィール、API Token、サブスクリプション、利用量、注文など）を読み書きできるようにします。基盤は標準の **OAuth 2.0 認可コードフロー（Authorization Code）+ PKCE** であり、GitHub / Google ログインの統合方法と完全に同じです——既存の任意の OAuth クライアントライブラリをそのまま利用できます。
+ユーザーがあなたのアプリに対して、その Ace Data Cloud プロフィール、サービスサブスクリプション、API Key、利用量または注文へのアクセスを承認できるようにします。標準の **Authorization Code + S256 PKCE** を使用します：アプリが認可ページを開き、ユーザーの同意後に一度限りの `code` を受け取り、その後 OAuth access token と交換します。
 
-> **適したシナリオ**：サードパーティアプリ / Agent / MCP クライアント / 自動化ワークフローを開発しており、ユーザーが Ace Data Cloud アカウントでワンクリックログインし、必要に応じてプラットフォーム上のリソースにアクセスできるようにしたい場合。ユーザーが手動で API Key をコピー＆ペーストする必要はありません。
+OAuth access token はアカウントリソース API へのアクセスに使用します；モデル API の呼び出しには対応する API Key を使用します。OAuth 認可によって API Key の自動作成、サービスの有効化、または残高の増加は行われません。
 
-## 用語 & エンドポイント早見表
+## 統合方法を選択する
 
-すべてのエンドポイントは `https://auth.acedata.cloud` にあり、Discovery エンドポイントを通じていつでも最新のアドレスを取得できます：
+| 方法            | 適用シナリオ                                | 認可完了後                                           |
+| ------------- | ----------------------------------- | ----------------------------------------------- |
+| 標準 OAuth リダイレクト   | 独立した Web サイト、デスクトップまたはモバイルクライアント；埋め込みサイトが自ら認可を開始する            | ブラウザがアプリに登録された `redirect_uri` に戻り、アプリが `code` と `state` を処理する |
+| Studio Web サイトコンポーネント認可 | Web サイトに Studio ホームページを埋め込み、訪問者の現在の Studio アカウントを使用したい | Studio がアプリに認可結果メッセージを送信し、アプリはリダイレクトせず、元のページが維持される                  |
+
+標準リダイレクトでは `embed=studio`、`embed_origin`、または `postMessage` は必要ありません。Studio コンポーネントモードでは、ホストが認可ページを作成し、メッセージブリッジを維持します；第三者は本文末尾のコンポーネントプロトコルに従って統合し、これら 2 つのパラメータを自ら組み立てないでください。
+
+## エンドポイントとディスカバリードキュメント
 
 ```bash
 curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
 ```
 
-| 用途                 | エンドポイント                                                |
-| ------------------ | ------------------------------------------------- |
-| ディスカバリ文書（Discovery）    | `GET /.well-known/oauth-authorization-server`     |
-| ユーザー認可ページ（ブラウザリダイレクト）       | `GET https://auth.acedata.cloud/oauth2/authorize` |
-| トークンエンドポイント（token の取得 / 更新） | `POST https://auth.acedata.cloud/oauth2/token`    |
-| トークンの失効               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
-| ユーザー情報（UserInfo）     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
-| アプリ登録管理（セルフサービス）         | `https://auth.acedata.cloud/user/oauth-apps`      |
+| 用途                | アドレス                                                                                |
+| ----------------- | --------------------------------------------------------------------------------- |
+| ブラウザ認可ページ            | `https://auth.acedata.cloud/oauth2/authorize`                                     |
+| OAuth token の交換／更新 | `POST https://auth.acedata.cloud/oauth2/token`                                    |
+| 失効リクエストの送信            | `POST https://auth.acedata.cloud/oauth2/revoke`                                   |
+| 現在のユーザー情報            | `GET https://auth.acedata.cloud/api/v1/users/me`                                  |
+| OAuth アプリ管理ページ      | [OAuth アプリ](https://auth.acedata.cloud/user/oauth-apps)                            |
+| ログイン済みユーザーのアプリ一覧／登録インターフェース   | `https://auth.acedata.cloud/api/v1/oauth2/applications/`                          |
+| 認可ページで使用する公開アプリ情報      | `GET https://auth.acedata.cloud/api/v1/oauth2/application/<client_id>/`           |
+| ユーザーの既存 API Key     | `GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;ユーザーID>&limit=100` |
 
-サポートされる機能：`response_type=code`、`grant_types=authorization_code, refresh_token`、`code_challenge_methods=S256, plain`、クライアント認証方式 `client_secret_post`（機密クライアント）/ `none`（PKCE 公開クライアント）。
+アプリ管理インターフェースにはアカウントのログイン認証が必要であり、匿名の動的登録（DCR）インターフェースではありません。MCP サービス独自のディスカバリー／登録アドレスは、本表のアカウント OAuth エンドポイントとは異なる入口です；特定の MCP に接続する際は、そのサービスのドキュメントとディスカバリー結果に従って操作してください。
 
-## 権限範囲（Scope）
+ディスカバリードキュメントは、エンドポイントとプロトコル機能の取得に使用されます。現在のフローは OAuth token を返し、`id_token` は返しません；`openid` scope が存在するという理由だけで、完全な OpenID Connect ログインフローとして処理しないでください。
 
-「最小権限」に従って申請してください。ユーザーは認可ページで、あなたが申請した各権限を確認できます。
+## 権限範囲：現在の scope 名を使用する
 
-**ID 系（OIDC 互換）**
+`scope` はスペース区切りで、大文字・小文字を区別する権限名です。新しいアプリでは、`profile:read`、`email:read`、`phone:read` などの具体的な権限を使用します。
 
-| Scope     | 意味      | `/users/me` の返却フィールド                                           |
-| --------- | ------- | ---------------------------------------------------------- |
-| `openid`  | ユーザーの一意識別子  | `id`                                                       |
-| `profile` | 基本プロフィール    | `username`、`nickname`、`avatar`、`is_verified`、`date_joined` |
-| `email`   | メールアドレス      | `email`                                                    |
-| `phone`   | 電話番号（機密） | `phone`、`region`                                           |
+### 申請可能な権限の取得先
 
-**プラットフォームリソース系**
+ログイン後、OAuth アプリ一覧インターフェース `GET /api/v1/oauth2/applications/` は `available_scopes` を返します；アプリ管理ページの権限セレクターは同じカタログを使用します。これは通常のセルフサービスアプリで採用すべき選択可能な範囲です。
 
-| Scope                                      | 意味                     |
-| ------------------------------------------ | ---------------------- |
-| `applications:read` / `applications:write` | ユーザーのサービスサブスクリプションと利用枠の読み取り / 変更       |
-| `credentials:read` / `credentials:write`   | ユーザーの API Token の読み取り / 作成・失効 |
-| `usage:read`                               | ユーザーの呼び出し履歴を読み取る               |
-| `orders:read` / `orders:write`             | 注文の読み取り / 注文と支払い開始          |
+**Discovery の `scopes_supported` にはプラットフォームが認識するすべての権限名が含まれますが、あなたのアプリがそのすべてを申請できることを意味するものではありません。** 実際の認可では、以下が同時に確認されます：
 
-**集約系（自動展開）**
+1. その権限が当該アプリタイプに委任可能かどうか；
+2. その権限がこの OAuth アプリの許可範囲に登録済みかどうか；
+3. 現在のユーザーが要求された権限を持っているかどうか。
 
-| Scope            | 展開先                                                                     |
-| ---------------- | ----------------------------------------------------------------------- |
-| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
-| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
-| `platform`       | `platform:read` + `platform:write`                                      |
+不明、未登録、委任不可、またはユーザーが保有していない権限は `invalid_scope` を返します。認可コードの交換および更新時にも再確認され、権限が自動的に補完または昇格されることはありません。
 
-**特殊**
+### 通常のセルフサービスアプリで選択可能な権限
 
-| Scope            | 意味                                                 |
-| ---------------- | -------------------------------------------------- |
-| `offline_access` | **Refresh Token** を発行（申請しない場合は Access Token のみ発行され、期限切れ後は再認可が必要） |
+以下は現在のカタログ（2026-10-09）です；統合時には `available_scopes` を基準にしてください。
 
-> 典型的な組み合わせ：サードパーティの「ワンクリックログイン」=`openid profile`；MCP / IDE クライアントで Key の自動設定が必要 =`openid profile credentials:read credentials:write`；完全な管理コンソール =`openid profile email platform offline_access`。
+| Scope                                            | 用途                                      |
+| ------------------------------------------------ | --------------------------------------- |
+| `profile:read` / `profile:write`                 | プロフィールの読み取り／更新                               |
+| `email:read`                                     | メールアドレスの読み取り                                    |
+| `phone:read`                                     | 携帯電話番号および地域の読み取り                                |
+| `billing-profile:read` / `billing-profile:write` | 請求情報の読み取り／管理                               |
+| `applications:read` / `applications:write`       | サービスサブスクリプションの読み取り／管理                               |
+| `credentials:read` / `credentials:write`         | API Key の読み取り／管理                           |
+| `usage:read`                                     | 呼び出し履歴の読み取り                                  |
+| `orders:read` / `orders:write`                   | 注文の読み取り／作成および管理                              |
+| `auto-recharge:read` / `auto-recharge:write`     | 自動チャージ設定の読み取り／管理                             |
+| `recharge-cards:redeem`                          | チャージカードの交換                                   |
+| `coin:read`                                      | トークン関連情報の読み取り                                |
+| `distribution:read`                              | 販売代理情報の読み取り                                  |
+| `connections:read` / `connections:write`         | 接続の読み取り／管理                                 |
+| `skills:read` / `skills:write`                   | スキルの読み取り／管理                                 |
+| `openid`                                         | 現在の実装では UserInfo が基本情報を返すことも許可される；ID Token は返されない    |
+| `offline_access`                                 | access token の期限切れ後に更新できるよう refresh token を要求する |
+
+たとえば、プロフィールのみを読み取るには `profile:read` を使用します；メールアドレスも必要な場合は `email:read` を追加します；既存の API Key を読み取るには `profile:read credentials:read` を使用します。Key を作成または変更する必要がある場合にのみ `credentials:write` を申請し、更新が必要な場合は `offline_access` を追加してください。
+
+一部の権限は、プラットフォームが承認した信頼済みアプリ専用です。たとえば `sites:read`、`sites:write`、`platform-tokens:read` があります；その他の一部の権限は、通常の第三者 OAuth アプリには開放されていません。クライアントタイプ `public`／`confidential` は secret を保管できるかどうかを表すものであり、アプリが信頼済みかどうかとは関係ありません。セルフサービスで作成したアプリは、信頼済み権限を自ら有効化することはできません。
+
+`account` は指定された公式アカウント管理 MCP が使用するアカウント権限セレクターであり、第三者アプリの「すべての権限」scope ではなく、他の scope と混在させることはできません。第三者は必要な具体的権限を明示的に列挙する必要があります。
+
+### 旧ドキュメントからの移行
+
+| 旧表記                                         | 現在の方法                       |
+| ------------------------------------------- | -------------------------- |
+| `profile`                                   | `profile:read`             |
+| `email`                                     | `email:read`               |
+| `phone`                                     | `phone:read`               |
+| `platform`、`platform:read`、`platform:write` | 実際に必要な具体的権限を個別に列挙する。汎用的な「すべて選択」の代替値はない |
+
+旧名称は互換エイリアスとして受け付けられません。OAuth アプリに登録した scopes、認可 URL、および自身の権限判定を同時に更新してください；アプリ設定を変更しても、すでに発行された token に権限は追加されないため、ユーザーによる再認可が必要です。
 
 ## ステップ 1：OAuth アプリを登録する
 
-[auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) を開く →「アプリを作成」を選択し、以下を入力します：
+[OAuth アプリ管理](https://auth.acedata.cloud/user/oauth-apps)を開き、アプリを作成して以下を入力します：
+- 名前、説明、アプリ Logo：認可ページのアプリ側に表示されます。
+- クライアントタイプ：純粋なフロントエンド、モバイルまたはデスクトップクライアントは **Public** を選択します。バックエンドで secret を保管できるサービスは **Confidential** を選択します。
+- コールバックアドレス：本番環境では HTTPS を使用し、アプリが実際にコールバックを処理する完全な URL を登録します。
+- 権限：ページで提供されるディレクトリから実際に必要な scopes を選択します。
 
-1. **アプリ名 / 説明 / ロゴ**：ユーザーの認可同意ページに表示されます。
-2. **クライアントタイプ（Client Type）**：
-   - **機密（confidential）**——バックエンドがあり、`client_secret` を安全に保管できる場合（Web サービス、バックエンドサービス）。
-   - **公開（public）**——純粋なフロントエンド / デスクトップ / CLI / モバイルで、秘密鍵を保管**できない**場合。**PKCE** を使用する必要があります。
-3. **コールバック URL（Redirect URIs）**：認可完了後にユーザーがリダイレクトされるアドレスです。**認可開始時に渡す `redirect_uri` と完全に一致している必要があります**。複数入力できます。
-4. **権限範囲（Scopes）**：前節で必要な scope を選択します。
+`client_id` を保存します。Confidential クライアントは `client_secret` をサーバー側に保存し、HTML、フロントエンドのビルド変数または URL に置くことはできません。Public クライアントは token の交換に secret を使用しません。登録レスポンスにこのフィールドが含まれていても、クライアントが秘匿できる認証情報として扱うことはできません。
 
-保存後、**`client_id`** を取得できます。機密クライアントの場合はさらに **`client_secret`** が**一度だけ**表示されます——すぐに保存してください。閉じると再度確認できません（詳細ページの「シークレットをローテーション / Rotate Secret」で再生成でき、古いシークレットは直ちに無効になります）。
+`redirect_uri` は登録、認可、token 交換時に正確に一致しなければなりません。パス、末尾のスラッシュ、クエリパラメータを含みます。各アカウントでは最大 20 個のアプリを作成できます。Secret は作成／ローテーション時にのみ表示されます。ローテーション後、古い secret ではクライアント認証を必要とする交換を継続できません。
 
-> 各アカウントで作成できる OAuth アプリは最大 **20** 個です。
+## ステップ 2：ボタンで認可を開始する
 
-## ステップ 2：ユーザーを認可ページへリダイレクトする
+接続をクリックするたびに、新しいランダムな `state` と `code_verifier` を生成し、以下を計算します：
 
-アプリ内で、クエリパラメータを付けてユーザーのブラウザを認可ページへリダイレクトします：
-
+```text
+code_challenge = BASE64URL(SHA256(code_verifier))
 ```
+
+`state`、verifier、コールバックアドレスをアプリ自身のセッションに保存してから、URL エンコードされたパラメータで認可ページを開きます：
+
+```text
 https://auth.acedata.cloud/oauth2/authorize
   ?response_type=code
-  &client_id=<あなたの client_id>
-  &redirect_uri=<登録したコールバック URL>
-  &scope=openid%20profile%20credentials:read
-  &state=<ランダムな CSRF 防止文字列>
-  &code_challenge=<PKCE チャレンジ値>          # 公開クライアントでは必須
-  &code_challenge_method=S256            # 公開クライアントでは必須
+  &client_id=<client_id>
+  &redirect_uri=<完全なコールバックアドレス>
+  &scope=profile%3Aread%20credentials%3Aread
+  &state=<今回のランダム値>
+  &code_challenge=<今回のS256チャレンジ値>
+  &code_challenge_method=S256
 ```
 
-- `state`：自分で生成するランダム文字列です。コールバック時にそのまま返され、CSRF 防止に使用されます。**必ず検証**してください。
-- **PKCE（公開クライアントでは必須、機密クライアントでも推奨）**：まずランダムな `code_verifier` を生成し、次に
-  `code_challenge = BASE64URL( SHA256( code_verifier ) )` を計算して、`code_challenge` を認可 URL に入れます。
-  `code_verifier` はステップ 4 で使用するため、自分で保持しておいてください。
+Public クライアントは S256 PKCE を送信する必要があります。Discovery に `plain` も記載されていますが、Public クライアントはそれを使用できません。Confidential クライアントにも S256 の使用が推奨されます。認可開始時に PKCE を使用した場合、交換時に対応する verifier を必ず送信しなければなりません。
 
-ユーザーがログインして「同意」をクリックすると、ブラウザは次の場所へリダイレクトされます：
+ユーザーが同意すると `redirect_uri` に戻り、クエリパラメータには `code` とそのまま返される `state` が含まれます。拒否された場合は、`error=access_denied`、エラー説明、および `state` が返されます。コールバックを処理する前に、state が今回のセッションと一致することを検証します。認可コードの有効期限は 10 分で、交換は 1 回のみ可能です。失敗した場合は接続を再度開始し、古いコールバック URL を繰り返し更新しないでください。
 
-```
-<redirect_uri>?code=<認可コード>&state=<そのまま返された state>
-```
+## ステップ 3：OAuth token を交換する
 
-ユーザーが拒否した場合：`<redirect_uri>?error=access_denied&error_description=...&state=...`。
-
-> 認可コードの有効期限は **10 分**で、**一度しか使用できません**。
-
-## ステップ 3：認可コードでトークンを取得する
-
-**バックエンド**（機密クライアント）またはクライアント（PKCE 公開クライアント）で、`code` を使ってトークンエンドポイントを呼び出します。
-
-**機密クライアント（client_secret あり）：**
+Public クライアントはブラウザまたはクライアントから直接交換します。Confidential クライアントは自身のバックエンドで交換します。リクエスト本文はフォームエンコードをサポートしており、以下の変数は今回の認可でアプリが取得したデータを表します：
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<上のステップで取得した code> \
-  -d client_id=<あなたの client_id> \
-  -d client_secret=<あなたの client_secret> \
-  -d redirect_uri=<ステップ 2 と完全に一致するコールバック URL>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI" \
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "code_verifier=$PKCE_VERIFIER"
 ```
 
-**公開クライアント（PKCE、client_secret なし）：**
-```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<code> \
-  -d client_id=<你的 client_id> \
-  -d code_verifier=<第 2 步生成的 code_verifier> \
-  -d redirect_uri=<回调地址>
-```
+Confidential クライアントはさらにサーバー側で `client_secret` のフォームフィールドを追加する必要があります。現在は `client_secret_post` をサポートしています。HTTP Basic クライアント認証をサポート済みの方式として扱わないでください。
 
-成功時の返却（`refresh_token` は `offline_access` を申請した場合にのみ表示されます）：
+成功レスポンスから `access_token`、`token_type`、`expires_in`、および実際に付与された `scope` を読み取ります。`offline_access` を要求して許可された場合にのみ `refresh_token` があります。OAuth access token をモデル API の API Key として扱わないでください。また、token、verifier、認可コードをログ、分析イベント、共有リンクに書き込まないでください。
 
-```json
-{
-  "access_token": "<JWT>",
-  "token_type": "Bearer",
-  "expires_in": 1296000,
-  "scope": "openid profile credentials:read",
-  "refresh_token": "<JWT，仅 offline_access 时>"
-}
-```
+## ステップ 4：ユーザー情報と API Key を読み取る
 
-`access_token` は `scope` クレームを含む JWT です。有効期間は **15 日**（`expires_in` の秒数）です。Refresh Token の有効期間は **30 日**です。
-
-## ステップ 4：Access Token を使用して API を呼び出す
-
-トークンを `Authorization: Bearer` ヘッダーに入れるだけです。
-
-**ユーザー情報を取得する（UserInfo、フィールドは承認済み scope に応じてフィルタリングされます）：**
+まず OAuth access token を使用して UserInfo をリクエストします：
 
 ```bash
 curl https://auth.acedata.cloud/api/v1/users/me \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-**プラットフォームリソース API を呼び出す**（`platform.acedata.cloud`、scope に基づいて認可）。たとえば `credentials:read` を取得済みの場合：
+返されるフィールドは scope に依存します。`id` はユーザー識別子です。`profile:read` または `openid` では基本プロフィール（`username`、`nickname`、`avatar`、`is_verified`、`date_joined`、`registration_method` など）を読み取れます。メールアドレスには `email:read`、電話番号および地域には `phone:read` が必要です。未認可のフィールドが常に存在することに依存しないでください。
+
+既存の API Key が必要で、かつ `credentials:read` が許可されている場合は、UserInfo の `id` をフィルタ条件として使用します：
 
 ```bash
-curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<UserInfo返回的id>" \
-  -H "Authorization: Bearer <access_token>"
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=$USER_ID&limit=100&offset=0" \
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-プラットフォームバックエンドは JWT 内の `scope` クレームを検証します——トークンはユーザーが承認したリソースにのみアクセスできます。未承認のリソースにアクセスした場合は、`403` が返されます。
+返されるリストでは `count` と `items` を使用し、Key フィールドは **`items[*].token`** であり、`data[0].value` ではありません。`user_id=me` はこのインターフェースでは有効なユーザー ID ではありません。複数ページのデータは `offset`／`limit` に従って続けて読み取り、最初のページをすべての認証情報として扱わないでください。
 
-## トークンの更新
+アプリ、サービス、有効状態に応じて適用可能な認証情報を選択し、最初の 1 件を盲目的に取得しないでください。リストが空であっても認可失敗を意味するわけではありません。ユーザーがまだ適用可能な Key を作成していない可能性があります。OAuth access token のアクセス制御と、API Key 自体のサービス範囲、クォータ、有効期限の条件は異なる制約です。
 
-Access Token の有効期限が切れた後、Refresh Token を使用して新しいトークンペアに交換します（最初に `offline_access` を申請している必要があります）：
+**API Key の読み取りを許可することは、第三者がそれを保存して使用できることを意味します。OAuth リクエストを取り消したり、アプリのログイン状態をクリアしたりしても、すでにコピーされた API Key は無効になりません。ユーザーは認証情報管理でその Key を個別に取り消すかローテーションする必要があります。**
+
+## 実行可能な Public / PKCE ブラウザサンプル
+
+以下のページを登録した `REDIRECT_URI` にデプロイし、`CLIENT_ID` とコールバックアドレスを置き換えます。ボタンは標準認可を開始し、同じページに戻った後にプロフィール情報と既存 Key の数を読み取ります。サンプルは Key を表示も永続化もしません。本番アプリは実際の用途に応じて結果を利用します。まず独立したブラウザページで検証してから、後述する iframe の要件に従って受け入れテストを行ってください。
+```html
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Ace Data Cloud に接続</title>
+<button id="connect" type="button">アカウントに接続</button>
+<p id="status" role="status">未接続</p>
+<script type="module">
+const CLIENT_ID = 'あなたの client_id に置き換えてください';
+const REDIRECT_URI = 'https://your-app.example/connect';
+const AUTH_ORIGIN = 'https://auth.acedata.cloud';
+const button = document.querySelector('#connect');
+const status = document.querySelector('#status');
+const storageKey = state => `ace-oauth:${state}`;
+
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`エンドポイントが HTTP ${response.status} を返しました`);
+  return response.json();
+}
+
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  try {
+    const state = base64url(crypto.getRandomValues(new Uint8Array(24)));
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    sessionStorage.setItem(storageKey(state), JSON.stringify({
+      verifier, redirectUri: REDIRECT_URI, createdAt: Date.now()
+    }));
+    const url = new URL('/oauth2/authorize', AUTH_ORIGIN);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
+      scope: 'profile:read credentials:read', state,
+      code_challenge: base64url(new Uint8Array(digest)), code_challenge_method: 'S256'
+    }).toString();
+    window.location.assign(url);
+  } catch {
+    status.textContent = '接続を開始できません。ブラウザのストレージ設定を確認してから再試行してください。';
+    button.disabled = false;
+  }
+});
+
+async function handleCallback() {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('code') && !url.searchParams.has('error')) return;
+  button.disabled = true;
+  try {
+    const state = url.searchParams.get('state');
+    const raw = state && sessionStorage.getItem(storageKey(state));
+    if (!raw) throw new Error('認可セッションが一致しません。再接続してください。');
+    const transaction = JSON.parse(raw);
+    const age = Date.now() - transaction.createdAt;
+    if (!Number.isFinite(age) || age < 0 || age > 10 * 60 * 1000 ||
+        transaction.redirectUri !== REDIRECT_URI || !transaction.verifier) {
+      throw new Error('認可セッションの有効期限が切れています。再接続してください。');
+    }
+    sessionStorage.removeItem(storageKey(state));
+    const code = url.searchParams.get('code');
+    const denied = url.searchParams.get('error');
+    for (const key of ['code', 'state', 'error', 'error_description']) url.searchParams.delete(key);
+    window.history.replaceState({}, '', url);
+    if (denied) throw new Error('認可が完了しませんでした。再接続できます。');
+    if (!code) throw new Error('コールバックに認可コードがありません。再接続してください。');
+    status.textContent = '接続中…';
+    const token = await requestJson(`${AUTH_ORIGIN}/oauth2/token`, {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'authorization_code', client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI, code, code_verifier: transaction.verifier
+      })
+    });
+    if (!token.access_token) throw new Error('認可トークンを取得できませんでした。');
+    const headers = { Authorization: `Bearer ${token.access_token}` };
+    const profile = await requestJson(`${AUTH_ORIGIN}/api/v1/users/me`, { headers });
+    if (!profile.id) throw new Error('ユーザー識別子を取得できませんでした。');
+    const keysUrl = new URL('https://platform.acedata.cloud/api/v1/credentials/');
+    keysUrl.search = new URLSearchParams({ user_id: profile.id, limit: '100' }).toString();
+    const credentials = await requestJson(keysUrl, { headers });
+    if (!Array.isArray(credentials.items)) throw new Error('認証情報リストの形式が正しくありません。');
+    const keyCount = credentials.items.filter(item => typeof item.token === 'string' && item.token).length;
+    status.textContent = `${profile.nickname || profile.username || profile.id} に接続済み；このページには ${keyCount} 件の API Key があります。`;
+  } catch (error) {
+    status.textContent = `接続が完了しませんでした：${error.message || 'ネットワークエラー'} もう一度接続をクリックしてください。`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+await handleCallback();
+</script>
+</html>
+```
+
+サンプルのコールバックとエントリポイントは、以前に保存された `sessionStorage` を読み取るために、同一オリジンかつ同じブラウザタブ／iframe 内に存在する必要があります。本番アプリケーションでは、独自のセッション方式でトークンを管理し、有効期限を処理し、レスポンス受信後に認可 URL パラメータを削除する必要があります。ページのメイン UI は先にレンダリングし、ネットワーク障害は接続状態にのみ影響させる必要があります。
+
+## ホワイトラベルサイト内の iframe
+
+### 顧客サイトが認可ページへ自らリダイレクトする場合
+
+標準 OAuth パラメータと独自のコールバック処理を使用すれば十分です；`window.location.assign()` は現在の iframe を遷移させ、親ページはホワイトラベルドメインに残ります。アイコンのために `embed=studio` を追加したり、Studio メッセージプロトコルを実装したりする必要はありません。
+
+以下の条件を満たす必要があります：
+
+- アプリケーションページとコールバックページは HTTPS を使用し、実際にアクセス可能であり、ホワイトラベル親ドメインによる iframe 埋め込みを許可していること；双方の `Content-Security-Policy: frame-ancestors` と `X-Frame-Options` を確認してください。
+- sandbox はページに必要なスクリプト、フォーム、およびオリジン／ストレージ機能を許可していること。ポップアップログインをサポートする場合は、対応するポップアップ機能も必要です；Studio が提供する Website コンポーネント設定を優先して使用してください。
+- ブラウザが、現在の埋め込みシナリオで認可状態に必要なストレージの使用を許可していること。ホワイトラベルサイトのログイン状態と AuthFrontend のログイン状態は異なる可能性があり、ホワイトラベルサイトにログインしているからといって認可ページにもログイン済みであると仮定してはなりません。
+- コールバック内のトークン交換サービスが利用可能であり、クロスオリジンリクエストがアプリケーションのオリジンを許可していること；DNS、CORS、HTTP エラーはすべて再試行可能な状態として表示し、ページ全体のレンダリングを停止させてはなりません。
+
+認可ページの左側では OAuth アプリケーションの Logo を読み取ります；右側では、ブラウザが親オリジンを提供でき、かつ親ドメインが検証済みサイトによる検証を通過した場合に、その Site の favicon／logo を読み取り、それ以外の場合はデフォルトアイコンを表示します。これはブランド表示を決定するだけで、ログインセッションを確立するものではなく、顧客ページにアカウント権限を提供するものでもありません。
+
+**現在の制限：iframe 内の通常 OAuth では、再ログインが必要な場合に、ログイン完了後に認可ページへ戻り続けるフローにはまだ欠落があります。** リリース前に、「Auth にログイン済み」と「Auth が未ログイン／期限切れ」をそれぞれ受け入れテストする必要があります。この欠落が修正・検証される前は、初回ログインでは独立したページで標準 OAuth を完了するか、以下の Studio コンポーネント認可を採用してください；ログイン済みのテスト結果だけで、すべての iframe シナリオが利用可能であると約束してはなりません。
+
+### Studio の現在のアカウントを使用して認可する場合
+
+Studio の「設定 → ホーム → ウェブサイトコンポーネント」で OAuth を有効にし、`client_id` と登録済みのコールバックアドレスを入力してください。ウェブサイトとコールバックは同一の HTTPS オリジンを使用し、Studio オリジンとは異なる必要があります。サードパーティページでは、以下が必要です：
+
+1. 正確な親サイト origin に `acedatacloud:oauth:ready` を送信し、`acedatacloud:oauth:init` を受信して検証すること。
+2. ボタンで state と PKCE verifier を生成し、`acedatacloud:oauth:authorize`（state、S256 challenge）を送信すること；verifier は自分のページ内に保持します。
+3. 親ウィンドウ、origin、state を検証し、`acedatacloud:oauth:result` 内の code または error を処理して、標準 token エンドポイントで交換すること。
+Studio はコンポーネント領域に認可ページを表示し、ユーザーの同意後にメッセージで認可コードを返します。アプリケーションはリダイレクトする必要はありません。未ログイン時は `login_required` を返し、拒否時は `access_denied` を返し、待機タイムアウト時は `authorization_timeout` を返します。アカウント変更時にはアプリケーション iframe が再構築され、未完了の認可は取り消されます。
+
+コンポーネントは現在 `profile:read credentials:read` を要求しており、`offline_access` は含まれません。必ず refresh token を受け取れると仮定しないでください。`embed=studio`、`embed_origin` は Studio ホストと認可ページによって維持され、クライアントページはメッセージプロトコルに従うだけで済みます。
+
+完全なボタン例については、[Studio サイトコンポーネント OAuth 統合ガイド](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md)を参照してください。
+
+## ライフサイクル、更新および失効
+
+Access token のデフォルト有効期間は 15 日です。各レスポンスの `expires_in` に基づいて更新または再認可を予定してください。refresh token のデフォルト有効期間は 30 日であり、期限はサービス設定の影響を受けます。これら 2 つの値を永続的な保証としてハードコードしないでください。
+
+`offline_access` が許可された後は、次を呼び出せます。
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=refresh_token \
-  -d refresh_token=<你的 refresh_token>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=refresh_token \
+  --data-urlencode "refresh_token=$OAUTH_REFRESH_TOKEN"
 ```
 
-返却構造はステップ 3 と同じです。scope は元の承認内容から**そのまま保持**されます。更新後、古い Refresh Token は無効になります（ローテーション）。新しいものを保存してください。
+更新により新しい token が返されるため、アプリケーションは最新の値を保存する必要があります。更新時には、アプリケーションが引き続き有効か、ユーザーが利用可能か、権限が引き続き許可されているかが確認されます。失敗した場合は、自身の接続状態をクリアして再認可してください。
 
-## トークンの取り消し
+**現在の OAuth 更新実装は、更新後に古い refresh token が即座に無効になることを保証しません。** 新しい token を取得したことを古い token が失効したものと見なしたり、既存 token の終了を secret のローテーションで代替したりしないでください。
+
+失効リクエストの呼び出し方法は次のとおりです。
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/revoke \
-  -d token=<access_token 或 refresh_token>
+curl https://auth.acedata.cloud/oauth2/revoke \
+  --data-urlencode "token=$OAUTH_ACCESS_TOKEN"
 ```
 
-## 実例：私たち自身の MCP サーバーもこのように接続しています
+**現在の失効エンドポイントは HTTP 200 を返しますが、発行済み JWT の即時失効は実装されていません。** アプリケーションは自身が保存した token をクリアする必要があり、200 をすべての発行済み token または API Key が失効した証明と見なすことはできません。漏洩または複製された API Key に関しては、対応する認証情報を個別に失効またはローテーションしてください。
 
-Ace Data Cloud の 15 以上の MCP サーバー（NanoBanana、Midjourney、Suno、Seedance、Kling…）で Claude Desktop / Cursor に表示される「Sign in with Ace Data Cloud」接続は、このフローを使用しています：これらはすべて **公開（PKCE）** タイプの OAuth アプリケーションとして登録され、`credentials` 関連の scope を申請しています。ユーザーの承認後、MCP サーバーはユーザーに代わって `api.acedata.cloud` を呼び出せます——ユーザーが API Key を手動で貼り付ける必要はありません。あなたの接続方法もこれらと完全に同じです。
+## よくあるエラーと受け入れ確認
 
-## よくあるエラー
+| 現象／エラー                         | 確認                                                                    |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `invalid_scope`               | 現行の権限名を使用する。アプリケーション登録範囲、委任制限およびユーザー権限を確認する。Discovery の全カタログはアプリケーションが選択可能なカタログではない                      |
+| `invalid_request`             | 必須パラメータ、正確なコールバックアドレス、Public クライアントの S256 challenge と method                        |
+| `invalid_client`              | client ID、アプリケーション状態、Confidential クライアント secret。Basic 認証を誤って使用していないか確認する             |
+| `invalid_grant`               | code の期限切れ／使用済み、verifier または redirect URI の不一致。更新時にはアプリケーションと権限の変更も確認する                 |
+| `access_denied`               | ユーザーによる拒否。接続ボタンを復元し、認可を繰り返しポップアップ表示しない                                                  |
+| `unsupported_grant_type`      | 現在は `authorization_code`、`refresh_token` をサポート                             |
+| HTTP 401／403                  | 無効なログイン状態、token、認可 scope、およびリソース自体へのアクセス権限を区別する                                     |
+| `Failed to fetch`、DNS／CORS エラー | 実際のリクエストホストおよびクライアントバックエンドの可用性を確認し、「ユーザーに Key がない」ことに起因させない                                      |
+| 認可済みだが Key を読み取れない                   | `platform.acedata.cloud`、実際の user ID、`items[*].token` を使用する。空リスト、ページネーション、失敗レスポンスを区別する |
+| 認可の返却後にページ全体が空白になる                     | ページを先にレンダリングする。コールバック、token、UserInfo、および認証情報リクエストのエラーをそれぞれ処理する。初期化例外でページ全体を停止させない                      |
+| iframe でログイン後に続行しない                 | 上記の既存制限に従って処理し、未ログイン、期限切れ、拒否、再接続のシナリオをテストする                                          |
 
-エラーレスポンスはすべて `{ "error": "<code>", "error_description": "&lt;人間が読める説明>" }` です：
-
-| error                    | 意味 / 確認事項                                                         |
-| ------------------------ | --------------------------------------------------------------- |
-| `invalid_request`        | パラメータが不足している、または不正（例：`code` / `client_id` を渡していない）                               |
-| `invalid_client`         | `client_id` が存在しない、アプリケーションが無効化されている、または `client_secret` が正しくない                      |
-| `invalid_grant`          | 認可コードが存在しない / 有効期限切れ（>10 分）/ すでに使用済み / PKCE 検証失敗 / `redirect_uri` が認可時と一致しない |
-| `access_denied`          | ユーザーが認可ページで「拒否」をクリックした                                                    |
-| `unsupported_grant_type` | `grant_type` が `authorization_code` または `refresh_token` ではない          |
-
-## 制限一覧
-
-| 項目                 | 値                               |
-| ----------------- | ------------------------------- |
-| アカウントごとの OAuth アプリケーション最大数   | 20                              |
-| 認可コードの有効期間            | 10 分、1 回限り使用可能                      |
-| Access Token の有効期間  | 15 日                            |
-| Refresh Token の有効期間 | 30 日（ローテーション）                        |
-| `redirect_uri`    | 登録値と完全に一致する必要がある                      |
-| `client_secret`   | 作成 / ローテーション時に 1 回のみ表示され、サーバー側では SHA-256 ハッシュとして保存される |
-
-## Studio ホームページへのサードパーティ OAuth アプリケーションの埋め込み
-
-Studio の「設定 → ホームページ → ウェブサイトコンポーネント」で OAuth を有効化し、サードパーティアプリケーションの `client_id` と登録済みのコールバックアドレスを設定できます。  
-ウェブサイトとコールバックは HTTPS を使用し、同一のオリジン（プロトコル、ドメイン、ポート）である必要があり、Studio とは異なるオリジンでなければなりません。  
-設定内に `client_secret` を記入してはなりません。アプリケーションキーはサードパーティのバックエンドにのみ保管できます。
-
-コンポーネントが申請する権限は `profile:read credentials:read` です。訪問者ごとに個別の同意が必要です。サイト管理者がコンポーネントを設定しても、訪問者の承認を意味するものではありません。  
-サードパーティページはランダムな `state` と PKCE verifier を生成し、Studio に S256 challenge を送信します。Studio はコンポーネント領域で公式認可ページをホストし、  
-ユーザーの同意後、サードパーティは使い捨ての認可コードを受け取り、token エンドポイントを呼び出して OAuth access token と交換し、その後  
-`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;ユーザーID>` にアクセスして既存の API Key を読み取ります。  
-ユーザー ID は、前のステップの `GET https://auth.acedata.cloud/api/v1/users/me` が返す `id` から取得します。認証情報一覧 API は `user_id=me` を受け付けません。  
-Studio は自身のログイントークンをサードパーティへ送信せず、ユーザーの Key を直接読み取って注入することもありません。
-
-公開クライアントは **S256 PKCE** を使用する必要があります。token を交換する際は、認可リクエスト時と完全に一致する `redirect_uri` を渡す必要があります。  
-認可コードは一度しか交換できません。認可前に、コールバックアドレスが登録済みかどうかが確認されます。
-
-サードパーティページはメッセージプロトコルを実装する必要があります。既存の任意のウェブページを URL の入力だけで自動的に接続することはできません。  
-完全な例については、[Studio OAuth コンポーネント統合ガイド](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md)を参照してください。
-
-**API Key の読み取りを承認することは、サードパーティにその Key の保存および使用を許可することを意味します。OAuth 承認を取り消しても、サードパーティがすでにコピーした Key は無効になりません。  
-ユーザーは別途 Key を取り消すかローテーションする必要があります。**
+納品前に少なくとも確認すること：正しいコールバック、拒否、誤った state、期限切れ／使用済み code、Key なし、ネットワーク失敗、token の期限切れ、必要な scope の欠落、および iframe シナリオでの初回ログインとアカウント切り替え。テスト証跡には完全な code、token、または API Key を保存しないでください。

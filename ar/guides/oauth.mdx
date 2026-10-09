@@ -1,236 +1,348 @@
 ---
-title: "التكامل مع «تسجيل الدخول باستخدام Ace Data Cloud» (OAuth 2.0)"
+title: "ربط Ace Data Cloud OAuth 2.0"
 ---
 
-اجعل منتجك الخاص يدعم «تسجيل الدخول باستخدام Ace Data Cloud»، وبعد تفويض المستخدم، قم **نيابةً عن المستخدم** بقراءة وكتابة موارده في Ace Data Cloud (الملف الشخصي، وAPI Token، والاشتراكات، والاستخدام، والطلبات، إلخ). الطبقة الأساسية هي نمط **رمز التفويض القياسي OAuth 2.0 (Authorization Code) + PKCE**، وطريقة التكامل مطابقة تمامًا لتسجيل الدخول عبر GitHub / Google — يمكن استخدام أي مكتبة عميل OAuth لديك مباشرةً.
+اسمح للمستخدمين بتفويض تطبيقك للوصول إلى ملفاتهم الشخصية في Ace Data Cloud، واشتراكات الخدمات، وAPI Key، والاستخدام أو الطلبات. استخدم **Authorization Code + S256 PKCE** القياسي: يفتح التطبيق صفحة التفويض، وبعد موافقة المستخدم يتلقى `code` لمرة واحدة، ثم يستبدله بـ OAuth access token.
 
-> **السيناريوهات المناسبة**: أنت تطور تطبيقًا تابعًا لجهة خارجية / Agent / عميل MCP / سير عمل آلي، وترغب في أن يسجل المستخدم الدخول بنقرة واحدة باستخدام حساب Ace Data Cloud، وأن تصل عند الحاجة إلى موارده على المنصة، دون أن يضطر المستخدم إلى نسخ ولصق API Key يدويًا.
+يُستخدم OAuth access token للوصول إلى واجهات موارد الحساب؛ ويُستخدم API Key المقابل لاستدعاء Model API. لا يؤدي تفويض OAuth تلقائيًا إلى إنشاء API Key أو تفعيل خدمة أو زيادة الرصيد.
 
-## مرجع سريع للمصطلحات والنقاط الطرفية
+## اختيار طريقة الربط
 
-جميع النقاط الطرفية موجودة على `https://auth.acedata.cloud`، ويمكن الحصول على أحدث العناوين في أي وقت عبر نقطة الاكتشاف (Discovery):
+| الطريقة            | السيناريو المناسب                                | بعد اكتمال التفويض                                           |
+| ------------- | ----------------------------------- | ----------------------------------------------- |
+| تحويل OAuth قياسي   | موقع مستقل، أو عميل سطح مكتب أو جوال؛ موقع مضمّن يبدأ التفويض بنفسه            | يعود المتصفح إلى `redirect_uri` المسجل للتطبيق، ويعالج التطبيق `code` و`state` |
+| تفويض مكوّن موقع Studio | يضمّن الموقع الصفحة الرئيسية لـ Studio، ويرغب في استخدام حساب Studio الحالي للزائر | يرسل Studio رسالة بنتيجة التفويض إلى التطبيق، ولا يتم تحويل التطبيق، وتبقى الصفحة الأصلية                  |
+
+لا يتطلب التحويل القياسي `embed=studio` أو `embed_origin` أو `postMessage`. في وضع مكوّن Studio، ينشئ المضيف صفحة التفويض ويحافظ على جسر الرسائل؛ على الأطراف الثالثة الربط وفق بروتوكول المكوّن في نهاية هذه الوثيقة، وعدم تركيب هذين المعاملين بنفسها.
+
+## نقاط النهاية ووثيقة الاكتشاف
 
 ```bash
 curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
 ```
 
-| الاستخدام                 | النقطة الطرفية                                                |
-| ------------------ | ------------------------------------------------- |
-| وثيقة الاكتشاف (Discovery)    | `GET /.well-known/oauth-authorization-server`     |
-| صفحة تفويض المستخدم (إعادة توجيه المتصفح)       | `GET https://auth.acedata.cloud/oauth2/authorize` |
-| نقطة طرفية للرموز (استبدال / تحديث token) | `POST https://auth.acedata.cloud/oauth2/token`    |
-| إلغاء الرمز               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
-| معلومات المستخدم (UserInfo)     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
-| إدارة تسجيل التطبيقات (خدمة ذاتية)         | `https://auth.acedata.cloud/user/oauth-apps`      |
+| الغرض                | العنوان                                                                                |
+| ----------------- | --------------------------------------------------------------------------------- |
+| صفحة تفويض المتصفح            | `https://auth.acedata.cloud/oauth2/authorize`                                     |
+| استبدال／تحديث OAuth token | `POST https://auth.acedata.cloud/oauth2/token`                                    |
+| إرسال طلب الإلغاء            | `POST https://auth.acedata.cloud/oauth2/revoke`                                   |
+| معلومات المستخدم الحالي            | `GET https://auth.acedata.cloud/api/v1/users/me`                                  |
+| صفحة إدارة تطبيقات OAuth      | [تطبيقات OAuth](https://auth.acedata.cloud/user/oauth-apps)                            |
+| قائمة التطبيقات／واجهة التسجيل للمستخدم المسجل دخوله   | `https://auth.acedata.cloud/api/v1/oauth2/applications/`                          |
+| بيانات التطبيق العامة المستخدمة في صفحة التفويض      | `GET https://auth.acedata.cloud/api/v1/oauth2/application/<client_id>/`           |
+| API Key الحالية للمستخدم     | `GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;معرّف المستخدم>&limit=100` |
 
-القدرات المدعومة: `response_type=code`، و`grant_types=authorization_code, refresh_token`، و`code_challenge_methods=S256, plain`، وطريقة مصادقة العميل `client_secret_post` (عميل سري) / `none` (عميل عام باستخدام PKCE).
+تتطلب واجهة إدارة التطبيقات مصادقة تسجيل دخول الحساب، وليست واجهة تسجيل ديناميكي مجهول (DCR). إن عناوين الاكتشاف／التسجيل الخاصة بخدمة MCP نفسها ونقاط نهاية OAuth للحساب في هذا الجدول مداخل مختلفة؛ عند الاتصال بـ MCP محدد، اتبع وثائق تلك الخدمة ونتائج الاكتشاف الخاصة بها.
 
-## نطاقات الصلاحيات (Scope)
+تُستخدم وثيقة الاكتشاف للحصول على نقاط النهاية وقدرات البروتوكول. يعيد التدفق الحالي OAuth token ولا يعيد `id_token`؛ لا تعالج الأمر كتدفق تسجيل دخول OpenID Connect كامل لمجرد وجود scope باسم `openid`.
 
-اطلب وفق مبدأ «أقل صلاحية»، وسيرى المستخدم كل صلاحية تطلبها في صفحة التفويض.
+## نطاقات الصلاحيات: استخدم أسماء scope الحالية
 
-**فئات الهوية (متوافقة مع OIDC)**
+`scope` هو اسم صلاحية مفصول بمسافات وحساس لحالة الأحرف. تستخدم التطبيقات الجديدة صلاحيات محددة مثل `profile:read` و`email:read` و`phone:read`.
 
-| Scope     | المعنى      | الحقول المعادة من `/users/me`                                           |
-| --------- | ------- | ---------------------------------------------------------- |
-| `openid`  | المعرّف الفريد للمستخدم  | `id`                                                       |
-| `profile` | المعلومات الأساسية    | `username`، `nickname`، `avatar`، `is_verified`، `date_joined` |
-| `email`   | البريد الإلكتروني      | `email`                                                    |
-| `phone`   | رقم الهاتف (حساس) | `phone`، `region`                                           |
+### من أين تحصل على الصلاحيات القابلة للطلب
 
-**فئات موارد المنصة**
+بعد تسجيل الدخول، تعيد واجهة قائمة تطبيقات OAuth `GET /api/v1/oauth2/applications/` القيمة `available_scopes`؛ ويستخدم محدد الصلاحيات في صفحة إدارة التطبيقات الفهرس نفسه. هذه هي النطاقات الاختيارية التي ينبغي أن تستخدمها التطبيقات العادية ذاتية الخدمة.
 
-| Scope                                      | المعنى                     |
-| ------------------------------------------ | ---------------------- |
-| `applications:read` / `applications:write` | قراءة / تعديل اشتراكات المستخدم وحصصه       |
-| `credentials:read` / `credentials:write`   | قراءة / إنشاء وإلغاء API Token الخاصة بالمستخدم |
-| `usage:read`                               | قراءة سجل استدعاءات المستخدم               |
-| `orders:read` / `orders:write`             | قراءة الطلبات / إنشاء طلب وبدء الدفع          |
+**تتضمن `scopes_supported` في Discovery جميع أسماء الصلاحيات التي تتعرف عليها المنصة، ولا يعني ذلك أن تطبيقك يمكنه طلب كل واحدة منها.** يتحقق التفويض الفعلي في الوقت نفسه من:
 
-**الفئات المجمعة (تتوسع تلقائيًا)**
+1. ما إذا كان يُسمح بتفويض الصلاحية لهذا النوع من التطبيقات؛
+2. ما إذا كانت الصلاحية مسجلة ضمن النطاقات المسموح بها لهذا التطبيق OAuth؛
+3. ما إذا كان المستخدم الحالي يمتلك الصلاحية المطلوبة.
 
-| Scope            | تتوسع إلى                                                                     |
-| ---------------- | ----------------------------------------------------------------------- |
-| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
-| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
-| `platform`       | `platform:read` + `platform:write`                                      |
+تُرجع الصلاحيات غير المعروفة أو غير المسجلة أو غير المسموح بتفويضها أو التي لا يمتلكها المستخدم `invalid_scope`. يُعاد التحقق أيضًا عند استبدال رمز التفويض والتحديث، ولا تُستكمل الصلاحيات أو تُرفع تلقائيًا.
 
-**خاص**
+### الصلاحيات الاختيارية للتطبيقات العادية ذاتية الخدمة
 
-| Scope            | المعنى                                                 |
-| ---------------- | -------------------------------------------------- |
-| `offline_access` | إصدار **Refresh Token** (إذا لم يُطلب، فسيُصدر Access Token فقط، ويتطلب انتهاء صلاحيته تفويضًا جديدًا) |
+فيما يلي الفهرس الحالي (2026-10-09)؛ استخدم `available_scopes` عند الربط كمرجع.
 
-> تركيبات نموذجية: «تسجيل دخول بنقرة واحدة» لطرف ثالث =`openid profile`؛ يحتاج عميل MCP / IDE إلى إعداد Key تلقائيًا =`openid profile credentials:read credentials:write`؛ لوحة إدارة كاملة =`openid profile email platform offline_access`.
+| Scope                                            | الغرض                                      |
+| ------------------------------------------------ | --------------------------------------- |
+| `profile:read` / `profile:write`                 | قراءة／تحديث الملف الشخصي                               |
+| `email:read`                                     | قراءة البريد الإلكتروني                                    |
+| `phone:read`                                     | قراءة رقم الهاتف والمنطقة                                |
+| `billing-profile:read` / `billing-profile:write` | قراءة／إدارة بيانات الفوترة                               |
+| `applications:read` / `applications:write`       | قراءة／إدارة اشتراكات الخدمات                               |
+| `credentials:read` / `credentials:write`         | قراءة／إدارة API Key                           |
+| `usage:read`                                     | قراءة سجلات الاستدعاء                                  |
+| `orders:read` / `orders:write`                   | قراءة／إنشاء وإدارة الطلبات                              |
+| `auto-recharge:read` / `auto-recharge:write`     | قراءة／إدارة إعدادات الشحن التلقائي                             |
+| `recharge-cards:redeem`                          | استبدال بطاقات الشحن                                   |
+| `coin:read`                                      | قراءة المعلومات المتعلقة بالرموز                                |
+| `distribution:read`                              | قراءة معلومات التوزيع                                  |
+| `connections:read` / `connections:write`         | قراءة／إدارة الاتصالات                                 |
+| `skills:read` / `skills:write`                   | قراءة／إدارة المهارات                                 |
+| `openid`                                         | يسمح التنفيذ الحالي أيضًا لـ UserInfo بإرجاع البيانات الأساسية؛ ولا يعيد ID Token    |
+| `offline_access`                                 | طلب refresh token للتحديث بعد انتهاء access token |
+
+على سبيل المثال، لقراءة الملف الشخصي فقط استخدم `profile:read`؛ وللحصول على البريد الإلكتروني أضف `email:read`؛ ولقراءة API Key الموجودة استخدم `profile:read credentials:read`. اطلب `credentials:write` فقط عندما تحتاج فعلًا إلى إنشاء أو تعديل Key، وأضف `offline_access` عند الحاجة إلى التحديث.
+
+بعض الصلاحيات مخصصة فقط للتطبيقات الموثوقة التي وافقت عليها المنصة، مثل `sites:read` و`sites:write` و`platform-tokens:read`؛ وهناك صلاحيات أخرى غير متاحة لتطبيقات OAuth العادية التابعة لأطراف ثالثة. يصف نوع العميل `public`／`confidential` ما إذا كان يمكنه الاحتفاظ بـ secret، ولا يرتبط بما إذا كان التطبيق موثوقًا. لا يمكن للتطبيقات التي أُنشئت ذاتيًا تفعيل الصلاحيات الموثوقة بنفسها.
+
+`account` هو محدد صلاحيات الحساب المستخدم من قبل MCP الرسمي المحدد لإدارة الحسابات، وليس scope «جميع الصلاحيات» لتطبيقات الأطراف الثالثة، ولا يمكن مزجه مع scope أخرى. ينبغي للأطراف الثالثة إدراج الصلاحيات المحددة المطلوبة بوضوح.
+
+### الترحيل من الوثائق القديمة
+
+| الصياغة القديمة                                         | الطريقة الحالية                       |
+| ------------------------------------------- | -------------------------- |
+| `profile`                                   | `profile:read`             |
+| `email`                                     | `email:read`               |
+| `phone`                                     | `phone:read`               |
+| `platform`、`platform:read`、`platform:write` | أدرج الصلاحيات المحددة المطلوبة فعليًا بندًا بندًا، ولا توجد قيمة بديلة عامة لـ «تحديد الكل» |
+
+لا تُقبل الأسماء القديمة كأسماء مستعارة متوافقة. حدّث في الوقت نفسه scopes المسجلة لتطبيق OAuth، وURL التفويض، والتحقق الخاص بك من الصلاحيات؛ لن يؤدي تعديل إعدادات التطبيق إلى إضافة صلاحيات إلى token الصادرة مسبقًا، ويجب أن يعيد المستخدم التفويض.
 
 ## الخطوة 1: تسجيل تطبيق OAuth
 
-افتح [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) ← «إنشاء تطبيق»، واملأ:
+افتح [إدارة تطبيقات OAuth](https://auth.acedata.cloud/user/oauth-apps)، وأنشئ تطبيقًا واملأ:
+- الاسم، الوصف، وشعار التطبيق: تُعرض على جانب التطبيق في صفحة التفويض.
+- نوع العميل: اختر **Public** للعملاء الأماميين البحتين، أو عملاء الهاتف المحمول أو سطح المكتب؛ واختر **Confidential** للخدمات التي يمكنها حفظ secret في الخلفية.
+- عنوان إعادة التوجيه: استخدم HTTPS في بيئة الإنتاج، وسجّل عنوان URL الكامل الذي يعالج تطبيقك فيه إعادة التوجيه فعليًا.
+- الصلاحيات: اختر scopes المطلوبة فعليًا من الدليل المتوفر في الصفحة.
 
-1. **اسم التطبيق / الوصف / Logo**: ستظهر في صفحة موافقة المستخدم على التفويض.
-2. **نوع العميل (Client Type)**:
-   - **سري (confidential)** — لديك خلفية خادم ويمكنك حفظ `client_secret` بأمان (خدمة Web، خدمة خلفية).
-   - **عام (public)** — واجهة أمامية فقط / سطح المكتب / CLI / الهاتف المحمول، **لا يمكنه** حفظ مفتاح سري، ويجب استخدام **PKCE**.
-3. **عناوين إعادة التوجيه (Redirect URIs)**: العنوان الذي يُعاد توجيه المستخدم إليه بعد اكتمال التفويض، **ويجب أن يتطابق تمامًا مع `redirect_uri` المرسل عند بدء التفويض**، ويمكن إدخال عدة عناوين.
-4. **نطاقات الصلاحيات (Scopes)**: حدد نطاقات scope التي تحتاجها من القسم السابق.
+احفظ `client_id`. يحتفظ عميل Confidential بـ `client_secret` على جانب الخادم، ولا يمكن وضعه في HTML أو متغيرات بناء الواجهة الأمامية أو عنوان URL. لا يستخدم عميل Public secret عند استبدال token، وحتى إذا تضمّنت استجابة التسجيل هذا الحقل، فلا يمكن اعتباره بيانات اعتماد يستطيع العميل الحفاظ على سريتها.
 
-بعد الحفظ ستحصل على **`client_id`**؛ وسيعرض العميل السري أيضًا **`client_secret`** **لمرة واحدة فقط** — احفظه فورًا، إذ لا يمكن عرضه مجددًا بعد الإغلاق (يمكن إعادة إنشائه من «تدوير المفتاح / Rotate Secret» في صفحة التفاصيل، وسيصبح المفتاح القديم غير صالح فورًا).
+يجب أن يتطابق `redirect_uri` بدقة عند التسجيل والتفويض واستبدال token، بما في ذلك المسار والشرطة المائلة الختامية ومعلمات الاستعلام. يمكن لكل حساب إنشاء ما يصل إلى 20 تطبيقًا. لا يظهر Secret إلا عند الإنشاء/التدوير؛ وبعد التدوير لا يمكن للـ secret القديم متابعة عمليات الاستبدال التي تتطلب مصادقة العميل.
 
-> يمكن لكل حساب إنشاء **20** تطبيق OAuth كحد أقصى.
+## الخطوة 2: يبدأ الزر التفويض
 
-## الخطوة 2: إعادة توجيه المستخدم إلى صفحة التفويض
+في كل مرة يتم فيها النقر على الاتصال، أنشئ `state` و`code_verifier` عشوائيين جديدين، واحسب:
 
-في تطبيقك، أعد توجيه متصفح المستخدم إلى صفحة التفويض مع معاملات الاستعلام:
-
+```text
+code_challenge = BASE64URL(SHA256(code_verifier))
 ```
+
+احفظ `state` وverifier وعنوان إعادة التوجيه في جلسة التطبيق الخاصة بك، ثم افتح صفحة التفويض باستخدام المعلمات المشفرة بـ URL:
+
+```text
 https://auth.acedata.cloud/oauth2/authorize
   ?response_type=code
-  &client_id=<你的 client_id>
-  &redirect_uri=<你注册的回调地址>
-  &scope=openid%20profile%20credentials:read
-  &state=<随机防 CSRF 串>
-  &code_challenge=<PKCE 挑战值>          # 公开客户端必填
-  &code_challenge_method=S256            # 公开客户端必填
+  &client_id=<client_id>
+  &redirect_uri=<完整回调地址>
+  &scope=profile%3Aread%20credentials%3Aread
+  &state=<本次随机值>
+  &code_challenge=<本次S256挑战值>
+  &code_challenge_method=S256
 ```
 
-- `state`: أنشئ بنفسك سلسلة عشوائية، وتُعاد كما هي عند الاستدعاء العكسي، وتُستخدم لمنع CSRF، **ويجب التحقق منها**.
-- **PKCE (إلزامي للعملاء العامين، وموصى به أيضًا للعملاء السريين)**: أنشئ أولًا `code_verifier` عشوائيًا، ثم احسب
-  `code_challenge = BASE64URL( SHA256( code_verifier ) )`، وضع `code_challenge` في عنوان URL للتفويض،
-  واحتفظ بـ `code_verifier` لديك لاستخدامه في الخطوة 4.
+يجب على عملاء Public إرسال S256 PKCE. رغم أن Discovery لا يزال يسرد `plain`، لا يمكن لعملاء Public استخدامه. يُوصى أيضًا باستخدام S256 لعملاء Confidential؛ وإذا تم استخدام PKCE عند بدء التفويض، فيجب تقديم verifier المقابل عند الاستبدال.
 
-بعد أن يسجل المستخدم الدخول وينقر «موافقة»، سيُعاد توجيه المتصفح إلى:
+بعد موافقة المستخدم يعود إلى `redirect_uri`، وتتضمن معلمات الاستعلام `code` و`state` المعاد كما هو. عند الرفض يتم إرجاع `error=access_denied` ووصف الخطأ و`state`. تحقّق أولًا من تطابق state مع هذه الجلسة قبل معالجة إعادة التوجيه. مدة صلاحية رمز التفويض 10 دقائق، ولا يمكن استبداله إلا مرة واحدة؛ بعد الفشل يجب بدء الاتصال من جديد، ولا تُحدّث عنوان URL القديم لإعادة التوجيه مرارًا.
 
-```
-<redirect_uri>?code=<授权码>&state=<原样返回的 state>
-```
+## الخطوة 3: استبدال OAuth token
 
-إذا رفض المستخدم: `<redirect_uri>?error=access_denied&error_description=...&state=...`。
-
-> مدة صلاحية رمز التفويض **10 دقائق**، و**لا يمكن استخدامه إلا مرة واحدة**.
-
-## الخطوة 3: استبدال رمز التفويض برمز مميز
-
-في **الخلفية** لديك (عميل سري) أو في العميل (عميل عام باستخدام PKCE)، استخدم `code` لاستدعاء نقطة طرفية للرموز.
-
-**عميل سري (مع client_secret):**
+يستبدل عميل Public مباشرة من المتصفح أو العميل؛ ويستبدل عميل Confidential في الخلفية الخاصة به. يدعم نص الطلب ترميز النموذج، وتمثل المتغيرات التالية البيانات التي حصل عليها التطبيق من هذا التفويض:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<上一步拿到的 code> \
-  -d client_id=<你的 client_id> \
-  -d client_secret=<你的 client_secret> \
-  -d redirect_uri=<和第 2 步完全一致的回调地址>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI" \
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "code_verifier=$PKCE_VERIFIER"
 ```
 
-**عميل عام (PKCE، بدون client_secret):**
-```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<code> \
-  -d client_id=<你的 client_id> \
-  -d code_verifier=<第 2 步生成的 code_verifier> \
-  -d redirect_uri=<回调地址>
-```
+يحتاج عميل Confidential أيضًا إلى إضافة حقل نموذج `client_secret` على جانب الخادم. يدعم حاليًا `client_secret_post`، ولا تعتبر مصادقة العميل عبر HTTP Basic طريقة مدعومة.
 
-الإرجاع عند النجاح (يظهر `refresh_token` فقط عند طلب `offline_access`):
+اقرأ `access_token` و`token_type` و`expires_in` و`scope` الممنوح فعليًا من الاستجابة الناجحة. لا يتوفر `refresh_token` إلا عند طلب `offline_access` والموافقة عليه. لا تعامل OAuth access token على أنه API Key لواجهة API الخاصة بالنموذج، ولا تكتب token أو verifier أو رمز التفويض في السجلات أو أحداث التحليلات أو روابط المشاركة.
 
-```json
-{
-  "access_token": "<JWT>",
-  "token_type": "Bearer",
-  "expires_in": 1296000,
-  "scope": "openid profile credentials:read",
-  "refresh_token": "<JWT，仅 offline_access 时>"
-}
-```
+## الخطوة 4: قراءة معلومات المستخدم وAPI Key
 
-`access_token` هو JWT، يحتوي على تصريح `scope`؛ مدة صلاحيته **15 يومًا** (عدد ثواني `expires_in`). مدة صلاحية Refresh Token هي **30 يومًا**.
-
-## الخطوة 4: استدعاء الواجهة باستخدام Access Token
-
-ضع الرمز المميز في ترويسة `Authorization: Bearer`.
-
-**قراءة معلومات المستخدم (UserInfo، تُرشَّح الحقول حسب scope المُصرَّح به):**
+استخدم أولًا OAuth access token لطلب UserInfo:
 
 ```bash
 curl https://auth.acedata.cloud/api/v1/users/me \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-**استدعاء واجهة موارد المنصة** (`platform.acedata.cloud`، المصادقة حسب scope). على سبيل المثال، عند الحصول على `credentials:read`:
+تعتمد الحقول المعادة على scope: يمثل `id` معرّف المستخدم؛ ويمكن قراءة البيانات الأساسية عبر `profile:read` أو `openid` (مثل `username` و`nickname` و`avatar` و`is_verified` و`date_joined` و`registration_method`)؛ ويتطلب البريد الإلكتروني `email:read`، بينما يتطلب رقم الهاتف والمنطقة `phone:read`. لا تعتمد على وجود الحقول غير المصرح بها دائمًا.
+
+عند الحاجة إلى API Key موجود والحصول على `credentials:read`، استخدم `id` من UserInfo كشرط تصفية:
 
 ```bash
-curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<UserInfo返回的id>" \
-  -H "Authorization: Bearer <access_token>"
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=$USER_ID&limit=100&offset=0" \
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-ستتحقق الواجهة الخلفية للمنصة من تصريح `scope` داخل JWT — لا يمكن للرمز المميز الوصول إلا إلى الموارد التي فوضها المستخدم. إذا تم الوصول إلى مورد غير مُصرَّح به، فسيُرجع `403`.
+تستخدم القائمة المعادة `count` و`items`، وحقل Key هو **`items[*].token`**، وليس `data[0].value`. لا يُعد `user_id=me` معرّف مستخدم صالحًا لهذه الواجهة. تابع قراءة البيانات متعددة الصفحات باستخدام `offset`／`limit`، ولا تعامل الصفحة الأولى على أنها جميع بيانات الاعتماد.
 
-## تحديث الرمز المميز
+اختر بيانات الاعتماد المناسبة بناءً على التطبيق والخدمة والحالة الصالحة، ولا تأخذ السجل الأول بشكل أعمى. لا تعني القائمة الفارغة فشل التفويض؛ فقد لا يكون المستخدم قد أنشأ Key مناسبًا بعد. يشكل التحكم في صلاحيات OAuth access token وقيود نطاق الخدمة والحصة وشروط انتهاء صلاحية API Key نفسه قيودًا مختلفة.
 
-بعد انتهاء صلاحية Access Token، استخدم Refresh Token لاستبداله بزوج من الرموز المميزة الجديدة (يستلزم طلب `offline_access` في الأصل):
+**السماح بقراءة API Key يعني أن الطرف الثالث يمكنه حفظه واستخدامه. لن يؤدي إلغاء طلب OAuth أو مسح حالة تسجيل دخول التطبيق إلى إبطال API Key الذي تم نسخه بالفعل؛ يحتاج المستخدم إلى إلغاء أو تدوير ذلك الـ Key بشكل منفصل في إدارة بيانات الاعتماد.**
+
+## مثال متصفح Public / PKCE قابل للتشغيل
+
+انشر الصفحة التالية على `REDIRECT_URI` الذي سجلته، واستبدل `CLIENT_ID` وعنوان إعادة التوجيه. يبدأ الزر التفويض القياسي، وبعد العودة إلى الصفحة نفسها تتم قراءة الملف الشخصي وعدد Key الموجودة. لا يعرض المثال Key ولا يحفظها بشكل دائم؛ يستهلك تطبيق الإنتاج النتائج وفقًا للاستخدام الفعلي. تحقّق أولًا في صفحة متصفح مستقلة، ثم اقبل الاختبار وفقًا لمتطلبات iframe اللاحقة.
+```html
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>الاتصال بـ Ace Data Cloud</title>
+<button id="connect" type="button">ربط الحساب</button>
+<p id="status" role="status">غير متصل بعد</p>
+<script type="module">
+const CLIENT_ID = 'استبدل بمعرّف client_id الخاص بك';
+const REDIRECT_URI = 'https://your-app.example/connect';
+const AUTH_ORIGIN = 'https://auth.acedata.cloud';
+const button = document.querySelector('#connect');
+const status = document.querySelector('#status');
+const storageKey = state => `ace-oauth:${state}`;
+
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`أرجعت الواجهة HTTP ${response.status}`);
+  return response.json();
+}
+
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  try {
+    const state = base64url(crypto.getRandomValues(new Uint8Array(24)));
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    sessionStorage.setItem(storageKey(state), JSON.stringify({
+      verifier, redirectUri: REDIRECT_URI, createdAt: Date.now()
+    }));
+    const url = new URL('/oauth2/authorize', AUTH_ORIGIN);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
+      scope: 'profile:read credentials:read', state,
+      code_challenge: base64url(new Uint8Array(digest)), code_challenge_method: 'S256'
+    }).toString();
+    window.location.assign(url);
+  } catch {
+    status.textContent = 'تعذر بدء الاتصال، يرجى التحقق من إعدادات تخزين المتصفح ثم إعادة المحاولة.';
+    button.disabled = false;
+  }
+});
+
+async function handleCallback() {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('code') && !url.searchParams.has('error')) return;
+  button.disabled = true;
+  try {
+    const state = url.searchParams.get('state');
+    const raw = state && sessionStorage.getItem(storageKey(state));
+    if (!raw) throw new Error('جلسة التفويض غير متطابقة، يرجى إعادة الاتصال.');
+    const transaction = JSON.parse(raw);
+    const age = Date.now() - transaction.createdAt;
+    if (!Number.isFinite(age) || age < 0 || age > 10 * 60 * 1000 ||
+        transaction.redirectUri !== REDIRECT_URI || !transaction.verifier) {
+      throw new Error('انتهت صلاحية جلسة التفويض، يرجى إعادة الاتصال.');
+    }
+    sessionStorage.removeItem(storageKey(state));
+    const code = url.searchParams.get('code');
+    const denied = url.searchParams.get('error');
+    for (const key of ['code', 'state', 'error', 'error_description']) url.searchParams.delete(key);
+    window.history.replaceState({}, '', url);
+    if (denied) throw new Error('لم يكتمل التفويض، يمكنك إعادة الاتصال.');
+    if (!code) throw new Error('تفتقد الاستجابة إلى رمز التفويض، يرجى إعادة الاتصال.');
+    status.textContent = 'جارٍ الاتصال…';
+    const token = await requestJson(`${AUTH_ORIGIN}/oauth2/token`, {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'authorization_code', client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI, code, code_verifier: transaction.verifier
+      })
+    });
+    if (!token.access_token) throw new Error('لم يتم الحصول على رمز التفويض.');
+    const headers = { Authorization: `Bearer ${token.access_token}` };
+    const profile = await requestJson(`${AUTH_ORIGIN}/api/v1/users/me`, { headers });
+    if (!profile.id) throw new Error('لم يتم الحصول على معرّف المستخدم.');
+    const keysUrl = new URL('https://platform.acedata.cloud/api/v1/credentials/');
+    keysUrl.search = new URLSearchParams({ user_id: profile.id, limit: '100' }).toString();
+    const credentials = await requestJson(keysUrl, { headers });
+    if (!Array.isArray(credentials.items)) throw new Error('تنسيق قائمة بيانات الاعتماد غير مطابق.');
+    const keyCount = credentials.items.filter(item => typeof item.token === 'string' && item.token).length;
+    status.textContent = `تم الاتصال بـ ${profile.nickname || profile.username || profile.id}؛ تحتوي هذه الصفحة على ${keyCount} من مفاتيح API.`;
+  } catch (error) {
+    status.textContent = `لم يكتمل الاتصال: ${error.message || 'استثناء في الشبكة'} يرجى النقر على الاتصال مجددًا.`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+await handleCallback();
+</script>
+</html>
+```
+
+يجب أن يكون رد الاتصال ونقطة الدخول في المثال ضمن المصدر نفسه، وفي علامة تبويب المتصفح نفسها／إطار iframe نفسه، حتى يتمكنا من قراءة `sessionStorage` المحفوظ سابقًا. ينبغي لتطبيقات الإنتاج إدارة الرموز المميزة ضمن مخطط الجلسة الخاص بها، ومعالجة انتهاء الصلاحية، ومسح معاملات عنوان URL الخاصة بالتفويض بعد تلقي الاستجابة؛ ويجب أن تُعرَض الواجهة الرئيسية للصفحة أولًا، بحيث لا يؤثر فشل الشبكة إلا في حالة الاتصال.
+
+## iframe في مواقع العلامة البيضاء
+
+### موقع العميل ينتقل بنفسه إلى صفحة التفويض
+
+يكفي استخدام معاملات OAuth القياسية ومعالجة رد الاتصال الخاصة به؛ إذ إن `window.location.assign()` يتنقل ضمن iframe الحالي، بينما تبقى الصفحة الأم ضمن نطاق العلامة البيضاء. لا حاجة إلى إضافة `embed=studio` من أجل الأيقونة أو تنفيذ بروتوكول رسائل Studio.
+
+يجب استيفاء الشروط التالية:
+
+- تستخدم صفحة التطبيق وصفحة رد الاتصال HTTPS، ويمكن الوصول إليهما فعليًا، وتسمحان للنطاق الأب للعلامة البيضاء بالتضمين عبر iframe؛ تحقق من `Content-Security-Policy: frame-ancestors` و`X-Frame-Options` لدى الطرفين.
+- يسمح sandbox بالنصوص البرمجية والنماذج وقدرات المصدر／التخزين التي تحتاجها الصفحة. عند دعم تسجيل الدخول عبر نافذة منبثقة، يلزم أيضًا توفير قدرات النوافذ المنبثقة المناسبة؛ يُفضّل استخدام إعداد مكوّن Website الذي يوفره Studio.
+- يسمح المتصفح باستخدام التخزين المطلوب لحالة التفويض ضمن سيناريو التضمين الحالي. قد تختلف حالة تسجيل الدخول إلى موقع العلامة البيضاء عن حالة تسجيل الدخول إلى AuthFrontend، ولا ينبغي افتراض أن تسجيل الدخول إلى موقع العلامة البيضاء يعني تسجيل الدخول إلى صفحة التفويض.
+- يجب أن تكون خدمة تبادل token في رد الاتصال متاحة، وأن تسمح الطلبات عبر المصادر بمصدر التطبيق؛ ويجب عرض حالة قابلة لإعادة المحاولة عند أخطاء DNS أو CORS أو HTTP، ولا يجوز أن تتوقف الصفحة كاملة عن العرض.
+
+تقرأ الجهة اليسرى من صفحة التفويض شعار تطبيق OAuth؛ وتقرأ الجهة اليمنى favicon／logo الخاص بهذا Site عندما يستطيع المتصفح توفير المصدر الأب ويتم التحقق من النطاق الأب عبر موقع تم التحقق منه، وإلا تُعرض الأيقونة الافتراضية. يحدد هذا عرض العلامة التجارية فقط، ولا ينشئ جلسة تسجيل دخول، ولا يوفر صلاحيات الحساب لصفحة العميل.
+
+**القيد الحالي: عندما يحتاج OAuth العادي داخل iframe إلى تسجيل الدخول مجددًا، لا تزال توجد فجوة في تدفق متابعة العودة إلى صفحة التفويض بعد اكتمال تسجيل الدخول.** قبل الإطلاق، يجب قبول حالتي «تم تسجيل الدخول إلى Auth» و«لم يتم تسجيل الدخول إلى Auth／انتهت صلاحيته» كلٌّ على حدة. قبل إصلاح هذه الفجوة والتحقق منها، يمكن لإتمام تسجيل الدخول الأول استخدام صفحة مستقلة لإكمال OAuth القياسي، أو اعتماد تفويض مكوّن Studio أدناه؛ لا تَعِد بأن جميع سيناريوهات iframe ستعمل بالاعتماد فقط على نتائج اختبار حالة تسجيل الدخول.
+
+### استخدام حساب Studio الحالي للتفويض
+
+فعّل OAuth في Studio عبر «الإعدادات → الصفحة الرئيسية → مكوّنات الموقع»، واملأ `client_id` وعنوان رد الاتصال المسجل. يجب أن يستخدم الموقع ورد الاتصال مصدر HTTPS نفسه، وأن يختلفا عن مصدر Studio. تحتاج صفحة الطرف الثالث إلى:
+
+1. إرسال `acedatacloud:oauth:ready` إلى origin الدقيق للموقع الأب، واستقبال `acedatacloud:oauth:init` والتحقق منه.
+2. أن ينشئ الزر state وPKCE verifier، ويرسل `acedatacloud:oauth:authorize` ‏(state، تحدي S256)؛ ويبقى verifier داخل صفحته الخاصة.
+3. التحقق من النافذة الأب وorigin وstate، ومعالجة code أو error في `acedatacloud:oauth:result`، ثم التبادل عبر نقطة نهاية token القياسية.
+يعرض Studio صفحة التفويض في منطقة المكوّن، وبعد موافقة المستخدم يُعاد رمز التفويض عبر رسالة، ولا يحتاج التطبيق إلى إعادة توجيه. عند عدم تسجيل الدخول يُعاد `login_required`، وعند الرفض يُعاد `access_denied`، وعند انتهاء مهلة الانتظار يُعاد `authorization_timeout`۔ يؤدي تغيّر الحساب إلى إعادة إنشاء iframe التطبيق وإلغاء التفويضات غير المكتملة.
+
+يطلب المكوّن حاليًا `profile:read credentials:read`، ولا يتضمن `offline_access`۔ لا تفترض أنه يمكن بالضرورة استلام refresh token. تتم صيانة `embed=studio` و`embed_origin` بواسطة مضيف Studio وصفحة التفويض، ولا تحتاج صفحة العميل إلا إلى الالتزام ببروتوكول الرسائل.
+
+راجع المثال الكامل للزر في [دليل تكامل OAuth لمكوّن موقع Studio](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
+
+## دورة الحياة والتحديث والإلغاء
+
+مدة صلاحية Access token الافتراضية هي 15 يومًا، ويجب ترتيب التحديث أو إعادة التفويض وفق `expires_in` في كل استجابة؛ ومدة refresh token الافتراضية هي 30 يومًا، وتتأثر المدة بإعدادات الخدمة. لا تضع هاتين القيمتين في الشيفرة على أنهما التزامان دائمان.
+
+بعد منح `offline_access`، يمكن استدعاء:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=refresh_token \
-  -d refresh_token=<你的 refresh_token>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=refresh_token \
+  --data-urlencode "refresh_token=$OAUTH_REFRESH_TOKEN"
 ```
 
-بنية الإرجاع مماثلة للخطوة 3؛ وسيتم الاحتفاظ بـ scope من التفويض الأصلي **كما هو**. بعد التحديث، يصبح Refresh Token القديم غير صالح (تدوير)، يرجى حفظ الجديد.
+سيعيد التحديث token جديدًا، ويجب على التطبيق حفظ أحدث قيمة. أثناء التحديث، يتم التحقق مما إذا كان التطبيق لا يزال صالحًا، وما إذا كان المستخدم متاحًا، وما إذا كانت الصلاحيات لا تزال ممنوحة. عند الفشل، امسح حالة الاتصال الخاصة بك وأعد التفويض.
 
-## إلغاء الرمز المميز
+**لا يضمن تنفيذ تحديث OAuth الحالي أن refresh token القديم يصبح غير صالح فورًا بعد التحديث.** لا تعتبر الحصول على token جديدًا دليلاً على أن token القديم قد أُلغي، ولا تستبدل إنهاء tokenات القائمة بتدوير secret.
+
+طريقة استدعاء طلب الإلغاء هي:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/revoke \
-  -d token=<access_token 或 refresh_token>
+curl https://auth.acedata.cloud/oauth2/revoke \
+  --data-urlencode "token=$OAUTH_ACCESS_TOKEN"
 ```
 
-## حالة حقيقية: خوادم MCP الخاصة بنا متصلة بهذه الطريقة تمامًا
+**تعيد نقطة نهاية الإلغاء الحالية HTTP 200، لكنها لا تطبّق الإبطال الفوري لـ JWT المُصدرة.** يجب على التطبيق مسح tokenات المحفوظة لديه، ولا يمكن اعتبار 200 دليلاً على أن جميع tokenات أو مفاتيح API المُصدرة قد أصبحت غير صالحة. بالنسبة إلى مفاتيح API المسرّبة أو المنسوخة، يجب إلغاء بيانات الاعتماد المقابلة أو تدويرها بشكل منفصل.
 
-إن خوادم MCP البالغ عددها أكثر من 15 لدى Ace Data Cloud (NanoBanana وMidjourney وSuno وSeedance وKling…) التي تظهر فيها وصلة «Sign in with Ace Data Cloud» في Claude Desktop / Cursor، تستخدم هذه العملية بالضبط: كلها مسجلة كتطبيقات OAuth من نوع **عام (PKCE)**، وتطلب scope متعلقًا بـ `credentials`، وبعد تفويض المستخدم يمكن لخادم MCP استدعاء `api.acedata.cloud` نيابةً عن المستخدم — دون حاجة إلى أن يلصق المستخدم API Key يدويًا. طريقة اتصالك مطابقة تمامًا لطريقتهم.
+## الأخطاء الشائعة والقبول
 
-## الأخطاء الشائعة
+| الظاهرة／الخطأ                         | التحقق                                                                    |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `invalid_scope`               | استخدم أسماء الصلاحيات الحالية؛ تحقق من نطاق تسجيل التطبيق وقيود التفويض وصلاحيات المستخدم. دليل Discovery الكامل ليس دليلًا اختياريًا للتطبيق                      |
+| `invalid_request`             | المعلمات المطلوبة، وعنوان الاستدعاء الدقيق، وchallenge وmethod الخاصان بـ S256 لعملاء Public                        |
+| `invalid_client`              | client ID، وحالة التطبيق، وsecret الخاص بعملاء Confidential؛ تحقق مما إذا تم استخدام مصادقة Basic بشكل خاطئ             |
+| `invalid_grant`               | code منتهي الصلاحية／تم استهلاكه، أو عدم تطابق verifier أو redirect URI؛ عند التحديث تحقّق أيضًا من تغيّرات التطبيق والصلاحيات                 |
+| `access_denied`               | رفض المستخدم، أعد زر الاتصال، ولا تعرض التفويض بشكل متكرر                                                  |
+| `unsupported_grant_type`      | المدعوم حاليًا هو `authorization_code` و`refresh_token`                             |
+| HTTP 401／403                  | ميّز بين حالة تسجيل الدخول غير الصالحة، وtoken، وscope التفويض، وصلاحيات الوصول إلى المورد نفسه                                     |
+| `Failed to fetch`، أخطاء DNS／CORS | تحقّق من مضيف الطلب الفعلي وتوفّر خلفية العميل، ولا تنسب ذلك إلى «أن المستخدم ليس لديه Key»                                      |
+| تم التفويض لكن لا يمكن قراءة Key                   | استخدم `platform.acedata.cloud` وuser ID الفعلي و`items[*].token`؛ ميّز بين القائمة الفارغة والترقيم والاستجابات الفاشلة |
+| صفحة فارغة بالكامل بعد عودة التفويض                     | اعرض الصفحة أولًا؛ عالج أخطاء الاستدعاء وtoken وUserInfo وطلبات بيانات الاعتماد كلٌّ على حدة؛ لا تجعل استثناء التهيئة يوقف الصفحة كاملة                      |
+| لا يستمر iframe بعد تسجيل الدخول                 | عالج وفق القيود الحالية المذكورة أعلاه، واختبر سيناريوهات عدم تسجيل الدخول وانتهاء الصلاحية والرفض وإعادة الاتصال                                          |
 
-تكون استجابة الخطأ موحدة بصيغة `{ "error": "<code>", "error_description": "&lt;وصف قابل للقراءة البشرية>" }`:
-
-| error                    | المعنى / الاستكشاف                                                         |
-| ------------------------ | --------------------------------------------------------------- |
-| `invalid_request`        | معلمات مفقودة أو غير صالحة (مثل عدم تمرير `code` / `client_id`)                               |
-| `invalid_client`         | `client_id` غير موجود، أو التطبيق معطل، أو `client_secret` غير صحيح                      |
-| `invalid_grant`          | رمز التفويض غير موجود / منتهي الصلاحية (>10 دقائق) / استُخدم مسبقًا / فشل تحقق PKCE / `redirect_uri` لا يتطابق مع وقت التفويض |
-| `access_denied`          | نقر المستخدم على «رفض» في صفحة التفويض                                                    |
-| `unsupported_grant_type` | `grant_type` ليس `authorization_code` أو `refresh_token`          |
-
-## ملخص القيود
-
-| البند                 | القيمة                               |
-| ----------------- | ------------------------------- |
-| الحد الأقصى لتطبيقات OAuth لكل حساب   | 20                              |
-| مدة صلاحية رمز التفويض            | 10 دقائق، استخدام لمرة واحدة                      |
-| مدة صلاحية Access Token  | 15 يومًا                            |
-| مدة صلاحية Refresh Token | 30 يومًا (تدوير)                        |
-| `redirect_uri`    | يجب أن يتطابق تمامًا مع القيمة المسجلة                      |
-| `client_secret`   | يُعرض مرة واحدة فقط عند الإنشاء / التدوير، ويُخزن من جانب الخادم كتجزئة SHA-256 |
-
-## تضمين تطبيق OAuth تابع لجهة خارجية في الصفحة الرئيسية لـ Studio
-
-يمكن في «الإعدادات → الصفحة الرئيسية → مكونات الموقع» في Studio تفعيل OAuth، وتكوين `client_id` لتطبيق الجهة الخارجية وعنوان رد الاتصال المسجل.
-يجب أن يستخدم الموقع ورد الاتصال HTTPS، وأن يكون لهما نفس المصدر (البروتوكول واسم النطاق والمنفذ)، وأن يستخدما مصدرًا مختلفًا عن Studio.
-لا يجوز ملء `client_secret` في التكوين؛ لا يمكن تخزين مفتاح التطبيق إلا في الواجهة الخلفية للجهة الخارجية.
-
-الأذونات التي يطلبها المكون هي `profile:read credentials:read`. يحتاج كل زائر إلى الموافقة بشكل منفصل؛ فتكوين مالك الموقع للمكون لا يمثل تفويض الزائر.
-تُنشئ صفحة الجهة الخارجية `state` عشوائيًا وPKCE verifier، وترسل S256 challenge إلى Studio. يستضيف Studio صفحة التفويض الرسمية في منطقة المكون،
-وبعد موافقة المستخدم، تتلقى الجهة الخارجية رمز تفويض لمرة واحدة، وتستدعي نقطة نهاية token لاستبداله بـ OAuth access token، ثم تصل إلى
-`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;用户ID>` لقراءة API Key الموجود.
-يأتي معرّف المستخدم من `id` المُرجع في الخطوة السابقة بواسطة `GET https://auth.acedata.cloud/api/v1/users/me`؛ ولا تقبل واجهة قائمة بيانات الاعتماد `user_id=me`.
-لا يرسل Studio رمز تسجيل الدخول الخاص به إلى الجهة الخارجية ولا يقرأ ويحقن Key الخاص بالمستخدم مباشرةً.
-
-يجب أن تستخدم التطبيقات العامة **S256 PKCE**. عند استبدال token، يجب تمرير `redirect_uri` المتطابق تمامًا مع طلب التفويض.
-لا يمكن استبدال رمز التفويض إلا مرة واحدة. قبل التفويض، سيتم التحقق مما إذا كان عنوان رد الاتصال مسجلاً.
-
-تحتاج صفحة الجهة الخارجية إلى تنفيذ بروتوكول الرسائل؛ ولا يمكن لأي صفحة ويب جاهزة الاتصال تلقائيًا بمجرد ملء URL.
-للحصول على مثال كامل، راجع [دليل تكامل مكون Studio OAuth](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
-
-**إن تفويض قراءة API Key يعادل السماح للجهة الخارجية بحفظ هذا الـ Key واستخدامه. لن يؤدي إلغاء تفويض OAuth إلى إبطال الـ Key الذي نسخته الجهة الخارجية بالفعل؛
-ويحتاج المستخدم إلى إلغاء الـ Key أو تدويره بشكل منفصل.**
+تحقق على الأقل قبل التسليم من: الاستدعاء الصحيح، والرفض، وstate الخاطئ، وcode المنتهي الصلاحية／المستهلك، وعدم وجود Key، وفشل الشبكة، وانتهاء صلاحية token، وغياب scope المطلوب، وكذلك تسجيل الدخول لأول مرة وتبديل الحساب في سيناريو iframe. لا تحفظ code أو token أو API Key كاملًا ضمن أدلة الاختبار.
