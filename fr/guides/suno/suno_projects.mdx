@@ -3,121 +3,83 @@ title: "Guide d’intégration du projet Suno Studio"
 description: "Suno Music Generation API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/suno/projects` est l’interface Beta pour gérer les projets multipistes. Un seul point de terminaison distingue la création, l’enregistrement, la génération de candidats, la soumission de candidats et l’exportation via `action`. L’appelant doit uniquement utiliser les champs publics ci-dessous, sans avoir à renseigner la structure interne des requêtes du service de génération sous-jacent.
+`POST https://api.acedata.cloud/suno/projects` est l’interface Beta de gestion des projets multipistes. Utilisez `action` pour distinguer la création, la sauvegarde, la génération de candidats, la soumission de candidats et l’exportation.
 
 ```http
 POST /suno/projects
 Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
-Idempotency-Key: 每次修改操作使用新的 UUID
+Idempotency-Key: <nouvel UUID pour chaque opération d’écriture>
 ```
 
-À l’exception de `retrieve`, **chaque opération nécessite** un `Idempotency-Key`. La même clé avec la même requête ne renvoie que le résultat d’origine ; la même clé avec une requête différente renvoie 409. En cas de délai d’expiration réseau ou d’incertitude sur le résultat de soumission lors d’une génération payante, interrogez d’abord avec l’ID de tâche d’origine ou la même clé d’idempotence ; ne renvoyez pas directement avec une nouvelle clé.
+À l’exception de `retrieve`, **chaque opération nécessite** un `Idempotency-Key`. La même clé avec la même requête relit uniquement le résultat d’origine ; la même clé avec une requête différente renvoie 409. En cas de délai d’attente réseau ou d’incertitude sur le résultat de soumission lors d’une génération payante, interrogez d’abord avec l’ID de tâche d’origine ou la même clé d’idempotence ; ne renvoyez pas directement avec une autre clé.
 
-## Distinguez d’abord ces ID et unités de temps
+## Identifiants et unités de temps
 
-| Nom                             | Où l’obtenir                                                                                      | Où l’utiliser                                             |
-| ------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| `id`                           | réponse `create` `data.id`                                                                      | toutes les requêtes ultérieures du projet actuel                                      |
-| `version_id`                   | `data.version_id` du plus récent `retrieve`, `save`, `add_track`, `commit_candidate` ou `remove_track` | modification, génération de candidats et exportation ; doit utiliser la dernière version                              |
-| `audio_id` / `source_audio_id` | `response.data.candidate.audio_id` à l’état final de `upload`, ou un ID audio terminé existant                                | référence à l’audio source lors de `add_track`, de la génération ou du remplacement                          |
-| `render_audio_id`              | `response.data.audio_id` à l’état final de `render`                                                       | référence de mixage du projet pour `generate_track`                         |
-| `operation_id`                 | `response.data.operation_id` à l’état final de `generate_track` ou `replace_section`                       | `commit_candidate` ; généralement identique au `task_id` de la tâche de génération, mais la valeur retournée doit être lue |
-| `candidate_id`                 | `response.data.candidates[].id` à l’état final de la génération                                                       | sélectionner un candidat à soumettre                                         |
-| `track_id`                     | `data.state.tracks[].id` du projet                                                                | soumettre un candidat ou supprimer une piste                                        |
-| `task_id`                      | réponse de soumission d’une opération asynchrone                                                                                   | utiliser `/suno/tasks` pour interroger l’état final ; ce n’est pas un ID de projet                   |
+| Nom                            | Où l’obtenir                                                                                | Où l’utiliser                                        |
+| ------------------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `id`                           | `data.id` dans la réponse de `create`                                                       | Toutes les requêtes ultérieures du projet actuel     |
+| `version_id`                   | `data.version_id` du dernier `retrieve`, `save`, `add_track`, `commit_candidate` ou `remove_track` | Modification, génération de candidats et exportation ; doit utiliser la version la plus récente |
+| `audio_id` / `source_audio_id` | `response.data.candidate.audio_id` à l’état final de `upload`, ou un ID audio déjà terminé  | Référencement de l’audio source lors de `add_track`, de la génération ou du remplacement |
+| `render_audio_id`              | `response.data.audio_id` à l’état final de `render`                                         | Référence du mixage du projet pour `generate_track`  |
+| `operation_id`                 | `response.data.operation_id` à l’état final de `generate_track` ou `replace_section`        | `commit_candidate` ; généralement identique au `task_id` de la tâche de génération, mais la valeur retournée doit être lue |
+| `candidate_id`                 | `response.data.candidates[].id` à l’état final de la génération                             | Sélectionner un candidat à soumettre                |
+| `track_id`                     | `data.state.tracks[].id` du projet                                                          | Soumettre un candidat ou supprimer une piste         |
+| `task_id`                      | Réponse de soumission d’une opération asynchrone                                            | Interroger l’état final avec `/suno/tasks` ; ce n’est pas l’ID du projet |
 
-`start_seconds` / `end_seconds` sont des **secondes dans l’audio source** ; `start_beats` / `end_beats` sont des **temps sur la timeline du projet**. `state.timing.bps` est le nombre de temps par seconde, 2 par défaut. Par exemple, un extrait de 41 secondes commençant au temps 0 se termine par défaut au temps 82. L’intervalle en secondes de `generate_track` sert à spécifier la référence de génération et ne garantit pas que le candidat ait uniquement la longueur de cet intervalle.
+`start_seconds` / `end_seconds` sont des **secondes dans l’audio source** ; `start_beats` / `end_beats` sont des **temps sur la timeline du projet**. `state.timing.bps` est le nombre de temps par seconde, avec une valeur par défaut de 2. Par exemple, un extrait de 41 secondes commençant au temps 0 aura par défaut une fin au temps 82. L’intervalle en secondes de `generate_track` sert à spécifier la référence de génération et ne garantit pas que le candidat ait uniquement la durée de cet intervalle.
 
-## Ordre des opérations et détermination des résultats
+## Flux d’opérations
 
-| Ordre  | `action`                             | Fonction                         | Mode de retour         |
-| --- | ------------------------------------ | -------------------------- | ------------ |
-| 1   | `create`                             | Créer un projet vide                      | données de projet synchrones       |
-| 2   | `retrieve`                           | Lire la dernière version et le `state` complet          | données de projet synchrones       |
-| 3   | `save`                               | Enregistrement initial ou enregistrement global du `state` modifié      | données de projet synchrones       |
-| 4   | `upload`                             | Créer une ressource à partir d’une adresse audio HTTPS           | tâche asynchrone         |
-| 5   | `add_track`                          | Placer l’audio de la ressource dans le projet                  | tâche asynchrone, met à jour la version    |
-| 6   | `save`                               | Pour recevoir de nouveaux candidats de piste, enregistrez d’abord une piste cible vide        | données de projet synchrones, met à jour la version  |
-| 7   | `render`                             | Exporter les pistes actuellement audibles et obtenir la référence de mixage `audio_id` | tâche asynchrone         |
-| 8   | `generate_track` ou `replace_section` | Générer respectivement de nouveaux candidats de piste ou des candidats de remplacement local            | tâche asynchrone, ne modifie pas encore le projet  |
-| 9   | `commit_candidate`                   | Sélectionner et soumettre un candidat                  | tâche asynchrone, met à jour la version après réussite |
-| Facultatif  | `remove_track`                       | Supprimer la piste spécifiée                     | données de projet synchrones, met à jour la version  |
+| Ordre | `action`                             | Rôle                                          | Mode de retour                  |
+| --- | ------------------------------------ | --------------------------------------------- | ------------------------------- |
+| 1   | `create`                             | Créer un projet vide                          | Données de projet synchrones    |
+| 2   | `retrieve`                           | Lire la version la plus récente et le `state` complet | Données de projet synchrones    |
+| 3   | `save`                               | Première sauvegarde ou sauvegarde globale du `state` modifié | Données de projet synchrones    |
+| 4   | `upload`                             | Créer une ressource depuis une adresse audio HTTPS | Tâche asynchrone                |
+| 5   | `add_track`                          | Placer l’audio de la ressource dans le projet | Tâche asynchrone, met à jour la version |
+| 6   | `save`                               | Pour recevoir de nouveaux candidats de piste, sauvegarder d’abord une piste cible vide | Données de projet synchrones, met à jour la version |
+| 7   | `render`                             | Exporter les pistes actuellement audibles et obtenir la référence de mixage `audio_id` | Tâche asynchrone                |
+| 8   | `generate_track` ou `replace_section` | Générer respectivement un nouveau candidat de piste ou un candidat de remplacement local | Tâche asynchrone, ne modifie pas encore le projet |
+| 9   | `commit_candidate`                   | Sélectionner et soumettre un candidat         | Tâche asynchrone, met à jour la version après succès |
+| Facultatif | `remove_track`                       | Supprimer la piste spécifiée                  | Données de projet synchrones, met à jour la version |
 
-Si vous effectuez uniquement un remplacement local, un audio source utilisable existant suffit ; il n’est pas nécessaire d’exécuter d’abord `render`. Si l’audio source est déjà dans le projet, vous pouvez également ignorer `upload` et `add_track`. `render_audio_id` est uniquement la référence obligatoire de `generate_track`.
+Si vous effectuez uniquement un remplacement local, un audio source disponible existant suffit et il n’est pas nécessaire d’exécuter d’abord `render` ; si l’audio source se trouve déjà dans le projet, vous pouvez également ignorer `upload` et `add_track`. `render_audio_id` est uniquement une référence obligatoire pour `generate_track`.
 
-Lors de la soumission d’une opération asynchrone, `{ "task_id": "...", "trace_id": "..." }` est d’abord renvoyé, ce qui **ne signifie pas que la génération a réussi**. Interrogation :
+Lorsqu’une opération asynchrone est soumise, elle renvoie d’abord `{ "task_id": "...", "trace_id": "..." }`, ce qui **ne signifie pas que la génération a réussi**. Interrogez périodiquement :
 
 ```http
 POST /suno/tasks
 Content-Type: application/json
 
-{"action":"retrieve","id":"上一步返回的 task_id"}
+{"action":"retrieve","id":"task_id renvoyé à l’étape précédente"}
 ```
 
-Une tâche n’est considérée comme réussie que si son enregistrement contient `finished_at` et que `response.success` vaut `true` ; lorsque `response.success=false`, lisez `response.error`. Bien que `save` puisse contenir un `task_id`, il se termine de manière synchrone dans cette interface. `upload`, `render`, `generate_track`, `replace_section` ne modifient pas la version du projet ; après la réussite de `save`, `add_track`, `commit_candidate`, `remove_track`, le nouveau `version_id` doit être récupéré.
+Une tâche n’est considérée comme réussie que si l’enregistrement de tâche contient `finished_at` et que son `response.success` vaut `true` ; lorsque `response.success=false`, lisez `response.error`. Bien que `save` puisse contenir un `task_id`, il se termine de manière synchrone dans cette interface. `upload`, `render`, `generate_track`, `replace_section` ne modifient pas la version du projet ; après le succès de `save`, `add_track`, `commit_candidate`, `remove_track`, vous devez récupérer le nouveau `version_id`.
 
-## Paramètres de requête
+## Conventions de requête
 
-### Champs communs et en-têtes de requête
+| Paramètre         | Type et portée applicables                                                                  | Description                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `action`          | Chaîne obligatoire                                                                         | Doit être l’un des noms d’opération listés sur cette page ; une requête n’exécute qu’une seule opération. |
+| `id`              | Chaîne obligatoire sauf pour `create`                                                      | ID du projet, provenant de `create.data.id`.                   |
+| `version_id`      | Chaîne obligatoire lors de la modification, de la génération de candidats et de l’exportation ; peut être omise lors du premier `save` d’un projet vide | Utilisez la version la plus récente ; les anciennes versions seront refusées. `retrieve` n’en a pas besoin. |
+| `Idempotency-Key` | En-tête de requête obligatoire sauf pour `retrieve`, de 1 à 128 caractères                 | Utilisez une nouvelle clé pour chaque nouvelle opération ; la même clé et la même requête relisent le résultat d’origine, sans régénérer ni facturer. |
+| `async`           | Booléen facultatif pour `upload`, `add_track`, `generate_track`, `replace_section`, `commit_candidate`, `render` | Ces opérations sont toujours asynchrones ; `false` ne rend pas non plus la génération synchrone. |
+| `callback_url`    | URL facultative pour les opérations asynchrones                                            | Reçoit les notifications d’état final ; si elle est omise, interrogez `/suno/tasks` avec `task_id`. Vous devez toujours vérifier `response.success`. |
 
-| Paramètre                | Type et champ d’application                                                                                   | Description                                                              |
-| ----------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `action`          | chaîne obligatoire                                                                                     | Défini sur l’un des noms d’opération listés sur cette page ; une requête n’exécute qu’une seule opération.                                      |
-| `id`              | chaîne obligatoire sauf pour `create`                                                                         | ID du projet, provenant de `create.data.id`.                                      |
-| `version_id`      | chaîne obligatoire lors de la modification, de la génération de candidats et de l’exportation ; peut être omise lors du premier `save` d’un projet vide                                                         | Utilisez la dernière version ; les anciennes versions seront rejetées. `retrieve` n’en a pas besoin.                                 |
-| `Idempotency-Key` | en-tête de requête obligatoire sauf pour `retrieve`, 1–128 caractères                                                              | Utilisez une nouvelle clé pour chaque nouvelle opération ; la même clé avec la même requête relit le résultat d’origine, sans générer à nouveau ni facturer.                                   |
-| `async`           | booléen facultatif pour `upload`, `add_track`, `generate_track`, `replace_section`, `commit_candidate`, `render` | Ces opérations sont toujours asynchrones ; `false` ne transforme pas non plus la génération en opération synchrone.                                    |
-| `callback_url`    | URL facultative pour les opérations contenant les champs asynchrones facultatifs ci-dessus                                                                       | Reçoit les notifications d’état final ; en cas d’omission, interrogez `/suno/tasks` avec `task_id`. Vous devez toujours vérifier `response.success`. |
+Les exemples suivants enchaînent les ID et les versions transmis entre les différentes opérations. Les réponses ne répertorient que les champs relatifs à l’étape actuelle ; lors de l’intégration, remplacez les ID d’exemple par les valeurs de réponse de l’application actuelle.
 
-### Projet et ressources
-| `action`       | Paramètres spécifiques         | Type et conditions                     | Description                                                                 |
-| -------------- | ----------------------------- | -------------------------------------- | --------------------------------------------------------------------------- |
-| `create`       | `title`                       | Chaîne obligatoire, 1–200 caractères   | Titre du nouveau projet.                                                    |
-| `retrieve`     | Aucun                         | —                                      | Seuls `action` et l’`id` du projet sont requis ; renvoie le `state` complet modifiable. |
-| `save`         | `state`                       | Objet obligatoire                      | **Remplace intégralement** l’état du projet, et non un correctif partiel. Modifiez à partir du plus récent `retrieve.data.state` et soumettez-le intégralement, en conservant les champs inconnus. |
-| `save`         | `title`                       | Chaîne facultative                     | Titre du projet ; s’il est omis, utilise `state.title`, ou le titre par défaut s’il n’existe pas non plus. |
-| `upload`       | `audio_url`                   | URL HTTPS obligatoire                  | Adresse de ressource audio accessible publiquement ; après succès, lisez le `candidate.audio_id` final. Les droits d’utilisation de la ressource doivent appartenir à l’appelant. |
-| `add_track`    | `audio_id`                    | Chaîne obligatoire                     | ID audio d’une ressource terminée, et non une URL.                          |
-| `add_track`    | `name` / `color`              | Chaînes facultatives                   | Nom et couleur de la nouvelle piste ; le nom utilise par défaut le titre audio, la couleur recommandée est `#RRGGBB`, avec `#7251F7` par défaut. |
-| `add_track`    | `title`                       | Chaîne facultative                     | Modifie simultanément le titre du projet ; généralement omis.              |
-| `add_track`    | `start_beats` / `end_beats`   | Nombres non négatifs facultatifs, `end_beats > start_beats` | Position du clip dans la chronologie du projet. Le début vaut 0 par défaut ; la fin vaut par défaut `début + durée audio × timing.bps`. |
-| `add_track`    | `gain`                        | Nombre non négatif facultatif, 1 par défaut | Coefficient de volume du clip et de la nouvelle piste.                     |
-| `remove_track` | `track_id`                    | Chaîne obligatoire                     | ID de la piste existante à supprimer. Après succès, utilisez la nouvelle version renvoyée. |
+## Création et lecture de projet
 
-`state.timing.bps` doit être un nombre positif, 2 par défaut. `state.tracks` est un tableau de pistes ; le `clipId` des clips audio existants référence l’ID audio, et `startBeats`, `endBeats`, `readStartBeats` utilisent l’unité de battement du projet. La méthode d’édition la plus sûre consiste à lire le `state` complet, à modifier uniquement la piste ou le clip cible, puis à effectuer un `save` intégral. Une nouvelle piste cible vide doit au minimum avoir un `id` unique, `type:"audio"`, `clips:[]` ; la forme complète réellement utilisable est décrite à l’étape 5 ci-dessous. Ne traitez pas directement les battements des résultats d’analyse audio comme des coordonnées de la chronologie du projet.
+| Opération  | Paramètre | Type et description                                      |
+| ---------- | --------- | -------------------------------------------------------- |
+| `create`   | `title`   | Chaîne obligatoire, de 1 à 200 caractères ; titre du nouveau projet. |
+| `retrieve` | Aucun paramètre spécifique | Utilise l’`id` du projet pour lire la version actuelle et le `state` complet, sans clé d’idempotence. |
 
-### Génération, soumission et exportation
-| `action`                             | Paramètres spécifiques               | Type et conditions                           | Description                                                                                                                                                        |
-| ------------------------------------ | ---------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generate_track` / `replace_section` | `source_audio_id`                  | Chaîne obligatoire                                  | ID de l’audio source terminé. Ajoutez d’abord l’audio source au projet, afin que les candidats suivants puissent trouver la position correspondante.                                                                                                                        |
-| `generate_track` / `replace_section` | `model`                            | Chaîne d’énumération obligatoire                                | Options : `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild`, `chirp-v6-mini`. La disponibilité du modèle et de l’opération est déterminée par l’état final de la tâche ; aucun autre modèle ne sera automatiquement utilisé. |
-| `generate_track` / `replace_section` | `start_seconds` / `end_seconds`    | Nombres obligatoires, `0 ≤ start_seconds &lt; end_seconds` | Secondes de début et de fin dans l’audio source ; lors d’un remplacement, la fin ne doit pas non plus dépasser la durée réelle de l’audio source. Ce ne sont pas des temps de projet et ne garantissent pas la durée de sortie du candidat.                                                                                                         |
-| `generate_track`                     | `render_audio_id`                  | Chaîne obligatoire                                  | `response.data.audio_id` après le `render` réussi du projet actuel, utilisé comme référence de mixage lors de la génération.                                                                                                   |
-| `generate_track`                     | `stem_control_tags`                | Chaîne obligatoire                                  | Description de la nouvelle piste, par exemple `add Piano`, `add Drums`, `add Bass` ; ce n’est pas une énumération fixe.                                                                                                      |
-| `generate_track`                     | `batch_size`                       | Entier facultatif 1–4, 2 par défaut                          | Nombre de candidats demandés à générer.                                                                                                                                                |
-| `generate_track`                     | `instrumental` / `vocal_gender`    | Booléen facultatif／chaîne d’énumération                            | `instrumental` est `true` par défaut ; la préférence vocale peut être `f`, `m`, `unspecified`, avec `unspecified` par défaut. Le respect de la préférence dépend de l’audio réel.                                                                     |
-| `generate_track` / `replace_section` | `title` / `tags` / `negative_tags` | Chaînes facultatives                                  | Titre du candidat, description du style souhaité, étiquettes de style à éviter. Lorsque `tags` et `negative_tags` sont omis, transmettez des chaînes vides.                                                                                                  |
-| `generate_track`                     | `prompt`                           | Chaîne facultative                                  | Indication de texte ou de paroles pour la nouvelle piste ; peut être omise pour un instrumental pur.                                                                                                                                       |
-| `replace_section`                    | `prompt` / `replacement_lyrics`    | Chaînes facultatives                                  | Le premier correspond aux paroles de la chanson originale ou au texte contextuel, le second aux nouvelles paroles de la section remplacée ; lorsque omis, transmettez des chaînes vides.                                                                                                                      |
-| `replace_section`                    | `fixed`                            | Booléen facultatif, `false` par défaut                       | Demande un remplacement à longueur fixe ; lorsque `true`, l’intervalle doit être inférieur à 26 secondes, et le modèle sélectionné peut ne pas le prendre en charge. Cet exemple réel utilise le mode par défaut, `fixed=true` n’a pas encore été vérifié.                                                                                    |
-| `commit_candidate`                   | `operation_id` / `candidate_id`    | Chaînes obligatoires                                  | Prenez-les respectivement dans `data.operation_id` de l’état final de génération et dans le `data.candidates[].id` sélectionné ; le candidat doit appartenir à la version actuelle du projet.                                                                                    |
-| `commit_candidate`                   | `track_id`                         | Chaîne obligatoire                                  | Un candidat de nouvelle piste doit être envoyé vers la **piste vide enregistrée avant la génération** ; un candidat de remplacement local doit être envoyé vers la piste d’origine contenant l’unique segment source.                                                                                                              |
-| `commit_candidate`                   | `start_beats` / `end_beats`        | Nombres non négatifs facultatifs, uniquement pour les candidats de nouvelle piste                           | Indique la position du nouveau segment dans la timeline du projet ; lorsque omis, le début du segment source est conservé et la fin est calculée selon la durée réelle du candidat. Ne doit pas chevaucher les segments existants de la piste cible. **Doit être omis pour les candidats de remplacement local**.                                                                                      |
-| `commit_candidate`                   | `name` / `gain`                    | Chaîne／nombre non négatif facultatif, uniquement pour les candidats de nouvelle piste                       | Nom du segment généré et coefficient de volume, `gain` vaut 1 par défaut.                                                                                                                                  |
-| `render`                             | `title`                            | Chaîne obligatoire                                  | Titre de l’audio exporté.                                                                                                                                                   |
-| `render`                             | `lyrics` / `tags`                  | Chaînes facultatives                                  | Texte des paroles et description du style lors de l’export ; les paroles sont par défaut `[Instrumental]`.                                                                                                                      |
-| `render`                             | `start_beats` / `end_beats`        | Nombres non négatifs facultatifs, la fin doit être supérieure au début                         | Plage de temps du projet à exporter ; lorsque omise, prend le début le plus tôt et la fin la plus tardive de tous les segments audibles. Les segments silencieux ne sont pas pris en compte ; lorsqu’il existe des pistes solo, seules les pistes solo sont sélectionnées.                                                                                             |
+### Créer un projet : `create`
 
-La génération ne produit que des candidats et **ne les place pas automatiquement dans le projet**. `commit_candidate` vérifie que le candidat appartient toujours à la version actuelle. Les candidats de remplacement local ne peuvent être validés automatiquement que lorsque leur durée réelle peut être mise en correspondance de manière fiable avec l’audio source complet ou l’intervalle sélectionné ; en cas de non-correspondance, le projet original est conservé et une erreur est renvoyée, sans pouvoir forcer l’assemblage en devinant manuellement les temps.
-
-## Requêtes et réponses réelles du 2026-10-09
-
-Les corps de requête et les champs de réponse ci-dessous proviennent tous d’appels réels du même projet. Chaque groupe JSON contient, dans l’ordre, la requête, la réponse d’acceptation (si asynchrone), puis la réponse d’état final de la tâche. Pour faciliter la lecture, les réponses ne reprennent que les champs nécessaires à ce flux ; les champs de compte, d’utilisation et de durée ne sont pas affichés. Les ID d’exemple appartiennent à cette application de test ; lors de l’intégration, vous devez utiliser les ID renvoyés par vos propres requêtes ainsi qu’une nouvelle `Idempotency-Key`.
-
-### 1. Créer et lire un projet vide : `create`, `retrieve`
-
-Requête `create` :
+Requête :
 
 ```json
 {
@@ -125,6 +87,8 @@ Requête `create` :
   "title": "Suno Projects Documentation Verification 2026-10-09"
 }
 ```
+
+Réponse :
 
 ```json
 {
@@ -143,568 +107,688 @@ Requête `create` :
 }
 ```
 
-Appelez ensuite `retrieve` :
+### Lire un projet : `retrieve`
+Requête :```json
+&#123;
+"action": "retrieve",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
+&#125;
 
-```json
-{
-  "action": "retrieve",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
-}
+```
+Réponse :
 ```
 
-```json
-{
-  "success": true,
-  "trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "title": "Suno Projects Documentation Verification 2026-10-09",
-    "state": {
-      "tracks": [],
-      "timing": {
-        "bps": 2
-      }
-    }
-  }
-}
+&#123;
+"success": true,
+"trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
+&#125;
+
 ```
 
-### 2. Premier enregistrement : `save`
+## Enregistrer l’état du projet
 
-Un projet nouvellement créé n’a pas de `version_id` ; omettez-le lors du premier enregistrement :
-```json
-{
-  "action": "save",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "title": "Vérification de la documentation des projets Suno 2026-10-09",
-  "state": {
-    "tracks": [],
-    "timing": {
-      "bps": 2
-    }
-  }
-}
+| Paramètre | Type et description |
+|---|---|
+| `state` | Objet obligatoire. Soumettez l’**état complet du projet**, et non un correctif partiel ; basez-vous sur le `data.state` renvoyé par l’opération de lecture ou de modification la plus récente, et conservez les champs inconnus. |
+| `title` | Chaîne facultative ; lorsqu’elle est omise, utilisez `state.title`, ou le titre par défaut si celui-ci n’existe pas non plus. |
+| `version_id` | Peut être omis lors de la première sauvegarde d’un nouveau projet vide ; par la suite, la version la plus récente doit être utilisée. |
+
+`state.timing.bps` doit être un nombre positif, la valeur par défaut étant 2. `state.tracks` est un tableau de pistes ; le `clipId` des clips audio existants référence l’ID audio, et `startBeats`, `endBeats`, `readStartBeats` utilisent l’unité de temps en battements du projet. La manière la plus sûre de modifier est de lire le `state` complet, de modifier uniquement la piste ou le clip cible, puis d’effectuer un `save` global. Une nouvelle piste cible vide doit avoir au minimum un `id` unique, `type:"audio"`, `clips:[]` ; consultez l’exemple dans « Générer une nouvelle piste audio » pour la structure complète d’une piste vide. N’utilisez pas directement les points de battement des résultats d’analyse audio comme coordonnées de la timeline du projet.
+
+### Première sauvegarde : `save`
+
+Un nouveau projet n’a pas de `version_id`, omettez-le lors de la première sauvegarde :
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
-  "trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-    "state": {
-      "timing": {
-        "bps": 2
-      },
-      "tracks": []
-    }
-  }
-}
+&#123;
+"action": "save",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
+
+```
+Réponse :
 ```
 
-### 3. Téléverser une ressource : `upload`
+&#123;
+"success": true,
+"task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
+"trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"state": &#123;
+"timing": &#123;
+"bps": 2
+&#125;,
+"tracks": []
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "action": "upload",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-  "audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
-  "async": true
-}
 ```
 
-La réponse de soumission indique uniquement que la demande a été acceptée :
+## Téléverser de l’audio et ajouter une piste
 
-```json
-{
-  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
-  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
-}
+| Opération | Paramètre | Type et description |
+|---|---|---|
+| `upload` | `audio_url` | URL HTTPS obligatoire, pointant vers un audio publiquement accessible et que vous avez le droit d’utiliser. Le `candidate.audio_id` dans l’état final peut être utilisé pour ajouter une piste. |
+| `add_track` | `audio_id` | Chaîne obligatoire ; l’ID audio d’une ressource terminée, et non une URL. |
+| `add_track` | `name`、`color` | Chaînes facultatives ; le nom de la piste reprend par défaut le titre de l’audio, la couleur recommandée est `#RRGGBB`, par défaut `#7251F7`. |
+| `add_track` | `title` | Chaîne facultative ; modifie également le titre du projet, généralement omise. |
+| `add_track` | `start_beats`、`end_beats` | Nombres non négatifs facultatifs, la fin doit être supérieure au début ; commence par défaut au battement 0, et la fin est calculée selon la durée audio et `timing.bps`. |
+| `add_track` | `gain` | Nombre non négatif facultatif, par défaut 1 ; le coefficient de volume du clip et de la piste. |
+
+### Téléverser une ressource : `upload`
+
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
-  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "candidate": {
-      "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-      "title": "suno_demo",
-      "duration": 41,
-      "audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
-    }
-  }
-}
+&#123;
+"action": "upload",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
+"async": true
+&#125;
+
+```
+Réponse d’acceptation :
 ```
 
-### 4. Ajouter une piste source : `add_track`
+&#123;
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
+&#125;
 
-```json
-{
-  "action": "add_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-  "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "name": "Démo source",
-  "start_beats": 0
-}
+```
+État final de la tâche :
 ```
 
-Réponse de soumission :
+&#123;
+"success": true,
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"candidate": &#123;
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"title": "suno_demo",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
-  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
-}
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
-  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
-    "track": {
-      "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-      "name": "Démo source",
-      "clips": [
-        {
-          "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-          "startBeats": 0,
-          "endBeats": 82
-        }
-      ]
-    }
-  }
-}
+### Ajouter une piste source : `add_track`
+
 ```
 
-### 5. Enregistrer une piste vide recevant les candidats
+&#123;
+"action": "add_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"name": "Source demo",
+"start_beats": 0
+&#125;
 
-Les candidats de `generate_track` sont liés à la version actuelle du projet. Cette fois, utilisez d'abord le `state` **complet** obtenu avec `retrieve` comme base, ajoutez la piste vide réelle suivante à `state.tracks`, puis enregistrez avec `save` ; conservez les autres champs existants tels quels :
-
-```json
-{
-  "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-  "type": "audio",
-  "name": "Piano généré",
-  "clips": [],
-  "takeLanes": [],
-  "mute": false,
-  "solo": false,
-  "amplitude": 1,
-  "instrument": {
-    "type": "song"
-  },
-  "color": "#7251F7"
-}
+```
+Réponse d’acceptation :
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
-  "trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
-  }
-}
+&#123;
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
+&#125;
+
+```
+État final de la tâche :
 ```
 
-### 6. Exporter le mixage de référence : `render`
+&#123;
+"success": true,
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
+"track": &#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"name": "Source demo",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;
+&#125;
+&#125;
 
-```json
+```
+
+## Générer une nouvelle piste audio
+
+Les candidats sont liés à la version du projet au moment de la génération. Enregistrez d’abord une piste vide destinée à recevoir les candidats, puis exportez le mixage actuel comme référence de génération ; une fois la génération terminée, sélectionnez un candidat et soumettez-le à cette piste vide.
+
+### Réserver une piste cible : `save`
+
+Les candidats de `generate_track` sont liés à la version actuelle du projet. Sur le `state` **complet** renvoyé dans l’état final du `add_track` précédent, ajoutez la piste vide suivante à `state.tracks`, puis enregistrez avec `save` ; conservez tels quels les autres champs existants :
+{
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"type": "audio",
+"name": "Generated piano",
+"clips": [],
+"takeLanes": [],
+"mute": false,
+"solo": false,
+"amplitude": 1,
+"instrument": {
+"type": "song"
+},
+"color": "#7251F7"
+}
+
+```
+Réponse de sauvegarde :
+```
+
+{
+"success": true,
+"task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
+"trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
+"data": {
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
+}
+}
+
+```
+
+### Exporter le mixage de référence : `render`
+
+| Paramètre | Type et description |
+|---|---|
+| `title` | Chaîne obligatoire ; titre de l’audio exporté. |
+| `lyrics`、`tags` | Chaînes facultatives ; les paroles sont par défaut `[Instrumental]`, `tags` est une description du style. |
+| `start_beats`、`end_beats` | Nombres non négatifs facultatifs, la fin doit être supérieure au début ; lorsqu’ils sont omis, ils couvrent tous les segments audibles. Les segments en sourdine ne participent pas ; lorsqu’il y a des pistes solo, seules les pistes solo sont sélectionnées. |
+
+Après réussite, récupérez `render_audio_id` depuis `response.data.audio_id` dans l’état final de la tâche.
+
+```
 {
   "action": "render",
   "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
   "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "title": "Mix source de la documentation Suno Projects",
+  "title": "Suno Projects Docs Source Mix",
   "lyrics": "[Instrumental]",
   "async": true
 }
 ```
-
-Réponse de soumission :
-
-```json
-{
-  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
-  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
-}
+Réponse d’acceptation :
 ```
 
-```json
 {
-  "success": true,
-  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
-  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-    "render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-    "audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-    "duration": 41,
-    "audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
-  }
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
 }
+
+```
+État final de la tâche :
 ```
 
-### 7. Générer un candidat de nouvelle piste : `generate_track`
-```json
 {
-  "action": "generate_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-  "model": "chirp-v5",
-  "start_seconds": 12,
-  "end_seconds": 20,
-  "stem_control_tags": "add Piano",
-  "title": "Documentation Piano Take",
-  "tags": "gentle piano, instrumental",
-  "batch_size": 2,
-  "async": true
+"success": true,
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
+"data": {
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
 }
+}
+
 ```
 
-Réponse de soumission :
+### Générer des candidats : `generate_track`
 
-```json
-{
-  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
-}
+| Paramètre | Type et description |
+|---|---|
+| `source_audio_id` | Obligatoire ; ID de l’audio source terminé. Ajoutez d’abord l’audio source au projet, afin de pouvoir déterminer ensuite la position des candidats. |
+| `render_audio_id` | Obligatoire ; `response.data.audio_id` dans l’état final de `render` ci-dessus, et non l’URL audio. |
+| `model` | Obligatoire ; options possibles : `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild`, `chirp-v6-mini`. La disponibilité des combinaisons spécifiques dépend de l’état final de la tâche. |
+| `start_seconds`、`end_seconds` | Nombres obligatoires, `0 ≤ start_seconds &lt; end_seconds` ; intervalle en secondes dans l’audio source, et non les temps du projet, sans garantie de durée de sortie. |
+| `stem_control_tags` | Chaîne obligatoire ; description de la nouvelle partie, par exemple `add Piano`, `add Drums`, `add Bass`, ce n’est pas une énumération fixe. |
+| `batch_size` | Entier facultatif de 1 à 4, 2 par défaut ; nombre de candidats. |
+| `instrumental`、`vocal_gender` | Facultatifs ; purement instrumental par défaut à `true`, la préférence vocale peut être `f`, `m`, `unspecified`, avec `unspecified` par défaut. |
+| `title`、`tags`、`negative_tags`、`prompt` | Chaînes facultatives ; respectivement le titre du candidat, le style souhaité, les styles à éviter, et l’invite textuelle ou les paroles pour la nouvelle partie. |
+
 ```
 
-```json
 {
-  "success": true,
-  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-    "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-    "candidates": [
-      {
-        "id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-        "title": "Documentation Piano Take",
-        "state": "complete",
-        "duration": 41.76,
-        "audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
-      },
-      {
-        "id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
-        "title": "Documentation Piano Take",
-        "state": "complete",
-        "duration": 40.96,
-        "audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
-      }
-    ]
-  }
+"action": "generate_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"model": "chirp-v5",
+"start_seconds": 12,
+"end_seconds": 20,
+"stem_control_tags": "add Piano",
+"title": "Documentation Piano Take",
+"tags": "gentle piano, instrumental",
+"batch_size": 2,
+"async": true
 }
+
+```
+Réponse d’acceptation :
 ```
 
-Ici, les secondes 12 à 20 de l’audio source sont demandées comme référence de génération, tandis que les audios candidats renvoyés durent en réalité environ 41 secondes ; `start_seconds`/`end_seconds` ne garantissent pas la durée de sortie.
-
-### 8. Adopter un candidat : `commit_candidate`
-
-```json
 {
-  "action": "commit_candidate",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-  "async": true
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
 }
+
+```
+État final de la tâche :
 ```
 
-Réponse de soumission :
-
-```json
 {
-  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
-  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
+"success": true,
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
+"data": {
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidates": [
+{
+"id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 41.76,
+"audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
+},
+{
+"id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 40.96,
+"audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
 }
+]
+}
+}
+
+```
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
-  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-    "committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-          "clips": [
-            {
-              "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-              "startBeats": 0,
-              "endBeats": 82
-            }
-          ]
-        },
-        {
-          "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-          "clips": [
-            {
-              "clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-              "startBeats": 0,
-              "endBeats": 83.52
-            }
-          ]
-        }
-      ]
-    }
-  }
-}
+Les 12 à 20 secondes de la requête correspondent à l’intervalle de référence de l’audio source, l’audio candidat dure environ 41 secondes ; `start_seconds`/`end_seconds` ne garantissent pas la durée de sortie.
+
+### Adopter le candidat : `commit_candidate`
+
+| Paramètre | Type et description |
+|---|---|
+| `operation_id` | Obligatoire ; `data.operation_id` de l’état terminal de la tâche de génération. |
+| `candidate_id` | Obligatoire ; `data.candidates[].id` sélectionné. |
+| `track_id` | Obligatoire ; `state.tracks[].id` de la piste vide sauvegardée avant la génération. |
+| `start_beats`、`end_beats` | Facultatif pour un candidat de nouvelle piste ; spécifie la plage de temps du projet, qui ne peut pas chevaucher les clips existants de la piste cible. Lorsqu’ils sont omis, le point de départ du clip source est conservé et le point de fin est calculé selon la durée du candidat. |
+| `name`、`gain` | Facultatif pour un candidat de nouvelle piste ; nom du clip et coefficient de volume non négatif, `gain` vaut 1 par défaut. |
+
+La génération produit uniquement des candidats, **elle ne les place pas automatiquement dans le projet**. `commit_candidate` vérifie que le candidat appartient toujours à la version actuelle. Les candidats de remplacement local ne peuvent être soumis automatiquement que lorsque leur durée réelle peut correspondre de manière fiable à l’audio source complet ou à l’intervalle sélectionné ; en cas de non-correspondance, le projet d’origine est conservé et une erreur est renvoyée, sans pouvoir forcer l’assemblage en devinant manuellement le nombre de temps.
+
 ```
 
-### 9. Générer un candidat de remplacement local : `replace_section`
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"async": true
+&#125;
 
-```json
-{
-  "action": "replace_section",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "model": "chirp-v5",
-  "title": "Documentation Verse Edit",
-  "tags": "dreamy Chinese pop",
-  "prompt": "[Verse 1]\n晨光洒在海边\n浪花笑得灿烂\n你和我在沙滩\n钟表停止转动\n冰淇淋在融化\n手牵手去散步\n[Chorus]\n风儿轻轻吹过\n心跳不停鼓\n夏天夏天\n时间停在这一天\n笑声回荡\n微蓝天空在身旁",
-  "replacement_lyrics": "我们走在海边\n微风吹过晴天",
-  "start_seconds": 12,
-  "end_seconds": 20,
-  "async": true
-}
+```
+Réponse d’acceptation :
 ```
 
-Réponse de soumission :
+&#123;
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
+&#125;
 
-```json
-{
-  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
-}
 ```
-```json
-{
-  "success": true,
-  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-    "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-    "candidates": [
-      {
-        "id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
-        "title": "Documentation Verse Edit",
-        "state": "complete",
-        "duration": 36,
-        "audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
-      },
-      {
-        "id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
-        "title": "Documentation Verse Edit",
-        "state": "complete",
-        "duration": 36,
-        "audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
-      }
-    ]
-  }
-}
+État terminal de la tâche :
 ```
 
-### 10. Les candidats de remplacement actuels ne peuvent pas être soumis : conserver le résultat réel de l’échec
+&#123;
+"success": true,
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;,
+&#123;
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"clips": [
+&#123;
+"clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"startBeats": 0,
+"endBeats": 83.52
+&#125;
+]
+&#125;
+]
+&#125;
+&#125;
+&#125;
 
-Cette fois-ci, `replace_section` a sélectionné un intervalle de 8 secondes, mais les deux candidats font en réalité 36 secondes, ce qui n’est égal ni aux 41 secondes de l’audio original ni aux 8 secondes sélectionnées. La requête réelle et l’état final de la soumission de l’un des candidats sont les suivants :
-
-```json
-{
-  "action": "commit_candidate",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
-  "track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-  "async": true
-}
 ```
 
-Réponse de soumission :
+### Exporter après la soumission
 
-```json
-{
-  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
-  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
-}
+Après la soumission du candidat de nouvelle piste, l’exportation du morceau entier contenant ce candidat a été refusée. Requête et état terminal :
 ```
 
-```json
-{
-  "success": false,
-  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
-  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
-  "error": {
-    "code": "bad_request",
-    "message": "Candidate duration does not match the source or selected section. Keep the original track and inspect the candidate before editing."
-  }
-}
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"title": "Suno Projects Docs Mix With Piano",
+"lyrics": "[Instrumental]",
+"async": true
+&#125;
+
+```
+Réponse d’acceptation :
 ```
 
-Par conséquent, la piste originale n’a pas été modifiée. En cas de cette erreur, le candidat doit être conservé pour l’écoute et le traitement manuel ; ne le considérez pas comme ayant été intégré avec succès au projet, et ne relancez pas automatiquement une génération payante.
+&#123;
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
+&#125;
 
-### 11. Supprimer la piste de test et relire : `remove_track`, `retrieve`
-
-```json
-{
-  "action": "remove_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
-}
+```
+État terminal de la tâche :
 ```
 
-```json
-{
-  "success": true,
-  "trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
-        }
-      ]
-    }
-  }
-}
+&#123;
+"success": false,
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
+"error": &#123;
+"code": "studio_audio_unavailable",
+"message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
+&#125;
+&#125;
+
 ```
 
-Résultat réel après un nouveau `retrieve` :
+Le fait que le lien audio du candidat soit accessible ne signifie pas nécessairement que le projet qui l’inclut peut être exporté. Lors de la réception de `studio_audio_unavailable`, le projet d’origine doit être conservé et la disponibilité de l’audio référencé doit être vérifiée.
 
-```json
-{
-  "success": true,
-  "trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
-        }
-      ]
-    }
-  }
-}
+## Remplacer un clip existant
+
+`replace_section` peut directement utiliser l’audio source existant, sans devoir d’abord exporter le mixage. La génération ne renvoie que des candidats ; lors de la soumission, sélectionnez la piste d’origine contenant l’unique clip source.
+
+| Paramètre | Type et description |
+|---|---|
+| `source_audio_id` | Obligatoire ; ID de l’audio source terminé à remplacer. |
+| `model` | Obligatoire ; utilise les modèles publics répertoriés dans « Générer des candidats », la disponibilité du modèle et de l’opération dépend de l’état terminal de la tâche. |
+| `start_seconds`、`end_seconds` | Nombres obligatoires, `0 ≤ start_seconds < end_seconds ≤ durée de l’audio source` ; intervalle en secondes au sein de l’audio source. |
+| `prompt`、`replacement_lyrics` | Chaînes facultatives ; le premier correspond aux paroles originales ou au contexte, le second aux nouvelles paroles de l’intervalle de remplacement. |
+| `title`、`tags`、`negative_tags` | Chaînes facultatives ; titre du candidat, style souhaité et styles à éviter. |
+| `fixed` | Booléen facultatif, `false` par défaut ; lorsqu’il est défini sur `true`, l’intervalle doit être inférieur à 26 secondes, et le modèle peut ne pas être pris en charge. |
+
+### Générer un candidat de remplacement : `replace_section`
+
 ```
 
-### 12. Restrictions d’exportation et vérification de la récupération
+&#123;
+"action": "replace_section",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"model": "chirp-v5",
+"title": "Documentation Verse Edit",
+"tags": "dreamy Chinese pop",
+"prompt": "[Verse 1]\n晨光洒在海边\n浪花笑得灿烂\n你和我在沙滩\n钟表停止转动\n冰淇淋在融化\n手牵手去散步\n[Chorus]\n风儿轻轻吹过\n心跳不停鼓\n夏天夏天\n时间停在这一天\n笑声回荡\n微蓝天空在身旁",
+"replacement_lyrics": "我们走在海边\n微风吹过晴天",
+"start_seconds": 12,
+"end_seconds": 20,
+"async": true
+&#125;
 
-Après avoir soumis le candidat de nouvelle piste, l’exportation de la chanson entière incluant ce candidat a été refusée. La requête réelle et l’état final :
+```
+Réponse d’acceptation :
+```
+&#123;
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
+&#125;
 
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "title": "Suno Projects Docs Mix With Piano",
-  "lyrics": "[Instrumental]",
-  "async": true
-}
+```
+État final de la tâche :
 ```
 
-Réponse de soumission :
+&#123;
+"success": true,
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidates": [
+&#123;
+"id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
+&#125;,
+&#123;
+"id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
+&#125;
+]
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
-  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
-}
 ```
 
-```json
-{
-  "success": false,
-  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
-  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
-  "error": {
-    "code": "studio_audio_unavailable",
-    "message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
-  }
-}
+### La durée des candidats ne correspond pas
+
+Lors de la soumission de candidats de remplacement partiel, `track_id` doit pointer vers la piste d’origine contenant l’unique segment source, et `start_beats`, `end_beats` doivent être omis. L’interface ne mettra à jour le projet que lorsque la durée du candidat peut correspondre de manière fiable à l’audio source complet ou à la plage sélectionnée.
+
+Après avoir sélectionné une plage de 8 secondes, les deux candidats font 36 secondes, ce qui n’est égal ni aux 41 secondes de l’audio d’origine, ni aux 8 secondes sélectionnées. La soumission de l’un des candidats renvoie :
 ```
 
-Après la suppression de cette piste candidate, la piste source originale est toujours présente, et l’exportation a de nouveau réussi en utilisant la dernière version :
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"async": true
+&#125;
 
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-  "title": "Suno Projects Docs Mix After Remove",
-  "async": true
-}
+```
+Réponse d’acceptation :
 ```
 
-Réponse de soumission :
+&#123;
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
+&#125;
 
-```json
-{
-  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
-  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
-}
 ```
-```json
-{
-  "success": true,
-  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
-  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
-    "audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
-    "duration": 41,
-    "audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
-  }
-}
+État final de la tâche :
 ```
 
-Les liens audio renvoyés avec succès ci-dessus peuvent tous lire les octets média lors de cette validation ; les premiers 1 024 octets des liens candidats générés et remplacés renvoient tous HTTP 206, `audio/mpeg`, et le lien d’exportation renvoie HTTP 206, `audio/mp4`. Cela prouve uniquement que les liens sont lisibles, et ne signifie pas qu’un projet contenant ce candidat peut nécessairement être exporté.
+&#123;
+"success": false,
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
+"error": &#123;
+"code": "bad_request",
+"message": "Candidate duration does not match the source or selected section. Keep the original track and inspect the candidate before editing."
+&#125;
+&#125;
+
+```
+
+Par conséquent, la piste d’origine n’a pas été modifiée. En cas de cette erreur, les candidats doivent être conservés pour écoute et traitement manuel ; ne les considérez pas comme ayant été intégrés avec succès au projet, et ne soumettez pas automatiquement à nouveau une génération facturée.
+
+## Supprimer une piste
+
+`remove_track` nécessite le `version_id` actuel et `state.tracks[].id` ; après réussite, utilisez la nouvelle version renvoyée. Ci-dessous, suppression de la piste candidate qui ne peut pas être utilisée pour l’exportation de la chanson entière, puis relecture de l’état du projet.
+
+```
+
+&#123;
+"action": "remove_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
+&#125;
+
+```
+Réponse :
+```
+
+&#123;
+"success": true,
+"trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+Lire à nouveau le projet :
+```
+
+&#123;
+"success": true,
+"trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+
+### Exportation après suppression
+
+Après la suppression de cette piste candidate, la piste source d’origine existe toujours, et l’exportation réussit à nouveau avec la dernière version :
+```
+
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"title": "Suno Projects Docs Mix After Remove",
+"async": true
+&#125;
+
+```
+Réponse d’acceptation :
+```
+
+&#123;
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
+&#125;
+
+```
+État final de la tâche :
+```
+
+&#123;
+"success": true,
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
+&#125;
+&#125;
+```
+
+L’`audio_url` exportée avec succès peut être utilisée pour le téléchargement ou la lecture. Le fait que le lien audio soit accessible ne prouve pas que les autres candidats disposent également de l’éligibilité à l’exportation du projet.
 
 ## Erreurs et récupération
 
-| Résultat                                                                            | Signification                          | Étape suivante                                    |
-| ----------------------------------------------------------------------------- | --------------------------- | -------------------------------------- |
-| `project_version_conflict` / `project_candidate_stale`（409）                   | La version du projet a changé, ou le candidat n’appartient pas à la version actuelle.         | `retrieve` le dernier projet et replanifier les modifications ; ne pas rejouer d’anciens candidats.        |
-| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（généralement 400）   | Les paramètres, l’état de la piste, la durée du candidat ou le modèle ne correspondent pas à l’opération.      | Consulter l’erreur finale de la tâche, corriger l’entrée ; conserver le projet d’origine lorsque le candidat ne peut pas être assemblé en toute sécurité.          |
-| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | L’audio référencé ne peut pas être utilisé pour l’opération du projet, l’accès n’est pas autorisé, ou le contrôle du contenu l’a rejeté. | Vérifier la source audio et le `trace_id` de la tâche ; ne pas assimiler un candidat déjà généré à une chanson entière exportable. |
-| `too_many_requests`（429）                                                      | La requête est soumise à une limitation de fréquence.                   | Interroger d’abord la tâche d’origine, puis décider s’il faut lancer une nouvelle opération avec une nouvelle clé d’idempotence.                |
-| `studio_unavailable` / `studio_model_unavailable`（503）                        | Le traitement du projet ou le modèle sélectionné est temporairement indisponible.             | Conserver le résultat de la tâche d’origine ; réessayer explicitement plus tard, sans changer automatiquement de modèle.                |
-| `studio_processing_failed` / délai d’attente（500/504）                                      | Le traitement a échoué ou l’état final est incertain.                 | Interroger par `task_id` ou par la clé d’idempotence d’origine, afin d’éviter une génération facturée en double.          |
+| Résultat | Signification | Étape suivante |
+|---|---|---|
+| `project_version_conflict` / `project_candidate_stale`（409） | La version du projet a changé, ou le candidat n’appartient pas à la version actuelle. | Effectuez un `retrieve` du dernier projet et replannifiez les modifications ; ne rejouez pas les anciens candidats. |
+| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（généralement 400） | Les paramètres, l’état de la piste, la durée du candidat ou le modèle ne correspondent pas à l’opération. | Consultez l’erreur de l’état final de la tâche, corrigez l’entrée ; conservez le projet d’origine lorsque le candidat ne peut pas être assemblé en toute sécurité. |
+| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | L’audio référencé n’est pas disponible pour cette opération de projet, l’accès n’est pas autorisé, ou la vérification du contenu l’a rejeté. | Vérifiez la source audio et le `trace_id` de la tâche ; n’assimilez pas un candidat déjà généré à la possibilité d’exporter l’ensemble du morceau. |
+| `too_many_requests`（429） | La requête est soumise à une limitation de fréquence. | Interrogez d’abord la tâche d’origine, puis décidez s’il faut lancer une nouvelle opération avec une nouvelle clé d’idempotence. |
+| `studio_unavailable` / `studio_model_unavailable`（503） | Le traitement du projet ou le modèle sélectionné est temporairement indisponible. | Conservez le résultat de la tâche d’origine ; réessayez explicitement plus tard, sans changer automatiquement de modèle. |
+| `studio_processing_failed` / délai d’expiration（500/504） | Le traitement a échoué ou l’état final est incertain. | Interrogez à l’aide du `task_id` ou de la clé d’idempotence d’origine, afin d’éviter une génération facturée en double. |
 
-Les projets et les candidats sont liés à l’application et à l’environnement d’exécution qui les ont créés ; il ne faut pas supposer une réutilisation entre applications ni un basculement automatique en cas de défaillance. Veuillez persister l’URL audio finale exportée avec succès, et conserver le `trace_id` pour faciliter le diagnostic.
+Les projets et les candidats sont liés à l’application et à l’environnement d’exécution qui les ont créés ; il ne faut pas supposer une réutilisation entre applications ou un basculement automatique en cas de défaillance. Veuillez conserver de manière persistante l’URL audio finale exportée avec succès, et conserver le `trace_id` afin de faciliter le diagnostic.
+```

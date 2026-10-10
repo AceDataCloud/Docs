@@ -3,40 +3,40 @@ title: "Suno Studio 專案接入指南"
 description: "Suno Music Generation 整合指南 - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/suno/projects` 是管理多軌工程的 Beta 介面。一個端點透過 `action` 區分建立、儲存、生成候選、提交候選和匯出。呼叫方只需使用下面的公開欄位，不需要填寫底層生成服務的內部請求結構。
+`POST https://api.acedata.cloud/suno/projects` 是管理多軌工程的 Beta 介面。透過 `action` 區分建立、儲存、生成候選、提交候選和匯出。
 
 ```http
 POST /suno/projects
 Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
-Idempotency-Key: 每次修改操作使用新的 UUID
+Idempotency-Key: <每次寫入操作的新 UUID>
 ```
 
-除 `retrieve` 外，**每次操作都需要** `Idempotency-Key`。相同鍵和相同請求只回讀原結果；相同鍵搭配不同請求會傳回 409。收費生成遇到網路逾時或提交結果不確定時，先用原任務 ID 或同一冪等鍵查詢，不能直接換鍵重發。
+除 `retrieve` 外，**每次操作都需要** `Idempotency-Key`。相同鍵和相同請求只回讀原結果；相同鍵搭配不同請求會傳回 409。收費生成遇到網路逾時或提交結果不確定時，先使用原任務 ID 或相同冪等鍵查詢，不能直接換鍵重送。
 
-## 先區分這些 ID 和時間單位
+## 識別碼和時間單位
 
 | 名稱                             | 從哪裡取得                                                                                      | 用在哪裡                                             |
 | ------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------ |
 | `id`                           | `create` 回應 `data.id`                                                                      | 目前工程的所有後續請求                                      |
 | `version_id`                   | 最近一次 `retrieve`、`save`、`add_track`、`commit_candidate` 或 `remove_track` 的 `data.version_id` | 修改、生成候選和匯出；必須使用最新版本                              |
-| `audio_id` / `source_audio_id` | `upload` 終態 `response.data.candidate.audio_id`，或已有的已完成音訊 ID                                | `add_track`、生成或替換時參照原音訊                          |
+| `audio_id` / `source_audio_id` | `upload` 終態 `response.data.candidate.audio_id`，或既有的已完成音訊 ID                                | `add_track`、生成或替換時參考原音訊                          |
 | `render_audio_id`              | `render` 終態 `response.data.audio_id`                                                       | `generate_track` 的工程混音參考                         |
-| `operation_id`                 | `generate_track` 或 `replace_section` 終態 `response.data.operation_id`                       | `commit_candidate`；通常與生成任務的 `task_id` 相同，但應讀取回傳值 |
+| `operation_id`                 | `generate_track` 或 `replace_section` 終態 `response.data.operation_id`                       | `commit_candidate`；通常與生成任務的 `task_id` 相同，但應讀取傳回值 |
 | `candidate_id`                 | 生成終態 `response.data.candidates[].id`                                                       | 選擇一個候選提交                                         |
 | `track_id`                     | 工程 `data.state.tracks[].id`                                                                | 提交候選或刪除軌道                                        |
 | `task_id`                      | 非同步操作提交回應                                                                                   | 使用 `/suno/tasks` 查詢終態；它不是工程 ID                   |
 
 `start_seconds` / `end_seconds` 是**來源音訊內的秒數**；`start_beats` / `end_beats` 是**工程時間軸上的拍數**。`state.timing.bps` 是每秒拍數，預設為 2。例如 41 秒的片段從第 0 拍開始，預設終點為第 82 拍。`generate_track` 的秒數區間用於指定生成參考，不保證候選只有該區間的長度。
 
-## 操作順序和結果判斷
+## 操作流程
 
-| 順序  | `action`                             | 作用                         | 回傳方式         |
+| 順序  | `action`                             | 作用                         | 傳回方式         |
 | --- | ------------------------------------ | -------------------------- | ------------ |
 | 1   | `create`                             | 建立空工程                      | 同步工程資料       |
 | 2   | `retrieve`                           | 讀取最新版本和完整 `state`          | 同步工程資料       |
 | 3   | `save`                               | 首次儲存或整體儲存修改後的 `state`      | 同步工程資料       |
-| 4   | `upload`                             | 從 HTTPS 音訊網址建立素材           | 非同步任務         |
+| 4   | `upload`                             | 從 HTTPS 音訊位址建立素材           | 非同步任務         |
 | 5   | `add_track`                          | 將素材音訊放入工程                  | 非同步任務，更新版本    |
 | 6   | `save`                               | 如需接收新軌候選，先儲存一個空目標軌道        | 同步工程資料，更新版本  |
 | 7   | `render`                             | 匯出目前可聽軌道，取得混音參考 `audio_id` | 非同步任務         |
@@ -44,80 +44,42 @@ Idempotency-Key: 每次修改操作使用新的 UUID
 | 9   | `commit_candidate`                   | 選擇並提交一個候選                  | 非同步任務，成功後更新版本 |
 | 可選  | `remove_track`                       | 刪除指定軌道                     | 同步工程資料，更新版本  |
 
-如果只做局部替換，已有可用來源音訊即可，不需要先 `render`；如果來源音訊已在工程中，也可跳過 `upload` 和 `add_track`。`render_audio_id` 僅是 `generate_track` 的必填參考。
+如果只做局部替換，既有可用來源音訊即可，不需要先 `render`；如果來源音訊已在工程中，也可略過 `upload` 和 `add_track`。`render_audio_id` 僅是 `generate_track` 的必填參考。
 
-非同步操作提交時先回傳 `{ "task_id": "...", "trace_id": "..." }`，**不表示生成成功**。輪詢：
+非同步操作提交時先傳回 `{ "task_id": "...", "trace_id": "..." }`，**不表示生成成功**。輪詢：
 
 ```http
 POST /suno/tasks
 Content-Type: application/json
 
-{"action":"retrieve","id":"上一步回傳的 task_id"}
+{"action":"retrieve","id":"上一步傳回的 task_id"}
 ```
 
-任務記錄有 `finished_at`，且其中的 `response.success` 為 `true`，才算成功；`response.success=false` 時讀取 `response.error`。`save` 雖可能帶有 `task_id`，但它在本介面內同步完成。`upload`、`render`、`generate_track`、`replace_section` 不修改工程版本；`save`、`add_track`、`commit_candidate`、`remove_track` 成功後應取新的 `version_id`。
+任務記錄有 `finished_at`，且其中的 `response.success` 為 `true`，才算成功；`response.success=false` 時讀取 `response.error`。`save` 雖可能帶有 `task_id`，但它在本介面內同步完成。`upload`、`render`、`generate_track`、`replace_section` 不修改工程版本；`save`、`add_track`、`commit_candidate`、`remove_track` 成功後應取得新 `version_id`。
 
-## 請求參數
-
-### 通用欄位與請求標頭
+## 請求約定
 
 | 參數                | 類型與適用範圍                                                                                   | 說明                                                              |
 | ----------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `action`          | 必填字串                                                                                     | 固定為本頁列出的一個操作名稱；一次請求只執行一個操作。                                      |
+| `action`          | 必填字串                                                                                     | 固定為本頁列出的其中一個操作名稱；一次請求只執行一個操作。                                      |
 | `id`              | 除 `create` 外必填字串                                                                         | 工程 ID，來自 `create.data.id`。                                      |
 | `version_id`      | 修改、生成候選、匯出時必填字串；首次空工程 `save` 可省略                                                         | 使用最新版本，舊版本會被拒絕。`retrieve` 不需要它。                                 |
-| `Idempotency-Key` | 除 `retrieve` 外必填請求標頭，1–128 字元                                                              | 每個新操作使用新鍵；同鍵同請求回讀原結果，不重新生成或扣費。                                   |
-| `async`           | `upload`、`add_track`、`generate_track`、`replace_section`、`commit_candidate`、`render` 可選布林值 | 這些操作始終非同步；`false` 也不會把生成變成同步。                                    |
-| `callback_url`    | 上述可選非同步欄位所在操作的可選 URL                                                                       | 接收終態通知；省略時依 `task_id` 查詢 `/suno/tasks`。仍須檢查 `response.success`。 |
+| `Idempotency-Key` | 除 `retrieve` 外必填請求標頭，1–128 字元                                                              | 每個新操作使用新鍵；相同鍵相同請求回讀原結果，不重新生成或扣費。                                   |
+| `async`           | `upload`、`add_track`、`generate_track`、`replace_section`、`commit_candidate`、`render` 可選布林值 | 這些操作始終為非同步；`false` 也不會將生成變成同步。                                    |
+| `callback_url`    | 非同步操作可選 URL                                                                                | 接收終態通知；省略時依 `task_id` 查詢 `/suno/tasks`。仍須檢查 `response.success`。 |
 
-### 工程和素材
-| `action`       | 專屬參數                        | 類型與條件                            | 說明                                                                 |
-| -------------- | --------------------------- | -------------------------------- | ------------------------------------------------------------------ |
-| `create`       | `title`                     | 必填字串，1–200 個字元                   | 新專案標題。                                                             |
-| `retrieve`     | 無                           | —                                | 只需 `action` 與專案 `id`；回傳完整可編輯的 `state`。                              |
-| `save`         | `state`                     | 必填物件                             | **整體替換**專案狀態，不是局部修補。以最近一次 `retrieve.data.state` 為基礎修改並完整提交，保留未知欄位。 |
-| `save`         | `title`                     | 可選字串                            | 專案標題；省略時沿用 `state.title`，若也沒有則使用預設標題。                              |
-| `upload`       | `audio_url`                 | 必填 HTTPS URL                     | 可公開存取的音訊素材網址；成功後讀取終態 `candidate.audio_id`。素材應由呼叫方擁有使用權。            |
-| `add_track`    | `audio_id`                  | 必填字串                            | 已完成素材的音訊 ID，不是 URL。                                                |
-| `add_track`    | `name` / `color`            | 可選字串                            | 新軌道名稱、顏色；名稱預設取音訊標題，顏色建議 `#RRGGBB`，預設 `#7251F7`。                    |
-| `add_track`    | `title`                     | 可選字串                            | 同時修改專案標題；通常省略。                                                     |
-| `add_track`    | `start_beats` / `end_beats` | 可選非負數字，`end_beats > start_beats` | 片段在專案時間軸的位置。起點預設為 0；終點預設為 `起點 + 音訊時長 × timing.bps`。                  |
-| `add_track`    | `gain`                      | 可選非負數字，預設為 1                      | 片段及新軌道的音量係數。                                                       |
-| `remove_track` | `track_id`                  | 必填字串                            | 要刪除的現有軌道 ID。成功後使用回傳的新版本。                                           |
+下列範例串聯展示各操作之間的 ID 和版本傳遞。回應只列出與目前步驟有關的欄位；接入時請以目前應用程式的回應值替換範例 ID。
 
-`state.timing.bps` 必須為正數，預設為 2。`state.tracks` 是軌道陣列；已有音訊片段的 `clipId` 參照音訊 ID，`startBeats`、`endBeats`、`readStartBeats` 使用專案拍單位。最安全的編輯方式是讀取完整 `state`，只修改目標軌道或片段，再整體 `save`。新增空目標軌道至少應有唯一的 `id`、`type:"audio"`、`clips:[]`；真實可用的完整形狀見下文第 5 步。不要把音訊分析結果中的拍點直接當作專案時間軸座標。
+## 建立與讀取工程
 
-### 生成、提交和匯出
-| `action`                             | 專屬參數                               | 類型與條件                                  | 說明                                                                                                                                                        |
-| ------------------------------------ | ---------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generate_track` / `replace_section` | `source_audio_id`                  | 必填字串                                  | 已完成的來源音訊 ID。先將來源音訊加入工程，後續候選才能找到對應位置。                                                                                                                        |
-| `generate_track` / `replace_section` | `model`                            | 必填列舉字串                                | 可選 `chirp-v3-5`、`chirp-v4`、`chirp-v4-5`、`chirp-v4-5-plus`、`chirp-v5`、`chirp-v5-5`、`chirp-v6`、`chirp-v6-wild`、`chirp-v6-mini`。模型和操作是否可用以任務終態為準；不會自動改用其他模型。 |
-| `generate_track` / `replace_section` | `start_seconds` / `end_seconds`    | 必填數字，`0 ≤ start_seconds &lt; end_seconds` | 來源音訊內的起止秒數；替換時終點還必須不超過來源音訊實際時長。它們不是工程拍數，也不保證候選輸出時長。                                                                                                         |
-| `generate_track`                     | `render_audio_id`                  | 必填字串                                  | 目前工程成功 `render` 後的 `response.data.audio_id`，作為生成時的混音參考。                                                                                                   |
-| `generate_track`                     | `stem_control_tags`                | 必填字串                                  | 新增聲部描述，例如 `add Piano`、`add Drums`、`add Bass`；不是固定列舉。                                                                                                      |
-| `generate_track`                     | `batch_size`                       | 可選整數 1–4，預設 2                          | 請求生成的候選數量。                                                                                                                                                |
-| `generate_track`                     | `instrumental` / `vocal_gender`    | 可選布林值／列舉字串                            | `instrumental` 預設 `true`；聲樂偏好可填 `f`、`m`、`unspecified`，預設 `unspecified`。是否遵循偏好以實際音訊為準。                                                                     |
-| `generate_track` / `replace_section` | `title` / `tags` / `negative_tags` | 可選字串                                  | 候選標題、期望風格描述、希望避開的風格標籤。`tags` 與 `negative_tags` 省略時傳空字串。                                                                                                  |
-| `generate_track`                     | `prompt`                           | 可選字串                                  | 新聲部的文字或歌詞提示；純器樂可省略。                                                                                                                                       |
-| `replace_section`                    | `prompt` / `replacement_lyrics`    | 可選字串                                  | 前者是原歌曲歌詞或上下文文字，後者是替換區間的新歌詞；省略時傳空字串。                                                                                                                      |
-| `replace_section`                    | `fixed`                            | 可選布林值，預設 `false`                       | 請求固定長度替換；`true` 時區間須短於 26 秒，且所選模型可能不支援。本次真實範例使用預設模式，`fixed=true` 尚未驗證。                                                                                    |
-| `commit_candidate`                   | `operation_id` / `candidate_id`    | 必填字串                                  | 分別取生成終態的 `data.operation_id` 和選中的 `data.candidates[].id`；候選必須屬於目前工程版本。                                                                                    |
-| `commit_candidate`                   | `track_id`                         | 必填字串                                  | 新軌候選應提交到**生成前已儲存的空軌道**；局部替換候選提交到包含唯一來源片段的原軌道。                                                                                                              |
-| `commit_candidate`                   | `start_beats` / `end_beats`        | 僅新軌候選可選的非負數字                           | 指定新片段在工程時間軸的位置；省略時沿用來源片段起點，並按候選實際時長計算終點。不得與目標軌道既有片段重疊。**局部替換候選必須省略**。                                                                                      |
-| `commit_candidate`                   | `name` / `gain`                    | 僅新軌候選可選的字串／非負數字                       | 生成片段名稱和音量係數，`gain` 預設 1。                                                                                                                                  |
-| `render`                             | `title`                            | 必填字串                                  | 匯出音訊標題。                                                                                                                                                   |
-| `render`                             | `lyrics` / `tags`                  | 可選字串                                  | 匯出時的歌詞文字和風格描述；歌詞預設 `[Instrumental]`。                                                                                                                      |
-| `render`                             | `start_beats` / `end_beats`        | 可選非負數字，結束須大於開始                         | 匯出工程拍數範圍；省略時取所有可聽片段的最早起點和最晚終點。靜音片段不參與，存在 solo 軌道時僅選擇 solo 軌道。                                                                                             |
+| 操作         | 參數      | 類型與說明                              |
+| ---------- | ------- | ---------------------------------- |
+| `create`   | `title` | 必填字串，1–200 字元；新工程標題。              |
+| `retrieve` | 無專屬參數   | 使用工程 `id` 讀取目前版本和完整 `state`，無需冪等鍵。 |
 
-生成只產生候選，**不會自動放入工程**。`commit_candidate` 會檢查候選仍屬於目前版本。局部替換候選只有在實際時長與完整來源音訊或選取區間可可靠匹配時才能自動提交；不匹配時保留原工程並傳回錯誤，不能靠手動猜測拍數強行拼接。
+### 建立工程：`create`
 
-## 2026-10-09 真實請求與回應
-
-以下請求本文和回應欄位均取自同一工程的真實呼叫。每組 JSON 依序為請求、受理回應（若為非同步）、任務終態回應。為便於閱讀，回應只摘錄完成本流程所需的欄位；帳戶、用量和耗時欄位未展示。範例 ID 屬於本次測試應用，串接時必須使用自己請求傳回的 ID 和新的 `Idempotency-Key`。
-
-### 1. 建立並讀取空工程：`create`、`retrieve`
-
-`create` 請求：
+請求：
 
 ```json
 {
@@ -125,6 +87,8 @@ Content-Type: application/json
   "title": "Suno Projects Documentation Verification 2026-10-09"
 }
 ```
+
+回應：
 
 ```json
 {
@@ -143,568 +107,689 @@ Content-Type: application/json
 }
 ```
 
-隨即呼叫 `retrieve`：
+### 讀取工程：`retrieve`
+請求：```json
+&#123;
+"action": "retrieve",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
+&#125;
 
-```json
-{
-  "action": "retrieve",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
-}
+```
+回應：
 ```
 
-```json
-{
-  "success": true,
-  "trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "title": "Suno Projects Documentation Verification 2026-10-09",
-    "state": {
-      "tracks": [],
-      "timing": {
-        "bps": 2
-      }
-    }
-  }
-}
+&#123;
+"success": true,
+"trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
+&#125;
+
 ```
 
-### 2. 首次儲存：`save`
+## 儲存工程狀態
+
+| 參數 | 類型與說明 |
+|---|---|
+| `state` | 必填物件。提交**完整工程狀態**，不是局部修補；以最近一次讀取或修改操作回傳的 `data.state` 為基礎，保留未知欄位。 |
+| `title` | 可選字串；省略時沿用 `state.title`，若也沒有則使用預設標題。 |
+| `version_id` | 首次儲存新建空工程可省略；此後必須使用最新版本。 |
+
+`state.timing.bps` 必須為正數，預設 2。`state.tracks` 是軌道陣列；已有音訊片段的 `clipId` 引用音訊 ID，`startBeats`、`endBeats`、`readStartBeats` 使用工程拍單位。最安全的編輯方式是讀取完整 `state`，只修改目標軌道或片段，再整體 `save`。新增空目標軌道至少應有唯一 `id`、`type:"audio"`、`clips:[]`；完整的空軌道結構見「生成新音軌」中的範例。不要把音訊分析結果中的拍點直接當作工程時間軸座標。
+
+### 首次儲存：`save`
 
 新建工程沒有 `version_id`，第一次儲存省略它：
-```json
-{
-  "action": "save",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "title": "Suno Projects Documentation Verification 2026-10-09",
-  "state": {
-    "tracks": [],
-    "timing": {
-      "bps": 2
-    }
-  }
-}
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
-  "trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-    "state": {
-      "timing": {
-        "bps": 2
-      },
-      "tracks": []
-    }
-  }
-}
+&#123;
+"action": "save",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
+
+```
+回應：
 ```
 
-### 3. 上傳素材：`upload`
+&#123;
+"success": true,
+"task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
+"trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"state": &#123;
+"timing": &#123;
+"bps": 2
+&#125;,
+"tracks": []
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "action": "upload",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-  "audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
-  "async": true
-}
 ```
 
-提交回應只表示已受理：
+## 上傳音訊並新增軌道
 
-```json
-{
-  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
-  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
-}
+| 操作 | 參數 | 類型與說明 |
+|---|---|---|
+| `upload` | `audio_url` | 必填 HTTPS URL，指向可公開存取且您有權使用的音訊。終態中的 `candidate.audio_id` 可用於新增軌道。 |
+| `add_track` | `audio_id` | 必填字串；已完成素材的音訊 ID，不是 URL。 |
+| `add_track` | `name`、`color` | 可選字串；軌道名稱預設取音訊標題，顏色建議 `#RRGGBB`，預設 `#7251F7`。 |
+| `add_track` | `title` | 可選字串；同時修改工程標題，通常省略。 |
+| `add_track` | `start_beats`、`end_beats` | 可選非負數字，終點須大於起點；預設從第 0 拍開始，終點依音訊時長和 `timing.bps` 計算。 |
+| `add_track` | `gain` | 可選非負數字，預設 1；片段和軌道的音量係數。 |
+
+### 上傳素材：`upload`
+
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
-  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "candidate": {
-      "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-      "title": "suno_demo",
-      "duration": 41,
-      "audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
-    }
-  }
-}
+&#123;
+"action": "upload",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
+"async": true
+&#125;
+
+```
+受理回應：
 ```
 
-### 4. 新增來源軌道：`add_track`
+&#123;
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
+&#125;
 
-```json
-{
-  "action": "add_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-  "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "name": "Source demo",
-  "start_beats": 0
-}
+```
+任務終態：
 ```
 
-提交回應：
+&#123;
+"success": true,
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"candidate": &#123;
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"title": "suno_demo",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
-  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
-}
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
-  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
-    "track": {
-      "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-      "name": "Source demo",
-      "clips": [
-        {
-          "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-          "startBeats": 0,
-          "endBeats": 82
-        }
-      ]
-    }
-  }
-}
+### 新增來源軌道：`add_track`
+
 ```
 
-### 5. 儲存接收候選的空軌道
+&#123;
+"action": "add_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"name": "Source demo",
+"start_beats": 0
+&#125;
 
-`generate_track` 的候選與目前工程版本綁定。本次先以 `retrieve` 得到的**完整** `state` 為基礎，向 `state.tracks` 新增以下真實空軌道，再以 `save` 儲存；其他既有欄位原樣保留：
-
-```json
-{
-  "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-  "type": "audio",
-  "name": "Generated piano",
-  "clips": [],
-  "takeLanes": [],
-  "mute": false,
-  "solo": false,
-  "amplitude": 1,
-  "instrument": {
-    "type": "song"
-  },
-  "color": "#7251F7"
-}
+```
+受理回應：
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
-  "trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
-  }
-}
+&#123;
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
+&#125;
+
+```
+任務終態：
 ```
 
-### 6. 匯出參考混音：`render`
+&#123;
+"success": true,
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
+"track": &#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"name": "Source demo",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "title": "Suno Projects Docs Source Mix",
-  "lyrics": "[Instrumental]",
-  "async": true
-}
 ```
 
-提交回應：
+## 生成新音軌
 
-```json
-{
-  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
-  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
-}
+候選與生成時的工程版本繫結。先儲存接收候選的空軌道，再匯出目前混音作為生成參考；生成完成後選一個候選提交到該空軌道。
+
+### 預留目標軌道：`save`
+
+`generate_track` 的候選與目前工程版本繫結。在上一條 `add_track` 終態回傳的**完整** `state` 上，向 `state.tracks` 新增以下空軌道，再以 `save` 儲存；其他已有欄位原樣保留：
+```
+&#123;
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"type": "audio",
+"name": "Generated piano",
+"clips": [],
+"takeLanes": [],
+"mute": false,
+"solo": false,
+"amplitude": 1,
+"instrument": &#123;
+"type": "song"
+&#125;,
+"color": "#7251F7"
+&#125;
+
+```
+儲存回應：
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
-  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-    "render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-    "audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-    "duration": 41,
-    "audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
-  }
-}
+&#123;
+"success": true,
+"task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
+"trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
+&#125;
+&#125;
+
 ```
 
-### 7. 生成新軌候選：`generate_track`
-```json
-{
-  "action": "generate_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-  "model": "chirp-v5",
-  "start_seconds": 12,
-  "end_seconds": 20,
-  "stem_control_tags": "add Piano",
-  "title": "Documentation Piano Take",
-  "tags": "gentle piano, instrumental",
-  "batch_size": 2,
-  "async": true
-}
+### 匯出參考混音：`render`
+
+| 參數 | 類型與說明 |
+|---|---|
+| `title` | 必填字串；匯出音訊標題。 |
+| `lyrics`、`tags` | 可選字串；歌詞預設為 `[Instrumental]`，`tags` 為風格描述。 |
+| `start_beats`、`end_beats` | 可選非負數字，終點須大於起點；省略時涵蓋所有可聽片段。靜音片段不參與；有 solo 軌道時只選擇 solo 軌道。 |
+
+成功後從任務終態 `response.data.audio_id` 取得 `render_audio_id`。
+
 ```
 
-提交回應：
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"title": "Suno Projects Docs Source Mix",
+"lyrics": "[Instrumental]",
+"async": true
+&#125;
 
-```json
-{
-  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
-}
+```
+受理回應：
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-    "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-    "candidates": [
-      {
-        "id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-        "title": "Documentation Piano Take",
-        "state": "complete",
-        "duration": 41.76,
-        "audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
-      },
-      {
-        "id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
-        "title": "Documentation Piano Take",
-        "state": "complete",
-        "duration": 40.96,
-        "audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
-      }
-    ]
-  }
-}
+&#123;
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
+&#125;
+
+```
+任務終態：
 ```
 
-這裡請求了來源音訊的 12–20 秒作為生成參考，回傳的候選音訊實際約 41 秒；`start_seconds`/`end_seconds` 不是輸出時長保證。
+&#123;
+"success": true,
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
+&#125;
+&#125;
 
-### 8. 採用一個候選：`commit_candidate`
-
-```json
-{
-  "action": "commit_candidate",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-  "async": true
-}
 ```
 
-提交回應：
+### 產生候選：`generate_track`
 
-```json
-{
-  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
-  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
-}
+| 參數 | 類型與說明 |
+|---|---|
+| `source_audio_id` | 必填；已完成的來源音訊 ID。先將來源音訊加入工程，後續才能確定候選位置。 |
+| `render_audio_id` | 必填；上述 `render` 終態中的 `response.data.audio_id`，不是音訊 URL。 |
+| `model` | 必填；可選 `chirp-v3-5`、`chirp-v4`、`chirp-v4-5`、`chirp-v4-5-plus`、`chirp-v5`、`chirp-v5-5`、`chirp-v6`、`chirp-v6-wild`、`chirp-v6-mini`。具體組合是否可用以任務終態為準。 |
+| `start_seconds`、`end_seconds` | 必填數字，`0 ≤ start_seconds < end_seconds`；來源音訊內的秒數區間，不是工程拍數，也不保證輸出時長。 |
+| `stem_control_tags` | 必填字串；新增聲部描述，例如 `add Piano`、`add Drums`、`add Bass`，不是固定列舉。 |
+| `batch_size` | 可選整數 1–4，預設為 2；候選數量。 |
+| `instrumental`、`vocal_gender` | 可選；純器樂預設為 `true`，聲樂偏好可填 `f`、`m`、`unspecified`，預設為 `unspecified`。 |
+| `title`、`tags`、`negative_tags`、`prompt` | 可選字串；分別是候選標題、期望風格、避開的風格、新聲部的文字或歌詞提示。 |
+
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
-  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-    "committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-          "clips": [
-            {
-              "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-              "startBeats": 0,
-              "endBeats": 82
-            }
-          ]
-        },
-        {
-          "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-          "clips": [
-            {
-              "clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-              "startBeats": 0,
-              "endBeats": 83.52
-            }
-          ]
-        }
-      ]
-    }
-  }
-}
+&#123;
+"action": "generate_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"model": "chirp-v5",
+"start_seconds": 12,
+"end_seconds": 20,
+"stem_control_tags": "add Piano",
+"title": "Documentation Piano Take",
+"tags": "gentle piano, instrumental",
+"batch_size": 2,
+"async": true
+&#125;
+
+```
+受理回應：
 ```
 
-### 9. 生成局部替換候選：`replace_section`
+&#123;
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
+&#125;
 
-```json
-{
-  "action": "replace_section",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "model": "chirp-v5",
-  "title": "Documentation Verse Edit",
-  "tags": "dreamy Chinese pop",
-  "prompt": "[Verse 1]\n晨光灑在海邊\n浪花笑得燦爛\n你和我在沙灘\n鐘錶停止轉動\n冰淇淋在融化\n手牽手去散步\n[Chorus]\n風兒輕輕吹過\n心跳不停鼓\n夏天夏天\n時間停在這一天\n笑聲迴盪\n微藍天空在身旁",
-  "replacement_lyrics": "我們走在海邊\n微風吹過晴天",
-  "start_seconds": 12,
-  "end_seconds": 20,
-  "async": true
-}
+```
+任務終態：
 ```
 
-提交回應：
-
-```json
-{
-  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
-}
-```
-```json
-{
-  "success": true,
-  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-    "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-    "candidates": [
-      {
-        "id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
-        "title": "Documentation Verse Edit",
-        "state": "complete",
-        "duration": 36,
-        "audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
-      },
-      {
-        "id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
-        "title": "Documentation Verse Edit",
-        "state": "complete",
-        "duration": 36,
-        "audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
-      }
-    ]
-  }
-}
+&#123;
+"success": true,
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidates": [
+&#123;
+"id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 41.76,
+"audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
+&#125;,
+&#123;
+"id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 40.96,
+"audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
+&#125;
+]
+&#125;
+&#125;
 ```
 
-### 10. 本次替換候選無法提交：保留真實失敗結果
+請求中的 12–20 秒是來源音訊參考區間，候選音訊約 41 秒；`start_seconds`/`end_seconds` 不是輸出時長保證。
 
-本次 `replace_section` 選中 8 秒區間，但兩個候選實際都為 36 秒，既不等於原音訊的 41 秒，也不等於所選 8 秒。提交其中一個候選的真實請求與終態如下：
+### 採用候選：`commit_candidate`
 
-```json
-{
-  "action": "commit_candidate",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
-  "track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-  "async": true
-}
+| 參數 | 類型與說明 |
+|---|---|
+| `operation_id` | 必填；生成任務終態 `data.operation_id`。 |
+| `candidate_id` | 必填；所選 `data.candidates[].id`。 |
+| `track_id` | 必填；生成前已儲存的空軌道 `state.tracks[].id`。 |
+| `start_beats`、`end_beats` | 新軌候選可選；指定工程拍數範圍，不能與目標軌道已有片段重疊。省略時沿用來源片段起點並按候選時長計算終點。 |
+| `name`、`gain` | 新軌候選可選；片段名稱和非負音量係數，`gain` 預設 1。 |
+
+生成只產生候選，**不會自動放入工程**。`commit_candidate` 會檢查候選仍屬於目前版本。局部替換候選只有在實際時長與完整來源音訊或選取區間可可靠比對時才能自動提交；不相符時保留原工程並傳回錯誤，不能靠手動猜測拍數強行拼接。
+
 ```
 
-提交回應：
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"async": true
+&#125;
 
-```json
-{
-  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
-  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
-}
+```
+受理回應：
 ```
 
-```json
-{
-  "success": false,
-  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
-  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
-  "error": {
-    "code": "bad_request",
-    "message": "Candidate duration does not match the source or selected section. Keep the original track and inspect the candidate before editing."
-  }
-}
+&#123;
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
+&#125;
+
+```
+任務終態：
 ```
 
-因此原軌道沒有被修改。遇到此錯誤應保留候選供試聽和人工處理，不要把它當成已成功拼入工程，也不要自動重提收費生成。
+&#123;
+"success": true,
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;,
+&#123;
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"clips": [
+&#123;
+"clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"startBeats": 0,
+"endBeats": 83.52
+&#125;
+]
+&#125;
+]
+&#125;
+&#125;
+&#125;
 
-### 11. 刪除測試軌道並回讀：`remove_track`、`retrieve`
-
-```json
-{
-  "action": "remove_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
-}
 ```
 
-```json
-{
-  "success": true,
-  "trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
-        }
-      ]
-    }
-  }
-}
+### 提交後匯出
+
+提交新軌候選後，包含該候選的整曲匯出被拒絕。請求與終態：
 ```
 
-再次 `retrieve` 的真實結果：
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"title": "Suno Projects Docs Mix With Piano",
+"lyrics": "[Instrumental]",
+"async": true
+&#125;
 
-```json
-{
-  "success": true,
-  "trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
-        }
-      ]
-    }
-  }
-}
+```
+受理回應：
 ```
 
-### 12. 匯出限制與恢復驗證
+&#123;
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
+&#125;
 
-提交新軌候選後，包含該候選的整曲匯出被拒絕。真實請求及終態：
-
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "title": "Suno Projects Docs Mix With Piano",
-  "lyrics": "[Instrumental]",
-  "async": true
-}
+```
+任務終態：
 ```
 
-提交回應：
+&#123;
+"success": false,
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
+"error": &#123;
+"code": "studio_audio_unavailable",
+"message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
-  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
-}
 ```
 
-```json
-{
-  "success": false,
-  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
-  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
-  "error": {
-    "code": "studio_audio_unavailable",
-    "message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
-  }
-}
+候選音訊連結可讀取，不代表包含它的工程一定能匯出。收到 `studio_audio_unavailable` 時，應保留原工程並檢查所引用音訊的可用性。
+
+## 替換已有片段
+
+`replace_section` 可以直接使用已有的來源音訊，無須先匯出混音。生成只傳回候選；提交時選擇包含唯一來源片段的原軌道。
+
+| 參數 | 類型與說明 |
+|---|---|
+| `source_audio_id` | 必填；要替換的已完成來源音訊 ID。 |
+| `model` | 必填；使用「生成候選」中列出的公開模型，模型與操作的可用性以任務終態為準。 |
+| `start_seconds`、`end_seconds` | 必填數字，`0 ≤ start_seconds < end_seconds ≤ 來源音訊時長`；來源音訊內的秒數區間。 |
+| `prompt`、`replacement_lyrics` | 可選字串；前者是原歌詞或上下文，後者是替換區間的新歌詞。 |
+| `title`、`tags`、`negative_tags` | 可選字串；候選標題、期望風格和避開的風格。 |
+| `fixed` | 可選布林值，預設 `false`；設為 `true` 時區間須短於 26 秒，且模型可能不支援。 |
+
+### 生成替換候選：`replace_section`
+
 ```
 
-刪除該候選軌道後，原來源軌道仍在，使用最新版本再次匯出成功：
+&#123;
+"action": "replace_section",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"model": "chirp-v5",
+"title": "Documentation Verse Edit",
+"tags": "dreamy Chinese pop",
+"prompt": "[Verse 1]\n晨光洒在海边\n浪花笑得灿烂\n你和我在沙滩\n钟表停止转动\n冰淇淋在融化\n手牵手去散步\n[Chorus]\n风儿轻轻吹过\n心跳不停鼓\n夏天夏天\n时间停在这一天\n笑声回荡\n微蓝天空在身旁",
+"replacement_lyrics": "我们走在海边\n微风吹过晴天",
+"start_seconds": 12,
+"end_seconds": 20,
+"async": true
+&#125;
 
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-  "title": "Suno Projects Docs Mix After Remove",
-  "async": true
-}
+```
+受理回應：
+```
+&#123;
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
+&#125;
+
+```
+任务终态：
 ```
 
-提交回應：
+&#123;
+"success": true,
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidates": [
+&#123;
+"id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
+&#125;,
+&#123;
+"id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
+&#125;
+]
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
-  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
-}
-```
-```json
-{
-  "success": true,
-  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
-  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
-    "audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
-    "duration": 41,
-    "audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
-  }
-}
 ```
 
-上述成功回傳的音訊連結在本次驗證時都能讀取媒體位元組；生成與替換候選連結的前 1,024 個位元組均回傳 HTTP 206、`audio/mpeg`，匯出連結回傳 HTTP 206、`audio/mp4`。這僅證明連結可讀，不代表包含該候選的工程一定可匯出。
+### 候選時長不符
+
+提交局部替換候選時，`track_id` 應指向包含唯一來源片段的原始軌道，並省略 `start_beats`、`end_beats`。只有候選時長與完整來源音訊或所選區間可可靠比對時，介面才會更新工程。
+
+選擇 8 秒區間後，兩個候選均為 36 秒，既不等於原始音訊的 41 秒，也不等於所選的 8 秒。提交其中一個候選時返回：
+```
+
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"async": true
+&#125;
+
+```
+受理回應：
+```
+
+&#123;
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
+&#125;
+
+```
+工作終態：
+```
+
+&#123;
+"success": false,
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
+"error": &#123;
+"code": "bad_request",
+"message": "Candidate duration does not match the source or selected section. Keep the original track and inspect the candidate before editing."
+&#125;
+&#125;
+
+```
+
+因此原始軌道沒有被修改。遇到此錯誤應保留候選供試聽和人工處理，不要把它當成已成功拼接至工程，也不要自動重新提交付費生成。
+
+## 刪除軌道
+
+`remove_track` 需要目前的 `version_id` 和 `state.tracks[].id`；成功後使用返回的新版本。以下刪除無法用於整曲匯出的候選軌道，並回讀工程狀態。
+
+```
+
+&#123;
+"action": "remove_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
+&#125;
+
+```
+回應：
+```
+
+&#123;
+"success": true,
+"trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+再次讀取工程：
+```
+
+&#123;
+"success": true,
+"trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+
+### 刪除後匯出
+
+刪除該候選軌道後，原始來源軌道仍在，使用最新版本再次匯出成功：
+```
+
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"title": "Suno Projects Docs Mix After Remove",
+"async": true
+&#125;
+
+```
+受理回應：
+```
+
+&#123;
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
+&#125;
+
+```
+工作終態：
+```
+
+&#123;
+"success": true,
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
+&#125;
+&#125;
+```
+
+成功匯出的 `audio_url` 可用於下載或播放。音訊連結可存取，並不能證明其他候選也具有工程匯出資格。
 
 ## 錯誤與復原
 
-| 結果                                                                            | 含義                          | 下一步                                    |
-| ----------------------------------------------------------------------------- | --------------------------- | -------------------------------------- |
-| `project_version_conflict` / `project_candidate_stale`（409）                   | 工程版本已變更，或候選不屬於目前版本。         | `retrieve` 最新工程並重新規劃修改；不要重放舊候選。        |
-| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（通常 400）   | 參數、軌道狀態、候選時長或模型與操作不相符。      | 查看任務終態錯誤，修正輸入；候選無法安全拼接時保留原工程。          |
-| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | 引用音訊不可用於該工程操作、無權存取，或內容檢查拒絕。 | 檢查音訊來源和任務 `trace_id`；不要把已生成候選等同於整首曲目可匯出。 |
-| `too_many_requests`（429）                                                      | 請求受到頻率限制。                   | 先查詢原任務，再決定是否以新冪等鍵發起新操作。                |
-| `studio_unavailable` / `studio_model_unavailable`（503）                        | 工程處理或所選模型暫時不可用。             | 保留原任務結果；稍後明確重試，不自動切換模型。                |
-| `studio_processing_failed` / 逾時（500/504）                                      | 處理失敗或終態不確定。                 | 按 `task_id` 或原冪等鍵查詢，避免重複收費生成。          |
+| 結果 | 含義 | 下一步 |
+|---|---|---|
+| `project_version_conflict` / `project_candidate_stale`（409） | 工程版本已變更，或候選不屬於目前版本。 | `retrieve` 最新工程並重新規劃修改；不要重放舊候選。 |
+| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（通常為 400） | 參數、軌道狀態、候選時長或模型與操作不相符。 | 查看任務終態錯誤，修正輸入；候選無法安全拼接時保留原工程。 |
+| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | 引用音訊不可用於該工程操作、無權存取，或內容檢查拒絕。 | 檢查音訊來源和任務 `trace_id`；不要把已生成候選等同於整首歌曲可匯出。 |
+| `too_many_requests`（429） | 請求受到頻率限制。 | 先查詢原任務，再決定是否以新的冪等鍵發起新操作。 |
+| `studio_unavailable` / `studio_model_unavailable`（503） | 工程處理或所選模型暫時不可用。 | 保留原任務結果；稍後明確重試，不自動切換模型。 |
+| `studio_processing_failed` / 逾時（500/504） | 處理失敗或終態不確定。 | 依 `task_id` 或原冪等鍵查詢，避免重複收費生成。 |
 
 工程和候選與建立它們的應用程式及執行環境綁定，不能假定可跨應用程式重複使用或自動容錯切換。請持久化成功匯出的最終音訊 URL，並保留 `trace_id` 以利排查。
+```
