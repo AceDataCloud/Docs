@@ -1,52 +1,52 @@
 ---
-title: "Guide för Suno Studio-projektintegration"
+title: "Guide för integrering av Suno Studio-projekt"
 description: "Suno Music Generation API guide - Ace Data Cloud"
 ---
 
-`POST https://api.acedata.cloud/suno/projects` är Beta-gränssnittet för hantering av flerspårsprojekt. En endpoint skiljer mellan skapande, sparande, generering av kandidater, inskickning av kandidater och export via `action`. Anroparen behöver endast använda de offentliga fälten nedan och behöver inte fylla i den interna begärandestrukturen för den underliggande genereringstjänsten.
+`POST https://api.acedata.cloud/suno/projects` är Beta-gränssnittet för hantering av flerspårsprojekt. Skapa, spara, generera kandidater, skicka kandidater och exportera skiljs åt genom `action`.
 
 ```http
 POST /suno/projects
 Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
-Idempotency-Key: 每次修改操作使用新的 UUID
+Idempotency-Key: <每次写操作的新 UUID>
 ```
 
-Förutom `retrieve` kräver **varje operation** `Idempotency-Key`. Samma nyckel och samma begäran läser endast tillbaka det ursprungliga resultatet; samma nyckel med en annan begäran returnerar 409. Vid nätverkstimeout eller osäkert inskickningsresultat för avgiftsbelagd generering ska du först fråga med det ursprungliga uppgifts-ID:t eller samma idempotensnyckel och får inte direkt skicka igen med en ny nyckel.
+Förutom `retrieve` kräver **varje åtgärd** `Idempotency-Key`. Samma nyckel och samma begäran läser endast tillbaka det ursprungliga resultatet; samma nyckel med en annan begäran returnerar 409. När avgiftsbelagd generering stöter på nätverkstimeout eller osäkert inskickningsresultat, använd först det ursprungliga uppgifts-ID:t eller samma idempotensnyckel för att fråga; byt inte direkt nyckel och skicka igen.
 
-## Särskilj först dessa ID:n och tidsenheter
+## Identifierare och tidsenheter
 
-| Namn                             | Var det hämtas                                                                                      | Var det används                                             |
+| Namn                             | Var hämtas det                                                                                      | Var används det                                             |
 | ------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------ |
 | `id`                           | `create`-svaret `data.id`                                                                      | Alla efterföljande begäranden för det aktuella projektet                                      |
-| `version_id`                   | `data.version_id` från senaste `retrieve`, `save`, `add_track`, `commit_candidate` eller `remove_track` | Ändringar, generering av kandidater och export; den senaste versionen måste användas                              |
-| `audio_id` / `source_audio_id` | `response.data.candidate.audio_id` i `upload`-slutstatus, eller befintligt färdigt ljud-ID                                | Referens till ursprungligt ljud vid `add_track`, generering eller ersättning                          |
-| `render_audio_id`              | `response.data.audio_id` i `render`-slutstatus                                                       | Projektmixreferens för `generate_track`                         |
-| `operation_id`                 | `response.data.operation_id` i slutstatus för `generate_track` eller `replace_section`                       | `commit_candidate`; vanligtvis samma som genereringsuppgiftens `task_id`, men returvärdet bör läsas |
-| `candidate_id`                 | `response.data.candidates[].id` i genereringens slutstatus                                                       | Välj en kandidat att skicka in                                         |
-| `track_id`                     | Projektets `data.state.tracks[].id`                                                                | Skicka in kandidat eller ta bort spår                                        |
-| `task_id`                      | Svar vid inskickning av asynkron operation                                                                                   | Använd `/suno/tasks` för att fråga slutstatus; det är inte ett projekt-ID                   |
+| `version_id`                   | `data.version_id` från senaste `retrieve`, `save`, `add_track`, `commit_candidate` eller `remove_track` | Ändring, generering av kandidater och export; den senaste versionen måste användas                              |
+| `audio_id` / `source_audio_id` | `response.data.candidate.audio_id` i slutläget för `upload`, eller befintligt slutfört ljud-ID                                | Referens till ursprungligt ljud vid `add_track`, generering eller ersättning                          |
+| `render_audio_id`              | `response.data.audio_id` i slutläget för `render`                                                       | Referens för projektmixning i `generate_track`                         |
+| `operation_id`                 | `response.data.operation_id` i slutläget för `generate_track` eller `replace_section`                       | `commit_candidate`; vanligtvis samma som genereringsuppgiftens `task_id`, men returvärdet ska läsas |
+| `candidate_id`                 | `response.data.candidates[].id` i slutläget för generering                                                       | Välj en kandidat att skicka                                         |
+| `track_id`                     | Projektets `data.state.tracks[].id`                                                                | Skicka kandidat eller ta bort spår                                        |
+| `task_id`                      | Svar vid inskickning av asynkron åtgärd                                                                                   | Använd `/suno/tasks` för att fråga efter slutläge; det är inte projekt-ID:t                   |
 
-`start_seconds` / `end_seconds` är **sekunder inom källjudet**; `start_beats` / `end_beats` är **taktslag på projektets tidslinje**. `state.timing.bps` är taktslag per sekund, med standardvärdet 2. Till exempel har ett 41-sekunders klipp som börjar vid taktslag 0 som standard slutpunkten vid taktslag 82. Sekundintervallet för `generate_track` används för att ange genereringsreferensen och garanterar inte att kandidaten endast har den intervallängden.
+`start_seconds` / `end_seconds` är **sekunder i källjudet**; `start_beats` / `end_beats` är** antal slag på projektets tidslinje**. `state.timing.bps` är antal slag per sekund, med standardvärdet 2. Till exempel har ett 41-sekunders klipp som börjar vid slag 0 som standard slutpunkten vid slag 82. Sekundintervallet för `generate_track` används för att ange genereringsreferensen och garanterar inte att kandidaten endast har längden för det intervallet.
 
-## Operationsordning och resultatbedömning
+## Åtgärdsflöde
 
-| Ordning  | `action`                             | Funktion                         | Returtyp         |
+| Ordning  | `action`                             | Funktion                         | Returmetod         |
 | --- | ------------------------------------ | -------------------------- | ------------ |
-| 1   | `create`                             | Skapa tomt projekt                      | Synkrona projektdata       |
-| 2   | `retrieve`                           | Läs senaste versionen och fullständigt `state`          | Synkrona projektdata       |
-| 3   | `save`                               | Spara för första gången eller spara ändrat `state` som helhet      | Synkrona projektdata       |
+| 1   | `create`                             | Skapa ett tomt projekt                      | Synkrona projektdata       |
+| 2   | `retrieve`                           | Läs den senaste versionen och fullständig `state`          | Synkrona projektdata       |
+| 3   | `save`                               | Spara för första gången eller spara den ändrade `state` som helhet      | Synkrona projektdata       |
 | 4   | `upload`                             | Skapa material från HTTPS-ljudadress           | Asynkron uppgift         |
 | 5   | `add_track`                          | Lägg materialljud i projektet                  | Asynkron uppgift, uppdaterar version    |
 | 6   | `save`                               | Om nya spårkandidater ska tas emot, spara först ett tomt målspår        | Synkrona projektdata, uppdaterar version  |
-| 7   | `render`                             | Exportera aktuella hörbara spår och hämta mixreferensen `audio_id` | Asynkron uppgift         |
-| 8   | `generate_track` eller `replace_section` | Generera kandidater för nytt spår respektive lokal ersättning            | Asynkron uppgift, ändrar inte projektet tillfälligt  |
-| 9   | `commit_candidate`                   | Välj och skicka in en kandidat                  | Asynkron uppgift, uppdaterar version efter lyckad körning |
+| 7   | `render`                             | Exportera aktuella hörbara spår och hämta mixningsreferensen `audio_id` | Asynkron uppgift         |
+| 8   | `generate_track` eller `replace_section` | Generera respektive nya spårkandidater eller kandidater för lokal ersättning            | Asynkron uppgift, ändrar inte projektet tillfälligt  |
+| 9   | `commit_candidate`                   | Välj och skicka en kandidat                  | Asynkron uppgift, uppdaterar version efter lyckat resultat |
 | Valfritt  | `remove_track`                       | Ta bort angivet spår                     | Synkrona projektdata, uppdaterar version  |
 
-Om endast lokal ersättning görs räcker befintligt tillgängligt källjud, och du behöver inte först `render`; om källjudet redan finns i projektet kan du även hoppa över `upload` och `add_track`. `render_audio_id` är endast en obligatorisk referens för `generate_track`.
+Om endast lokal ersättning görs räcker befintligt tillgängligt källjud, och `render` behöver inte köras först; om källjudet redan finns i projektet kan även `upload` och `add_track` hoppas över. `render_audio_id` är endast en obligatorisk referens för `generate_track`.
 
-Vid inskickning av en asynkron operation returneras först `{ "task_id": "...", "trace_id": "..." }`, vilket **inte betyder att genereringen lyckades**. Pollning:
+När en asynkron åtgärd skickas in returneras först `{ "task_id": "...", "trace_id": "..." }`, vilket **inte betyder att genereringen lyckades**. Polla:
 
 ```http
 POST /suno/tasks
@@ -55,69 +55,31 @@ Content-Type: application/json
 {"action":"retrieve","id":"上一步返回的 task_id"}
 ```
 
-En uppgift anses endast lyckad när uppgiftsposten har `finished_at` och dess `response.success` är `true`; när `response.success=false` ska `response.error` läsas. Även om `save` kan innehålla `task_id` slutförs den synkront i detta gränssnitt. `upload`, `render`, `generate_track` och `replace_section` ändrar inte projektversionen; efter lyckad `save`, `add_track`, `commit_candidate` eller `remove_track` ska den nya `version_id` hämtas.
+En uppgift räknas som lyckad först när posten har `finished_at` och dess `response.success` är `true`; när `response.success=false`, läs `response.error`. Även om `save` kan innehålla `task_id` slutförs den synkront i detta gränssnitt. `upload`, `render`, `generate_track` och `replace_section` ändrar inte projektversionen; efter att `save`, `add_track`, `commit_candidate` eller `remove_track` har lyckats ska det nya `version_id` hämtas.
 
-## Begärandeparametrar
-
-### Gemensamma fält och begärandehuvuden
+## Begärandekonventioner
 
 | Parameter                | Typ och tillämpningsområde                                                                                   | Beskrivning                                                              |
 | ----------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `action`          | Obligatorisk sträng                                                                                     | Fast värde som ett av operationsnamnen på denna sida; en begäran utför endast en operation.                                      |
-| `id`              | Obligatorisk sträng förutom `create`                                                                         | Projekt-ID, från `create.data.id`.                                      |
-| `version_id`      | Obligatorisk sträng vid ändring, generering av kandidater och export; kan utelämnas vid första `save` för tomt projekt                                                         | Använd den senaste versionen; gamla versioner avvisas. `retrieve` behöver den inte.                                 |
-| `Idempotency-Key` | Obligatoriskt begärandehuvud förutom `retrieve`, 1–128 tecken                                                              | Använd en ny nyckel för varje ny operation; samma nyckel och samma begäran läser tillbaka ursprungligt resultat utan att generera på nytt eller debitera.                                   |
-| `async`           | Valfritt booleskt värde för `upload`, `add_track`, `generate_track`, `replace_section`, `commit_candidate`, `render` | Dessa operationer är alltid asynkrona; `false` gör inte genereringen synkron.                                    |
-| `callback_url`    | Valfri URL för de operationer ovan som har valfria asynkrona fält                                                                       | Tar emot slutstatusnotifieringar; när den utelämnas frågas `/suno/tasks` med `task_id`. `response.success` måste fortfarande kontrolleras. |
+| `action`          | Obligatorisk sträng                                                                                     | Fastställd till ett åtgärdsnamn som listas på denna sida; en begäran utför endast en åtgärd.                                      |
+| `id`              | Obligatorisk sträng utom för `create`                                                                         | Projekt-ID, från `create.data.id`.                                      |
+| `version_id`      | Obligatorisk sträng vid ändring, generering av kandidater och export; kan utelämnas vid första `save` av tomt projekt                                                         | Använd den senaste versionen; äldre versioner nekas. `retrieve` behöver den inte.                                 |
+| `Idempotency-Key` | Obligatoriskt begärandehuvud utom för `retrieve`, 1–128 tecken                                                              | Använd en ny nyckel för varje ny åtgärd; samma nyckel och begäran läser tillbaka det ursprungliga resultatet och genererar inte på nytt eller debiterar igen.                                   |
+| `async`           | Valfritt booleskt värde för `upload`, `add_track`, `generate_track`, `replace_section`, `commit_candidate`, `render` | Dessa åtgärder är alltid asynkrona; `false` gör inte heller genereringen synkron.                                    |
+| `callback_url`    | Valfri URL för asynkrona åtgärder                                                                                | Tar emot slutlägesnotifieringar; om den utelämnas frågas `/suno/tasks` med `task_id`. `response.success` måste fortfarande kontrolleras. |
 
-### Projekt och material
-| `action`       | Specifika parametrar        | Typ och villkor                        | Beskrivning                                                        |
-| -------------- | --------------------------- | -------------------------------- | ------------------------------------------------------------------ |
-| `create`       | `title`                     | Obligatorisk sträng, 1–200 tecken                   | Ny projekttitel.                                                             |
-| `retrieve`     | Ingen                           | —                                | Kräver endast `action` och projektets `id`; returnerar komplett redigerbart `state`.                              |
-| `save`         | `state`                     | Obligatoriskt objekt                             | **Ersätter helt** projektets tillstånd, inte en partiell patch. Ändra baserat på senaste `retrieve.data.state` och skicka in fullständigt, behåll okända fält. |
-| `save`         | `title`                     | Valfri sträng                            | Projekttitel; om den utelämnas används `state.title`, och om det också saknas används standardtiteln.                              |
-| `upload`       | `audio_url`                 | Obligatorisk HTTPS-URL                     | En offentligt åtkomlig adress till ljudmaterial; läs det slutliga `candidate.audio_id` efter framgång. Materialet bör användas med rättigheter som anroparen äger.            |
-| `add_track`    | `audio_id`                  | Obligatorisk sträng                            | Ljud-ID för färdigbearbetat material, inte en URL.                                                |
-| `add_track`    | `name` / `color`            | Valfria strängar                            | Nytt spårnamn, färg; namnet hämtas som standard från ljudtiteln, färgen rekommenderas som `#RRGGBB`, standard är `#7251F7`.                    |
-| `add_track`    | `title`                     | Valfri sträng                            | Ändrar samtidigt projekttiteln; utelämnas vanligtvis.                                                     |
-| `add_track`    | `start_beats` / `end_beats` | Valfria icke-negativa tal, `end_beats > start_beats` | Klippets position på projektets tidslinje. Startpunkten är som standard 0; slutpunkten är som standard `startpunkt + ljudlängd × timing.bps`.                  |
-| `add_track`    | `gain`                      | Valfritt icke-negativt tal, standard 1                      | Volymkoefficient för klippet och det nya spåret.                                                       |
-| `remove_track` | `track_id`                  | Obligatorisk sträng                            | ID för det befintliga spåret som ska tas bort. Använd den returnerade nya versionen efter framgång.                                           |
+Följande exempel visar i följd hur ID:n och versioner överförs mellan åtgärder. Svaren listar endast fält som är relevanta för det aktuella steget; vid integrering ska exempel-ID:n ersättas med svarsvärden från den aktuella applikationen.
 
-`state.timing.bps` måste vara ett positivt tal, standard är 2. `state.tracks` är en spårarray; `clipId` för befintliga ljudklipp refererar till ljud-ID:t, och `startBeats`, `endBeats`, `readStartBeats` använder projektets slagenheter. Det säkraste sättet att redigera är att läsa hela `state`, endast ändra målspåret eller klippet och sedan göra en fullständig `save`. Ett nytt tomt målspår bör åtminstone ha ett unikt `id`, `type:"audio"`, `clips:[]`; den fullständiga formen som faktiskt kan användas finns i steg 5 nedan. Använd inte beatpunkterna i ljudanalysresultaten direkt som koordinater på projektets tidslinje.
+## Skapa och läsa projekt
 
-### Generera, skicka in och exportera
-| `action`                             | Specifika parametrar                               | Typ och villkor                                  | Beskrivning                                                                                                                                                        |
-| ------------------------------------ | ---------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generate_track` / `replace_section` | `source_audio_id`                  | Obligatorisk sträng                                  | ID för slutfört källjud. Lägg först till källjudet i projektet, så att efterföljande kandidater kan hitta motsvarande position.                                                                                                                        |
-| `generate_track` / `replace_section` | `model`                            | Obligatorisk uppräknad sträng                                | Valbara är `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild`, `chirp-v6-mini`. Huruvida modellen och åtgärden är tillgängliga avgörs av uppgiftens slutstatus; andra modeller används inte automatiskt. |
-| `generate_track` / `replace_section` | `start_seconds` / `end_seconds`    | Obligatoriska tal, `0 ≤ start_seconds &lt; end_seconds` | Start- och slutsekunder inom källjudet; vid ersättning får slutpunkten dessutom inte överstiga källjudets faktiska längd. De är inte projektets taktslag och garanterar inte kandidatens utdatavarlaktighet.                                                                                                         |
-| `generate_track`                     | `render_audio_id`                  | Obligatorisk sträng                                  | `response.data.audio_id` efter en lyckad `render` av det aktuella projektet, som används som mixningsreferens vid generering.                                                                                                   |
-| `generate_track`                     | `stem_control_tags`                | Obligatorisk sträng                                  | Beskrivning av nytt stämma, till exempel `add Piano`, `add Drums`, `add Bass`; är inte en fast uppräkning.                                                                                                      |
-| `generate_track`                     | `batch_size`                       | Valfritt heltal 1–4, standard 2                          | Antalet kandidater som begärs att genereras.                                                                                                                                                |
-| `generate_track`                     | `instrumental` / `vocal_gender`    | Valfritt booleskt värde／uppräknad sträng                            | `instrumental` är som standard `true`; sångpreferens kan vara `f`, `m`, `unspecified`, med standardvärdet `unspecified`. Huruvida preferensen följs avgörs av det faktiska ljudet.                                                                     |
-| `generate_track` / `replace_section` | `title` / `tags` / `negative_tags` | Valfri sträng                                  | Kandidatens titel, beskrivning av önskad stil, stiltaggar som ska undvikas. Skicka en tom sträng när `tags` och `negative_tags` utelämnas.                                                                                                  |
-| `generate_track`                     | `prompt`                           | Valfri sträng                                  | Text- eller låttextprompt för den nya stämman; kan utelämnas för ren instrumentalmusik.                                                                                                                                       |
-| `replace_section`                    | `prompt` / `replacement_lyrics`    | Valfri sträng                                  | Den första är den ursprungliga låtens text eller kontexttext, den andra är den nya låttexten för ersättningsintervallet; skicka en tom sträng när de utelämnas.                                                                                                                      |
-| `replace_section`                    | `fixed`                            | Valfritt booleskt värde, standard `false`                       | Begär ersättning med fast längd; när `true` används måste intervallet vara kortare än 26 sekunder, och den valda modellen kanske inte stöds. Det här verkliga exemplet använder standardläget, `fixed=true` har ännu inte verifierats.                                                                                    |
-| `commit_candidate`                   | `operation_id` / `candidate_id`    | Obligatoriska strängar                                  | Hämtas respektive från genereringens slutstatus `data.operation_id` och den valda `data.candidates[].id`; kandidaten måste tillhöra den aktuella projektversionen.                                                                                    |
-| `commit_candidate`                   | `track_id`                         | Obligatorisk sträng                                  | En ny spårkandidat ska skickas till **ett tomt spår som sparats före genereringen**; en kandidat för lokal ersättning skickas till originalspåret som innehåller det enda källsegmentet.                                                                                                              |
-| `commit_candidate`                   | `start_beats` / `end_beats`        | Valfria icke-negativa tal endast för nya spårkandidater                           | Anger den nya sektionens position på projektets tidslinje; om de utelämnas används källsegmentets startpunkt och slutpunkten beräknas utifrån kandidatens faktiska längd. Får inte överlappa befintliga segment på målspåret. **Måste utelämnas för kandidater för lokal ersättning**.                                                                                      |
-| `commit_candidate`                   | `name` / `gain`                    | Valfri sträng／icke-negativt tal endast för nya spårkandidater                       | Namn på det genererade segmentet och volymkoefficient, `gain` är som standard 1.                                                                                                                                  |
-| `render`                             | `title`                            | Obligatorisk sträng                                  | Titel för det exporterade ljudet.                                                                                                                                                   |
-| `render`                             | `lyrics` / `tags`                  | Valfri sträng                                  | Låttext och stilbeskrivning vid export; låttexten är som standard `[Instrumental]`.                                                                                                                      |
-| `render`                             | `start_beats` / `end_beats`        | Valfria icke-negativa tal, slutet måste vara större än starten                         | Exportera projektets taktslagsintervall; om de utelämnas används den tidigaste startpunkten och senaste slutpunkten för alla hörbara segment. Tysta segment räknas inte med, och om solo-spår finns väljs endast solo-spåren.                                                                                             |
+| Åtgärd         | Parameter      | Typ och beskrivning                              |
+| ---------- | ------- | ---------------------------------- |
+| `create`   | `title` | Obligatorisk sträng, 1–200 tecken; titel för nytt projekt.              |
+| `retrieve` | Inga egna parametrar   | Använd projektets `id` för att läsa aktuell version och fullständig `state`; ingen idempotensnyckel krävs. |
 
-Generering producerar endast kandidater, **och placerar dem inte automatiskt i projektet**. `commit_candidate` kontrollerar att kandidaten fortfarande tillhör den aktuella versionen. Kandidater för lokal ersättning kan endast skickas automatiskt när den faktiska längden på ett tillförlitligt sätt kan matchas med hela källjudet eller det valda intervallet; vid bristande matchning behålls originalprojektet och ett fel returneras, och det går inte att tvångsmontera dem genom att manuellt gissa taktslag.
+### Skapa projekt: `create`
 
-## 2026-10-09 Verkliga begäranden och svar
-
-Följande begärandekroppar och svarsfält kommer alla från verkliga anrop i samma projekt. Varje JSON-grupp består i tur och ordning av begäran, godkännandesvar (om asynkront) och uppgiftens slutstatussvar. För läsbarhet innehåller svaren endast de fält som behövs för att slutföra detta flöde; fält för konto, användning och tidsåtgång visas inte. Exempel-ID:n tillhör denna testapplikation; vid integrering måste du använda ID:n som returneras från dina egna begäranden och en ny `Idempotency-Key`.
-
-### 1. Skapa och läs ett tomt projekt: `create`, `retrieve`
-
-`create`-begäran:
+Begäran:
 
 ```json
 {
@@ -125,6 +87,8 @@ Följande begärandekroppar och svarsfält kommer alla från verkliga anrop i sa
   "title": "Suno Projects Documentation Verification 2026-10-09"
 }
 ```
+
+Svar:
 
 ```json
 {
@@ -143,568 +107,688 @@ Följande begärandekroppar och svarsfält kommer alla från verkliga anrop i sa
 }
 ```
 
-Anropa sedan omedelbart `retrieve`:
+### Läs projekt: `retrieve`
+Begäran:```json
+&#123;
+"action": "retrieve",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
+&#125;
 
-```json
-{
-  "action": "retrieve",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
-}
+```
+Svar:
 ```
 
-```json
-{
-  "success": true,
-  "trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "title": "Suno Projects Documentation Verification 2026-10-09",
-    "state": {
-      "tracks": [],
-      "timing": {
-        "bps": 2
-      }
-    }
-  }
-}
+&#123;
+"success": true,
+"trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
+
 ```
 
-### 2. Första sparandet: `save`
+## Spara projektstatus
 
-Ett nyss skapat projekt har inget `version_id`, utelämna det vid första sparandet:
-```json
-{
-  "action": "save",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "title": "Suno Projects Documentation Verification 2026-10-09",
-  "state": {
-    "tracks": [],
-    "timing": {
-      "bps": 2
-    }
-  }
-}
+| Parameter | Typ och beskrivning |
+|---|---|
+| `state` | Obligatoriskt objekt. Skicka in**fullständig projektstatus**, inte en partiell patch; utgå från `data.state` som returneras av den senaste läs- eller ändringsåtgärden och behåll okända fält. |
+| `title` | Valfri sträng; om den utelämnas används `state.title`, och om den också saknas används standardtiteln. |
+| `version_id` | Kan utelämnas vid första sparningen av ett nytt tomt projekt; därefter måste den senaste versionen användas. |
+
+`state.timing.bps` måste vara ett positivt tal, standardvärdet är 2. `state.tracks` är en spårmatris; `clipId` i befintliga ljudklipp refererar till ljud-ID:t, och `startBeats`, `endBeats`, `readStartBeats` använder projektets taktenhet. Det säkraste sättet att redigera är att läsa hela `state`, endast ändra målspåret eller klippet och sedan utföra en fullständig `save`. Ett nytt tomt målspår bör åtminstone ha ett unikt `id`, `type:"audio"`, `clips:[]`; den fullständiga strukturen för ett tomt spår finns i exemplet under ”Generera nytt ljudspår”. Använd inte taktpunkterna i ljudanalysresultaten direkt som projektets tidslinjekoordinater.
+
+### Första sparningen: `save`
+
+Ett nytt projekt har inget `version_id`, utelämna det vid första sparningen:
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
-  "trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-    "state": {
-      "timing": {
-        "bps": 2
-      },
-      "tracks": []
-    }
-  }
-}
+&#123;
+"action": "save",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
+
+```
+Svar:
 ```
 
-### 3. Ladda upp material: `upload`
+&#123;
+"success": true,
+"task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
+"trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"state": &#123;
+"timing": &#123;
+"bps": 2
+&#125;,
+"tracks": []
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "action": "upload",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-  "audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
-  "async": true
-}
 ```
 
-Inlämningssvaret anger endast att det har mottagits:
+## Ladda upp ljud och lägg till spår
 
-```json
-{
-  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
-  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
-}
+| Åtgärd | Parameter | Typ och beskrivning |
+|---|---|---|
+| `upload` | `audio_url` | Obligatorisk HTTPS-URL, som pekar på ljud som är offentligt tillgängligt och som du har rätt att använda. `candidate.audio_id` i slutstatusen kan användas för att lägga till ett spår. |
+| `add_track` | `audio_id` | Obligatorisk sträng; ljud-ID:t för färdigt material, inte en URL. |
+| `add_track` | `name`、`color` | Valfria strängar; spårnamnet hämtas som standard från ljudtiteln, färgen rekommenderas vara `#RRGGBB`, standardvärdet är `#7251F7`. |
+| `add_track` | `title` | Valfri sträng; ändrar samtidigt projekttiteln, utelämnas vanligtvis. |
+| `add_track` | `start_beats`、`end_beats` | Valfria icke-negativa tal, slutpunkten måste vara större än startpunkten; som standard börjar det från takt 0, och slutpunkten beräknas utifrån ljudets längd och `timing.bps`. |
+| `add_track` | `gain` | Valfritt icke-negativt tal, standardvärdet är 1; volymkoefficient för klipp och spår. |
+
+### Ladda upp material: `upload`
+
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
-  "trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "candidate": {
-      "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-      "title": "suno_demo",
-      "duration": 41,
-      "audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
-    }
-  }
-}
+&#123;
+"action": "upload",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
+"async": true
+&#125;
+
+```
+Bekräftelsesvar:
 ```
 
-### 4. Lägg till källspår: `add_track`
+&#123;
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
+&#125;
 
-```json
-{
-  "action": "add_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
-  "audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "name": "Source demo",
-  "start_beats": 0
-}
+```
+Uppgiftens slutstatus:
 ```
 
-Inlämningssvar:
+&#123;
+"success": true,
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"candidate": &#123;
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"title": "suno_demo",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
-  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
-}
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
-  "trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
-    "track": {
-      "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-      "name": "Source demo",
-      "clips": [
-        {
-          "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-          "startBeats": 0,
-          "endBeats": 82
-        }
-      ]
-    }
-  }
-}
+### Lägg till källspår: `add_track`
+
 ```
 
-### 5. Spara det tomma spåret som tar emot kandidater
+&#123;
+"action": "add_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"name": "Source demo",
+"start_beats": 0
+&#125;
 
-Kandidaterna för `generate_track` är bundna till den aktuella projektversionen. Denna gång lägger du först till följande verkliga tomma spår i `state.tracks` baserat på det **fullständiga** `state` som erhållits från `retrieve`, och sparar sedan med `save`; andra befintliga fält behålls oförändrade:
-
-```json
-{
-  "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-  "type": "audio",
-  "name": "Generated piano",
-  "clips": [],
-  "takeLanes": [],
-  "mute": false,
-  "solo": false,
-  "amplitude": 1,
-  "instrument": {
-    "type": "song"
-  },
-  "color": "#7251F7"
-}
+```
+Bekräftelsesvar:
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
-  "trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
-  }
-}
+&#123;
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
+&#125;
+
+```
+Uppgiftens slutstatus:
 ```
 
-### 6. Exportera referensmix: `render`
+&#123;
+"success": true,
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
+"track": &#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"name": "Source demo",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;
+&#125;
+&#125;
 
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "title": "Suno Projects Docs Source Mix",
-  "lyrics": "[Instrumental]",
-  "async": true
-}
 ```
 
-Inlämningssvar:
+## Generera nytt ljudspår
 
-```json
-{
-  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
-  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
-}
+Kandidaterna och projektversionen vid generering är bundna till varandra. Spara först det tomma spåret som ska ta emot kandidaten, exportera sedan den aktuella mixen som genereringsreferens; när genereringen är klar väljer du en kandidat och skickar den till det tomma spåret.
+
+### Reservera målspår: `save`
+
+Kandidaterna för `generate_track` är bundna till den aktuella projektversionen. Lägg till följande tomma spår i `state.tracks` i den **fullständiga** `state` som returneras i slutstatusen för föregående `add_track`, och spara sedan med `save`; behåll övriga befintliga fält oförändrade:
+```
+&#123;
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"type": "audio",
+"name": "Genererat piano",
+"clips": [],
+"takeLanes": [],
+"mute": false,
+"solo": false,
+"amplitude": 1,
+"instrument": &#123;
+"type": "song"
+&#125;,
+"color": "#7251F7"
+&#125;
+
+```
+保存响应：
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
-  "trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-    "render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-    "audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-    "duration": 41,
-    "audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
-  }
-}
+&#123;
+"success": true,
+"task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
+"trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
+&#125;
+&#125;
+
 ```
 
-### 7. Generera kandidater för nytt spår: `generate_track`
-```json
-{
-  "action": "generate_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
-  "model": "chirp-v5",
-  "start_seconds": 12,
-  "end_seconds": 20,
-  "stem_control_tags": "lägg till piano",
-  "title": "Dokumentationspianotagning",
-  "tags": "mjukt piano, instrumentalt",
-  "batch_size": 2,
-  "async": true
-}
+### Exportera referensmix: `render`
+
+| Parameter | Typ och beskrivning |
+|---|---|
+| `title` | Obligatorisk sträng; titel för exporterad ljudfil. |
+| `lyrics`、`tags` | Valfria strängar; texten är som standard `[Instrumental]`, `tags` är stilbeskrivning. |
+| `start_beats`、`end_beats` | Valfria icke-negativa tal, slutpunkten måste vara större än startpunkten; när de utelämnas omfattar de alla hörbara klipp. Tystade klipp inkluderas inte; när det finns solo-spår väljs endast solo-spåren. |
+
+Efter lyckad körning hämtas `render_audio_id` från uppgiftens slutstatus `response.data.audio_id`.
+
 ```
 
-Svar vid inlämning:
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"title": "Suno Projects Docs Source Mix",
+"lyrics": "[Instrumental]",
+"async": true
+&#125;
 
-```json
-{
-  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
-}
+```
+Mottagningssvar:
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-    "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-    "candidates": [
-      {
-        "id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-        "title": "Dokumentationspianotagning",
-        "state": "complete",
-        "duration": 41.76,
-        "audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
-      },
-      {
-        "id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
-        "title": "Dokumentationspianotagning",
-        "state": "complete",
-        "duration": 40.96,
-        "audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
-      }
-    ]
-  }
-}
+&#123;
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
+&#125;
+
+```
+Uppgiftens slutstatus:
 ```
 
-Här begärdes 12–20 sekunder av källjudet som genereringsreferens, och den returnerade kandidatlängden är faktiskt cirka 41 sekunder; `start_seconds`/`end_seconds` är inte en garanti för utdatalängden.
+&#123;
+"success": true,
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
+&#125;
+&#125;
 
-### 8. Använd en kandidat: `commit_candidate`
-
-```json
-{
-  "action": "commit_candidate",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
-  "operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
-  "candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-  "async": true
-}
 ```
 
-Svar vid inlämning:
+### Generera kandidater: `generate_track`
 
-```json
-{
-  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
-  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
-}
+| Parameter | Typ och beskrivning |
+|---|---|
+| `source_audio_id` | Obligatoriskt; ID för färdigställd källjudfil. Lägg först till källjudfilen i projektet, därefter kan kandidatpositionen fastställas. |
+| `render_audio_id` | Obligatoriskt; `response.data.audio_id` från slutstatusen för ovanstående `render`, inte ljud-URL:en. |
+| `model` | Obligatoriskt; valbara alternativ är `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild`, `chirp-v6-mini`. Huruvida specifika kombinationer kan användas avgörs av uppgiftens slutstatus. |
+| `start_seconds`、`end_seconds` | Obligatoriska tal, `0 ≤ start_seconds < end_seconds`; sekundintervall i källjudfilen, inte projektets taktslag och utan garanti för utmatningens längd. |
+| `stem_control_tags` | Obligatorisk sträng; beskrivning av nytt stämspår, till exempel `add Piano`, `add Drums`, `add Bass`, inte en fast uppräkning. |
+| `batch_size` | Valfritt heltal 1–4, standard är 2; antal kandidater. |
+| `instrumental`、`vocal_gender` | Valfria; endast instrumentalt är som standard `true`, sångpreferens kan anges som `f`, `m`, `unspecified`, standard är `unspecified`. |
+| `title`、`tags`、`negative_tags`、`prompt` | Valfria strängar; respektive kandidattitel, önskad stil, stilar att undvika, text- eller låttextprompt för den nya stämman. |
+
 ```
 
-```json
-{
-  "success": true,
-  "task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
-  "trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-    "committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-          "clips": [
-            {
-              "clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-              "startBeats": 0,
-              "endBeats": 82
-            }
-          ]
-        },
-        {
-          "id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-          "clips": [
-            {
-              "clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
-              "startBeats": 0,
-              "endBeats": 83.52
-            }
-          ]
-        }
-      ]
-    }
-  }
-}
+&#123;
+"action": "generate_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"model": "chirp-v5",
+"start_seconds": 12,
+"end_seconds": 20,
+"stem_control_tags": "add Piano",
+"title": "Documentation Piano Take",
+"tags": "gentle piano, instrumental",
+"batch_size": 2,
+"async": true
+&#125;
+
+```
+Mottagningssvar:
 ```
 
-### 9. Generera kandidat för lokal ersättning: `replace_section`
+&#123;
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
+&#125;
 
-```json
-{
-  "action": "replace_section",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
-  "model": "chirp-v5",
-  "title": "Dokumentationsversredigering",
-  "tags": "drömsk kinesisk pop",
-  "prompt": "[Vers 1]\nMorgonljuset faller över stranden\nVågorna ler strålande\nDu och jag på sandstranden\nKlockan slutar att gå\nGlassen smälter\nHand i hand går vi på promenad\n[Refräng]\nVinden blåser mjukt förbi\nHjärtat fortsätter att slå\nSommar, sommar\nTiden stannar på denna dag\nSkratten ekar\nDen ljusblå himlen är vid vår sida",
-  "replacement_lyrics": "Vi går längs stranden\nEn lätt vind blåser genom den soliga dagen",
-  "start_seconds": 12,
-  "end_seconds": 20,
-  "async": true
-}
+```
+Uppgiftens slutstatus:
 ```
 
-Svar vid inlämning:
-
-```json
-{
-  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
-}
-```
-```json
-{
-  "success": true,
-  "task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-    "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-    "candidates": [
-      {
-        "id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
-        "title": "Documentation Verse Edit",
-        "state": "complete",
-        "duration": 36,
-        "audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
-      },
-      {
-        "id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
-        "title": "Documentation Verse Edit",
-        "state": "complete",
-        "duration": 36,
-        "audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
-      }
-    ]
-  }
-}
+&#123;
+"success": true,
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidates": [
+&#123;
+"id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 41.76,
+"audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
+&#125;,
+&#123;
+"id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 40.96,
+"audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
+&#125;
+]
+&#125;
+&#125;
 ```
 
-### 10. De här ersättningskandidaterna kan inte skickas in: behåll det faktiska misslyckade resultatet
+12–20 sekunder i begäran är referensintervallet för källjudet, kandidatljudet är cirka 41 sekunder; `start_seconds`/`end_seconds` är ingen garanti för utdata-längden.
 
-Den här gången valde `replace_section` ett intervall på 8 sekunder, men båda kandidaterna är i praktiken 36 sekunder, vilket varken motsvarar originalljudets 41 sekunder eller de valda 8 sekunderna. Den faktiska begäran och slutstatusen för att skicka in en av kandidaterna är följande:
+### Använd kandidat: `commit_candidate`
 
-```json
-{
-  "action": "commit_candidate",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
-  "candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
-  "track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
-  "async": true
-}
+| Parameter | Typ och beskrivning |
+|---|---|
+| `operation_id` | Obligatorisk; genereringsuppgiftens slutstatus `data.operation_id`. |
+| `candidate_id` | Obligatorisk; vald `data.candidates[].id`. |
+| `track_id` | Obligatorisk; den tomma sparade spårets `state.tracks[].id` före generering. |
+| `start_beats`、`end_beats` | Valfritt för nya spårkandidater; anger projektets taktslagsintervall och får inte överlappa med befintliga klipp på målspåret. Om de utelämnas används källklippets startpunkt och slutpunkten beräknas utifrån kandidatens längd. |
+| `name`、`gain` | Valfritt för nya spårkandidater; klippnamn och icke-negativ volymkoefficient, `gain` är 1 som standard. |
+
+Generering producerar endast kandidater och **placerar dem inte automatiskt i projektet**. `commit_candidate` kontrollerar att kandidaten fortfarande tillhör den aktuella versionen. Kandidater för partiell ersättning kan endast automatiskt skickas när den faktiska längden kan matchas tillförlitligt med hela källjudet eller det valda intervallet; vid bristande matchning behålls det ursprungliga projektet och ett fel returneras, och man kan inte tvinga fram en sammanfogning genom att manuellt gissa antalet taktslag.
+
 ```
 
-Svar vid inskickning:
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"async": true
+&#125;
 
-```json
-{
-  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
-  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
-}
+```
+Godkännandesvar:
 ```
 
-```json
-{
-  "success": false,
-  "task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
-  "trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
-  "error": {
-    "code": "bad_request",
-    "message": "Candidate duration does not match the source or selected section. Keep the original track and inspect the candidate before editing."
-  }
-}
+&#123;
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
+&#125;
+
+```
+Uppgiftens slutstatus:
 ```
 
-Därför ändrades inte originalspåret. Vid detta fel bör kandidaterna behållas för provlyssning och manuell hantering; behandla dem inte som om de redan har fogats in i projektet och skicka inte automatiskt in en ny avgiftsbelagd generering.
+&#123;
+"success": true,
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;,
+&#123;
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"clips": [
+&#123;
+"clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"startBeats": 0,
+"endBeats": 83.52
+&#125;
+]
+&#125;
+]
+&#125;
+&#125;
+&#125;
 
-### 11. Ta bort testspåret och läs tillbaka: `remove_track`, `retrieve`
-
-```json
-{
-  "action": "remove_track",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
-}
 ```
 
-```json
-{
-  "success": true,
-  "trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
-        }
-      ]
-    }
-  }
-}
+### Exportera efter inskickning
+
+Efter att den nya spårkandidaten skickats in avvisas exporten av hela låten som innehåller kandidaten. Begäran och slutstatus:
 ```
 
-Det faktiska resultatet av `retrieve` igen:
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"title": "Suno Projects Docs Mix With Piano",
+"lyrics": "[Instrumental]",
+"async": true
+&#125;
 
-```json
-{
-  "success": true,
-  "trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "state": {
-      "tracks": [
-        {
-          "id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
-        }
-      ]
-    }
-  }
-}
+```
+Godkännandesvar:
 ```
 
-### 12. Exportbegränsningar och återställningsverifiering
+&#123;
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
+&#125;
 
-Efter att den nya spårkandidaten skickades in avvisades exporten av hela låten som innehöll kandidaten. Faktisk begäran och slutstatus:
-
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
-  "title": "Suno Projects Docs Mix With Piano",
-  "lyrics": "[Instrumental]",
-  "async": true
-}
+```
+Uppgiftens slutstatus:
 ```
 
-Svar vid inskickning:
+&#123;
+"success": false,
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
+"error": &#123;
+"code": "studio_audio_unavailable",
+"message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
-  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
-}
 ```
 
-```json
-{
-  "success": false,
-  "task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
-  "trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
-  "error": {
-    "code": "studio_audio_unavailable",
-    "message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
-  }
-}
+Att kandidatljudlänken går att läsa innebär inte att projektet som innehåller den säkert kan exporteras. När `studio_audio_unavailable` tas emot ska det ursprungliga projektet behållas och tillgängligheten för det refererade ljudet kontrolleras.
+
+## Ersätt befintligt klipp
+
+`replace_section` kan direkt använda befintligt källjud utan att först exportera en mix. Generering returnerar endast kandidater; välj vid inskickning det ursprungliga spåret som innehåller det unika källklippet.
+
+| Parameter | Typ och beskrivning |
+|---|---|
+| `source_audio_id` | Obligatorisk; ID:t för det slutförda källjud som ska ersättas. |
+| `model` | Obligatorisk; använd offentliga modeller som listas under ”Generera kandidater”; tillgängligheten för modell och åtgärd avgörs av uppgiftens slutstatus. |
+| `start_seconds`、`end_seconds` | Obligatoriska tal, `0 ≤ start_seconds < end_seconds ≤ källjudets längd`; sekundintervallet inom källjudet. |
+| `prompt`、`replacement_lyrics` | Valfria strängar; den första är originaltexten eller kontexten, den andra är ny text för ersättningsintervallet. |
+| `title`、`tags`、`negative_tags` | Valfria strängar; kandidatens titel, önskad stil och stilar som ska undvikas. |
+| `fixed` | Valfritt booleskt värde, `false` som standard; när det sätts till `true` måste intervallet vara kortare än 26 sekunder, och modellen kanske inte stöder det. |
+
+### Generera ersättningskandidat: `replace_section`
+
 ```
 
-Efter att kandidatspåret tagits bort fanns det ursprungliga källspåret fortfarande kvar, och exporten lyckades igen med den senaste versionen:
+&#123;
+"action": "replace_section",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"model": "chirp-v5",
+"title": "Documentation Verse Edit",
+"tags": "dreamy Chinese pop",
+"prompt": "[Verse 1]\n晨光洒在海边\n浪花笑得灿烂\n你和我在沙滩\n钟表停止转动\n冰淇淋在融化\n手牵手去散步\n[Chorus]\n风儿轻轻吹过\n心跳不停鼓\n夏天夏天\n时间停在这一天\n笑声回荡\n微蓝天空在身旁",
+"replacement_lyrics": "我们走在海边\n微风吹过晴天",
+"start_seconds": 12,
+"end_seconds": 20,
+"async": true
+&#125;
 
-```json
-{
-  "action": "render",
-  "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-  "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-  "title": "Suno Projects Docs Mix After Remove",
-  "async": true
-}
+```
+Godkännandesvar:
+```
+&#123;
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
+&#125;
+
+```
+任务终态：
 ```
 
-Svar vid inskickning:
+&#123;
+"success": true,
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidates": [
+&#123;
+"id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
+&#125;,
+&#123;
+"id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
+&#125;
+]
+&#125;
+&#125;
 
-```json
-{
-  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
-  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
-}
-```
-```json
-{
-  "success": true,
-  "task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
-  "trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
-  "data": {
-    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
-    "version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
-    "render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
-    "audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
-    "duration": 41,
-    "audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
-  }
-}
 ```
 
-De ljudlänkar som returnerades framgångsrikt ovan kunde alla läsa mediebyte vid denna verifiering; de första 1 024 byten för länkar för generering och ersättningskandidater returnerade båda HTTP 206, `audio/mpeg`, medan exportlänken returnerade HTTP 206, `audio/mp4`. Detta bevisar endast att länkarna är läsbara och innebär inte att projektet som innehåller kandidaten nödvändigtvis kan exporteras.
+### Kandidatlängden stämmer inte överens
+
+När en kandidat för partiell ersättning skickas in ska `track_id` peka på originalspåret som innehåller det enda källsegmentet, och `start_beats` och `end_beats` ska utelämnas. Gränssnittet uppdaterar endast projektet när kandidatens längd på ett tillförlitligt sätt kan matchas mot hela källjudet eller det valda intervallet.
+
+Efter att ha valt ett 8-sekundersintervall är båda kandidaterna 36 sekunder, vilket varken är lika med originalljudets 41 sekunder eller det valda 8-sekundersintervallet. När en av kandidaterna skickas in returneras:
+```
+
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"async": true
+&#125;
+
+```
+Mottagningssvar:
+```
+
+&#123;
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
+&#125;
+
+```
+Uppgiftens slutstatus:
+```
+
+&#123;
+"success": false,
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
+"error": &#123;
+"code": "bad_request",
+"message": "Candidate duration does not match the source or selected section. Keep the original track and inspect the candidate before editing."
+&#125;
+&#125;
+
+```
+
+Därför har originalspåret inte ändrats. När detta fel uppstår ska kandidaten behållas för provlyssning och manuell hantering, den ska inte behandlas som om den redan framgångsrikt har fogats in i projektet, och avgiftsbelagd generering ska inte skickas in automatiskt på nytt.
+
+## Ta bort spår
+
+`remove_track` kräver aktuellt `version_id` och `state.tracks[].id`; använd den nya versionen som returneras efter lyckad åtgärd. Nedan tas kandidatspåret bort som inte kan användas för export av hela låten, och projektstatusen läses tillbaka.
+
+```
+
+&#123;
+"action": "remove_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
+&#125;
+
+```
+Svar:
+```
+
+&#123;
+"success": true,
+"trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+Läs projektet igen:
+```
+
+&#123;
+"success": true,
+"trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+
+### Export efter borttagning
+
+Efter att detta kandidatspår har tagits bort finns originalkällspåret fortfarande kvar, och exporten lyckas igen med den senaste versionen:
+```
+
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"title": "Suno Projects Docs Mix After Remove",
+"async": true
+&#125;
+
+```
+Mottagningssvar:
+```
+
+&#123;
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
+&#125;
+
+```
+Uppgiftens slutstatus:
+```
+
+&#123;
+"success": true,
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
+&#125;
+&#125;
+```
+
+Den framgångsrikt exporterade `audio_url` kan användas för nedladdning eller uppspelning. Att ljudlänken är åtkomlig bevisar inte att andra kandidater också är kvalificerade för projektexport.
 
 ## Fel och återställning
 
-| Resultat                                                                            | Betydelse                          | Nästa steg                                    |
-| ----------------------------------------------------------------------------- | --------------------------- | -------------------------------------- |
-| `project_version_conflict` / `project_candidate_stale`（409）                   | Projektversionen har ändrats, eller kandidaten tillhör inte den aktuella versionen.         | `retrieve` det senaste projektet och planera om ändringarna; spela inte upp gamla kandidater på nytt.        |
-| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（vanligtvis 400）   | Parametrar, spårtillstånd, kandidatens längd eller modellen matchar inte åtgärden.      | Kontrollera uppgiftens slutstatusfel och korrigera indata; behåll originalprojektet när kandidaten inte kan sammanfogas säkert.          |
-| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | Referensljudet kan inte användas för projektåtgärden, åtkomst saknas eller innehållskontrollen avvisar det. | Kontrollera ljudkällan och uppgiftens `trace_id`; likställ inte en redan genererad kandidat med att hela låten kan exporteras. |
-| `too_many_requests`（429）                                                      | Begäran är frekvensbegränsad.                   | Fråga först efter den ursprungliga uppgiften och avgör sedan om en ny åtgärd ska initieras med en ny idempotensnyckel.                |
-| `studio_unavailable` / `studio_model_unavailable`（503）                        | Projektbearbetningen eller den valda modellen är tillfälligt otillgänglig.             | Behåll resultatet från den ursprungliga uppgiften; försök uttryckligen igen senare, utan att automatiskt byta modell.                |
-| `studio_processing_failed` / timeout（500/504）                                      | Bearbetningen misslyckades eller slutstatusen är osäker.                 | Fråga efter `task_id` eller den ursprungliga idempotensnyckeln för att undvika upprepad debiterad generering.          |
+| Resultat | Betydelse | Nästa steg |
+|---|---|---|
+| `project_version_conflict` / `project_candidate_stale`（409） | Projektversionen har ändrats, eller kandidaten tillhör inte den aktuella versionen. | `retrieve` det senaste projektet och planera ändringarna på nytt; spela inte upp gamla kandidater igen. |
+| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（vanligtvis 400） | Parametrar, spårtillstånd, kandidatlängd eller modell matchar inte åtgärden. | Kontrollera felet i uppgiftens sluttillstånd, korrigera indata; behåll det ursprungliga projektet när kandidaten inte kan sammanfogas säkert. |
+| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | Referensljudet kan inte användas för denna projektåtgärd, åtkomst saknas eller innehållskontrollen avvisar det. | Kontrollera ljudkällan och uppgiftens `trace_id`; likställ inte en redan genererad kandidat med att hela låten kan exporteras. |
+| `too_many_requests`（429） | Begäran är frekvensbegränsad. | Fråga först efter den ursprungliga uppgiften och avgör sedan om en ny åtgärd ska initieras med en ny idempotensnyckel. |
+| `studio_unavailable` / `studio_model_unavailable`（503） | Projektbearbetningen eller den valda modellen är tillfälligt otillgänglig. | Behåll resultatet från den ursprungliga uppgiften; försök igen uttryckligen senare, byt inte modell automatiskt. |
+| `studio_processing_failed` / timeout（500/504） | Bearbetningen misslyckades eller sluttillståndet är osäkert. | Fråga med `task_id` eller den ursprungliga idempotensnyckeln för att undvika dubbeldebiterad generering. |
 
-Projekt och kandidater är bundna till applikationen och körmiljön som skapade dem, och det kan inte antas att de kan återanvändas mellan applikationer eller att automatisk redundansväxling sker. Beständiggör den slutliga ljud-URL:en som har exporterats framgångsrikt, och behåll `trace_id` för felsökning.
+Projekt och kandidater är bundna till applikationen och exekveringsmiljön som skapade dem, och återanvändning mellan applikationer eller automatisk failover kan inte antas. Persistiera den slutliga ljud-URL:en som exporterats framgångsrikt och behåll `trace_id` för felsökning.
+```
