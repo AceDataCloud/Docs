@@ -1,236 +1,348 @@
 ---
-title: "Integrera ”Logga in med Ace Data Cloud” (OAuth 2.0)"
+title: "Anslut Ace Data Cloud OAuth 2.0"
 ---
 
-Låt din egen produkt stödja ”Logga in med Ace Data Cloud” och, efter användarens auktorisering, **på användarens vägnar** läsa och skriva dess Ace Data Cloud-resurser (profil, API Token, prenumerationer, användning, beställningar osv.). Underliggande teknik är standardläget **OAuth 2.0 Authorization Code + PKCE**, med exakt samma integrationssätt som GitHub / Google-inloggning — vilket OAuth-klientbibliotek du än redan har kan användas direkt.
+Låt användare auktorisera din applikation att få åtkomst till deras Ace Data Cloud-profil, tjänsteprenumerationer, API Key, användning eller beställningar. Använd standard **Authorization Code + S256 PKCE**: applikationen öppnar auktoriseringssidan, användaren samtycker och får sedan en engångs-`code`, som därefter byts mot en OAuth access token.
 
-> **Lämpliga scenarier**: Du bygger en tredjepartsapplikation / Agent / MCP-klient / automatiserat arbetsflöde och vill låta användare logga in med sitt Ace Data Cloud-konto med ett klick och vid behov komma åt sina resurser på plattformen, utan att användaren manuellt behöver kopiera och klistra in API Key.
+OAuth access token används för att komma åt kontoresursgränssnitt; för att anropa modell-API:er används motsvarande API Key. OAuth-auktorisering skapar inte automatiskt API Key, aktiverar tjänster eller ökar saldot.
 
-## Snabböversikt över termer & ändpunkter
+## Välj integrationsmetod
 
-Alla ändpunkter finns på `https://auth.acedata.cloud`, och de senaste adresserna kan alltid hämtas via upptäcktsändpunkten (Discovery):
+| Metod            | Användningsscenario                                | Efter slutförd auktorisering                                           |
+| ------------- | ----------------------------------- | ----------------------------------------------- |
+| Standard OAuth-omdirigering   | Fristående webbplats, dator- eller mobilklient; inbäddade webbplatser initierar auktorisering själva            | Webbläsaren återgår till applikationens registrerade `redirect_uri`, applikationen hanterar `code` och `state` |
+| Studio-webbplatskomponentauktorisering | Webbplatsen bäddar in Studio-startsidan och vill använda besökarens aktuella Studio-konto | Studio skickar ett auktoriseringsresultatmeddelande till applikationen, applikationen omdirigeras inte och den ursprungliga sidan behålls                  |
+
+Standardomdirigering kräver inte `embed=studio`, `embed_origin` eller `postMessage`. Studio-komponentläget skapar auktoriseringssidan av värden och underhåller meddelandebryggan; tredje parter integrerar enligt komponentprotokollet i slutet av denna text och ska inte själva sammanfoga dessa två parametrar.
+
+## Slutpunkter och discovery-dokument
 
 ```bash
 curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
 ```
 
-| Användning                 | Ändpunkt                                                |
-| ------------------ | ------------------------------------------------- |
-| Upptäcktsdokument (Discovery)    | `GET /.well-known/oauth-authorization-server`     |
-| Användarauktoriseringssida (webbläsaromdirigering)       | `GET https://auth.acedata.cloud/oauth2/authorize` |
-| Tokenändpunkt (hämta / uppdatera token) | `POST https://auth.acedata.cloud/oauth2/token`    |
-| Återkalla token               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
-| Användarinformation (UserInfo)     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
-| Hantering av appregistrering (självbetjäning)         | `https://auth.acedata.cloud/user/oauth-apps`      |
+| Syfte                | Adress                                                                                |
+| ----------------- | --------------------------------------------------------------------------------- |
+| Webbläsarens auktoriseringssida            | `https://auth.acedata.cloud/oauth2/authorize`                                     |
+| Byt／förnya OAuth token | `POST https://auth.acedata.cloud/oauth2/token`                                    |
+| Skicka återkallelsebegäran            | `POST https://auth.acedata.cloud/oauth2/revoke`                                   |
+| Information om aktuell användare            | `GET https://auth.acedata.cloud/api/v1/users/me`                                  |
+| Hanteringssida för OAuth-applikationer      | [OAuth-applikationer](https://auth.acedata.cloud/user/oauth-apps)                            |
+| Applikationslista／registreringsgränssnitt för inloggade användare   | `https://auth.acedata.cloud/api/v1/oauth2/applications/`                          |
+| Offentlig applikationsinformation som används av auktoriseringssidan      | `GET https://auth.acedata.cloud/api/v1/oauth2/application/<client_id>/`           |
+| Användarens befintliga API Key     | `GET https://platform.acedata.cloud/api/v1/credentials/?user_id=<användar-ID>&limit=100` |
 
-Följande funktioner stöds: `response_type=code`, `grant_types=authorization_code, refresh_token`, `code_challenge_methods=S256, plain`, klientautentiseringsmetoderna `client_secret_post` (konfidentiella klienter) / `none` (offentliga PKCE-klienter).
+Applikationshanteringsgränssnittet kräver kontoinloggningsautentisering och är inte ett gränssnitt för anonym dynamisk registrering (DCR). MCP-tjänstens egna discovery-/registreringsadresser och kontots OAuth-slutpunkter i denna tabell är olika ingångar; vid anslutning till en specifik MCP ska du följa tjänstens dokumentation och discovery-resultat.
 
-## Behörighetsomfång (Scope)
+Discovery-dokumentet används för att hämta slutpunkter och protokollfunktioner. Det aktuella flödet returnerar OAuth token och returnerar inte `id_token`; behandla det inte som ett fullständigt OpenID Connect-inloggningsflöde enbart eftersom scopet `openid` finns.
 
-Begär enligt ”minsta behörighet”, användaren kommer att se varje behörighet du begär på auktoriseringssidan.
+## Behörighetsomfång: använd aktuella scope-namn
 
-**Identitetsrelaterade (OIDC-kompatibla)**
+`scope` är mellanslagsseparerade, skiftlägeskänsliga behörighetsnamn. Nya applikationer använder specifika behörigheter som `profile:read`, `email:read`, `phone:read`.
 
-| Scope     | Betydelse      | Fält som returneras av `/users/me`                                           |
-| --------- | ------- | ---------------------------------------------------------- |
-| `openid`  | Unik användaridentifierare  | `id`                                                       |
-| `profile` | Grundläggande profil    | `username`, `nickname`, `avatar`, `is_verified`, `date_joined` |
-| `email`   | E-post      | `email`                                                    |
-| `phone`   | Telefonnummer (känsligt) | `phone`, `region`                                           |
+### Var du hämtar behörigheter som kan begäras
 
-**Plattformsresurser**
+Efter inloggning returnerar OAuth-applikationslistgränssnittet `GET /api/v1/oauth2/applications/` `available_scopes`; behörighetsväljaren på applikationshanteringssidan använder samma katalog. Detta är de valbara omfång som vanliga självbetjäningsapplikationer ska använda.
 
-| Scope                                      | Betydelse                     |
-| ------------------------------------------ | ---------------------- |
-| `applications:read` / `applications:write` | Läs / ändra användarens tjänsteprenumerationer och kvoter       |
-| `credentials:read` / `credentials:write`   | Läs / skapa och återkalla användarens API Token |
-| `usage:read`                               | Läs användarens anropshistorik               |
-| `orders:read` / `orders:write`             | Läs beställningar / lägg beställningar och initiera betalning          |
+**Discovery:s `scopes_supported` innehåller alla behörighetsnamn som känns igen av plattformen och innebär inte att din applikation kan begära vart och ett av dem.** Den faktiska auktoriseringen kontrollerar samtidigt:
 
-**Sammanslagna omfång (expanderas automatiskt)**
+1. om behörigheten får delegeras till denna applikationstyp;
+2. om behörigheten har registrerats i detta OAuth-applikations tillåtna omfång;
+3. om den aktuella användaren har den begärda behörigheten.
 
-| Scope            | Expanderas till                                                                     |
-| ---------------- | ----------------------------------------------------------------------- |
-| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
-| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
-| `platform`       | `platform:read` + `platform:write`                                      |
+Okända, oregistrerade, ej tillåtna att delegera eller behörigheter som användaren saknar returnerar `invalid_scope`. Vid utbyte av auktoriseringskod och förnyelse kontrolleras de också på nytt; behörigheter kompletteras eller höjs inte automatiskt.
 
-**Särskilda**
+### Valbara behörigheter för vanliga självbetjäningsapplikationer
 
-| Scope            | Betydelse                                                 |
-| ---------------- | -------------------------------------------------- |
-| `offline_access` | Utfärdar **Refresh Token** (om detta inte begärs utfärdas endast Access Token, och ny auktorisering krävs efter utgång) |
+Följande är den aktuella katalogen (2026-10-09); vid integration ska `available_scopes` gälla.
 
-> Typiska kombinationer: Tredjeparts-”inloggning med ett klick” = `openid profile`; MCP / IDE-klienter som behöver automatiskt konfigurera Key = `openid profile credentials:read credentials:write`; fullständig administrationspanel = `openid profile email platform offline_access`.
+| Scope                                            | Syfte                                      |
+| ------------------------------------------------ | --------------------------------------- |
+| `profile:read` / `profile:write`                 | Läsa／uppdatera profil                               |
+| `email:read`                                     | Läsa e-post                                    |
+| `phone:read`                                     | Läsa mobilnummer och region                                |
+| `billing-profile:read` / `billing-profile:write` | Läsa／hantera faktureringsuppgifter                               |
+| `applications:read` / `applications:write`       | Läsa／hantera tjänsteprenumerationer                               |
+| `credentials:read` / `credentials:write`         | Läsa／hantera API Key                           |
+| `usage:read`                                     | Läsa anropshistorik                                  |
+| `orders:read` / `orders:write`                   | Läsa／skapa och hantera beställningar                              |
+| `auto-recharge:read` / `auto-recharge:write`     | Läsa／hantera inställningar för automatisk påfyllning                             |
+| `recharge-cards:redeem`                          | Lösa in påfyllningskort                                   |
+| `coin:read`                                      | Läsa tokenrelaterad information                                |
+| `distribution:read`                              | Läsa distributionsinformation                                  |
+| `connections:read` / `connections:write`         | Läsa／hantera anslutningar                                 |
+| `skills:read` / `skills:write`                   | Läsa／hantera färdigheter                                 |
+| `openid`                                         | Den aktuella implementeringen tillåter också att UserInfo returnerar grundläggande profiluppgifter; returnerar inte ID Token    |
+| `offline_access`                                 | Begär refresh token för att kunna förnya efter att access token har löpt ut |
 
-## Steg 1: Registrera en OAuth-app
+Till exempel används `profile:read` för att endast läsa profil; lägg till `email:read` om e-post behövs; använd `profile:read credentials:read` för att läsa befintliga API Key. Begär endast `credentials:write` när du faktiskt behöver skapa eller ändra Key, och lägg till `offline_access` när förnyelse behövs.
 
-Öppna [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) → ”Skapa app”, och fyll i:
+Vissa behörigheter är endast för betrodda applikationer som godkänts av plattformen, till exempel `sites:read`, `sites:write`, `platform-tokens:read`; andra behörigheter är inte öppna för vanliga OAuth-applikationer från tredje part. Klienttyperna `public`／`confidential` beskriver huruvida secret kan förvaras, och har inget samband med huruvida applikationen är betrodd. Applikationer som skapas via självbetjäning kan inte själva aktivera betrodda behörigheter.
 
-1. **Appnamn / beskrivning / logotyp**: Visas på användarens sida för auktoriseringssamtycke.
-2. **Klienttyp (Client Type)**:
-   - **Konfidentiell (confidential)** — du har en backend och kan lagra `client_secret` säkert (webbtjänster, backendtjänster).
-   - **Offentlig (public)** — ren frontend / desktop / CLI / mobil, kan **inte** lagra hemligheter och måste använda **PKCE**.
-3. **Återanropsadresser (Redirect URIs)**: Adressen som användaren omdirigeras tillbaka till när auktoriseringen är klar, **måste vara exakt identisk med `redirect_uri` som du skickar när du initierar auktoriseringen**, och flera kan anges.
-4. **Behörighetsomfång (Scopes)**: Markera de scope du behöver från föregående avsnitt.
+`account` är den angivna kontobehörighetsväljaren som används av den officiella MCP:n för kontohantering, inte scopet ”alla behörigheter” för tredjepartsapplikationer, och kan inte blandas med andra scope. Tredje parter ska uttryckligen lista de specifika behörigheter som behövs.
 
-Efter sparandet får du **`client_id`**; konfidentiella klienter visas dessutom **`client_secret`** **endast en gång** — spara den omedelbart, eftersom den inte kan visas igen efter att du stängt sidan (du kan generera en ny på detaljsidan via ”Rotate Secret”, då blir den gamla hemligheten omedelbart ogiltig).
+### Migrera från gammal dokumentation
 
-> Varje konto kan som mest skapa **20** OAuth-appar.
+| Gammalt skrivsätt                                         | Aktuell metod                       |
+| ------------------------------------------- | -------------------------- |
+| `profile`                                   | `profile:read`             |
+| `email`                                     | `email:read`               |
+| `phone`                                     | `phone:read`               |
+| `platform`、`platform:read`、`platform:write` | Lista varje specifik behörighet som faktiskt behövs, det finns inget generellt ersättningsvärde för ”välj alla” |
 
-## Steg 2: Omdirigera användaren till auktoriseringssidan
+Gamla namn accepteras inte som kompatibilitetsalias. Uppdatera samtidigt scopes som registrerats för OAuth-applikationen, auktoriserings-URL:en och din egen behörighetskontroll; ändring av applikationskonfigurationen ger inte redan utfärdade token ytterligare behörigheter, användaren måste auktorisera på nytt.
 
-I din applikation omdirigerar du användarens webbläsare till auktoriseringssidan med följande frågeparametrar:
+## Steg 1: Registrera OAuth-applikationen
 
+Öppna [Hantering av OAuth-applikationer](https://auth.acedata.cloud/user/oauth-apps), skapa en applikation och fyll i:
+- Namn, beskrivning, applikationslogotyp: visas på applikationssidan på auktoriseringssidan.
+- Klienttyp: välj **Public** för rena frontend-, mobil- eller skrivbordsklienter; välj **Confidential** för tjänster som kan förvara secret på backend.
+- Återanropsadress: använd HTTPS i produktionsmiljön och registrera den fullständiga URL som applikationen faktiskt hanterar återanrop på.
+- Behörigheter: välj de scopes som faktiskt behövs från katalogen som sidan tillhandahåller.
+
+Spara `client_id`. Confidential-klienter ska spara `client_secret` på serversidan och får inte lägga det i HTML, frontend-byggvariabler eller URL:er. Public-klienter använder inte secret när de byter till sig token; även om registreringssvaret innehåller detta fält får det inte behandlas som en uppgift som klienten kan hålla hemlig.
+
+`redirect_uri` måste vara exakt identisk vid registrering, auktorisering och tokenutbyte, inklusive sökväg, avslutande snedstreck och frågeparametrar. Varje konto kan som mest skapa 20 applikationer. Secret visas endast vid skapande/rotation; efter rotation kan det gamla secret inte längre användas för utbyten som kräver klientautentisering.
+
+## Steg 2: Knappen initierar auktorisering
+
+Vid varje klick på anslutning, generera nya slumpmässiga `state` och `code_verifier`, beräkna:
+
+```text
+code_challenge = BASE64URL(SHA256(code_verifier))
 ```
+
+Spara `state`, verifier och återanropsadressen i applikationens egen session och öppna sedan auktoriseringssidan med URL-kodade parametrar:
+
+```text
 https://auth.acedata.cloud/oauth2/authorize
   ?response_type=code
-  &client_id=<din client_id>
-  &redirect_uri=<din registrerade återanropsadress>
-  &scope=openid%20profile%20credentials:read
-  &state=<slumpmässig CSRF-skyddssträng>
-  &code_challenge=<PKCE-utmaningsvärde>          # krävs för offentliga klienter
-  &code_challenge_method=S256            # krävs för offentliga klienter
+  &client_id=<client_id>
+  &redirect_uri=<完整回调地址>
+  &scope=profile%3Aread%20credentials%3Aread
+  &state=<本次随机值>
+  &code_challenge=<本次S256挑战值>
+  &code_challenge_method=S256
 ```
 
-- `state`: En slumpmässig sträng som du själv genererar och som skickas tillbaka oförändrad vid återanropet, för att skydda mot CSRF; **måste valideras**.
-- **PKCE (obligatoriskt för offentliga klienter, rekommenderas även för konfidentiella klienter)**: Generera först en slumpmässig `code_verifier`, och beräkna sedan
-  `code_challenge = BASE64URL( SHA256( code_verifier ) )`, lägg `code_challenge` i auktoriserings-URL:en,
-  och behåll själv `code_verifier` för användning i steg 4.
+Public-klienter måste skicka S256 PKCE. Även om Discovery fortfarande listar `plain`, får Public-klienter inte använda det. Confidential-klienter rekommenderas också att använda S256; om PKCE användes när auktoriseringen initierades måste motsvarande verifier skickas vid utbytet.
 
-När användaren har loggat in och klickat på ”Godkänn” omdirigeras webbläsaren tillbaka till:
+Efter att användaren har samtyckt återgår den till `redirect_uri`, och frågeparametrarna innehåller `code` och det oförändrat returnerade `state`. Vid avslag returneras `error=access_denied`, en felbeskrivning samt `state`. Verifiera först att state matchar den aktuella sessionen innan återanropet hanteras. Auktoriseringskoden är giltig i 10 minuter och kan endast lösas in en gång; efter fel bör anslutningen initieras på nytt, och den gamla återanrops-URL:en ska inte upprepade gånger uppdateras.
 
-```
-<redirect_uri>?code=<auktoriseringskod>&state=<oförändrat returnerat state>
-```
+## Steg 3: Byt till OAuth-token
 
-Om användaren nekar: `<redirect_uri>?error=access_denied&error_description=...&state=...`.
-
-> Auktoriseringskoden är giltig i **10 minuter** och **kan endast användas en gång**.
-
-## Steg 3: Byt auktoriseringskoden mot token
-
-I din **backend** (konfidentiell klient) eller klient (offentlig PKCE-klient) anropar du tokenändpunkten med `code`.
-
-**Konfidentiell klient (med client_secret):**
+Public-klienter löser in direkt från webbläsaren eller klienten; Confidential-klienter löser in på sin egen backend. Begärans brödtext stöder formulärkodning, och följande variabler representerar data som applikationen erhållit vid den här auktoriseringen:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<上一步拿到的 code> \
-  -d client_id=<你的 client_id> \
-  -d client_secret=<你的 client_secret> \
-  -d redirect_uri=<和第 2 步完全一致的回调地址>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI" \
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "code_verifier=$PKCE_VERIFIER"
 ```
 
-**Offentlig klient (PKCE, utan client_secret):**
-```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<code> \
-  -d client_id=<你的 client_id> \
-  -d code_verifier=<第 2 步生成的 code_verifier> \
-  -d redirect_uri=<回调地址>
-```
+Confidential-klienter måste även lägga till formulärfältet `client_secret` på serversidan. `client_secret_post` stöds för närvarande; betrakta inte HTTP Basic-klientautentisering som en metod som stöds.
 
-Lyckat svar (`refresh_token` visas endast om `offline_access` har begärts):
+Läs `access_token`, `token_type`, `expires_in` och det faktiskt beviljade `scope` i ett lyckat svar. `refresh_token` finns endast om `offline_access` både begärdes och godkändes. Behandla inte OAuth access token som API Key för modell-API:t, och skriv inte token, verifier eller auktoriseringskod i loggar, analysändelser eller delningslänkar.
 
-```json
-{
-  "access_token": "<JWT>",
-  "token_type": "Bearer",
-  "expires_in": 1296000,
-  "scope": "openid profile credentials:read",
-  "refresh_token": "<JWT，仅 offline_access 时>"
-}
-```
+## Steg 4: Läs användarinformation och API Key
 
-`access_token` är en JWT som innehåller `scope`-deklarationen; giltighetstiden är **15 dagar** (antalet sekunder i `expires_in`). Refresh Token har en giltighetstid på **30 dagar**.
-
-## Steg 4: Anropa gränssnitt med Access Token
-
-Lägg bara token i `Authorization: Bearer`-huvudet.
-
-**Läs användarinformation (UserInfo, fälten filtreras enligt auktoriserade scope):**
+Använd först OAuth access token för att begära UserInfo:
 
 ```bash
 curl https://auth.acedata.cloud/api/v1/users/me \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-**Anropa plattformens resursgränssnitt** (`platform.acedata.cloud`, auktorisering enligt scope). Till exempel om `credentials:read` har beviljats:
+De returnerade fälten beror på scope: `id` är användaridentifieraren; `profile:read` eller `openid` kan läsa grundläggande information (t.ex. `username`, `nickname`, `avatar`, `is_verified`, `date_joined`, `registration_method`); e-post kräver `email:read`, och telefonnummer samt region kräver `phone:read`. Förlita dig inte på att ej auktoriserade fält alltid finns.
+
+När en befintlig API Key behövs och `credentials:read` har beviljats, använd UserInfos `id` som filtervillkor:
 
 ```bash
-curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<UserInfo返回的id>" \
-  -H "Authorization: Bearer <access_token>"
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=$USER_ID&limit=100&offset=0" \
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-Plattformens backend verifierar `scope`-deklarationen i JWT:n — token kan endast komma åt resurser som användaren har auktoriserat. Om en obehörig resurs nås returneras `403`.
+Den returnerade listan använder `count` och `items`, och Key-fältet är **`items[*].token`**, inte `data[0].value`. `user_id=me` är inte ett giltigt användar-ID för detta gränssnitt. Läs vidare genom flersidiga data med `offset`/`limit`; behandla inte första sidan som alla autentiseringsuppgifter.
 
-## Uppdatera token
+Välj tillämpliga autentiseringsuppgifter utifrån applikation, tjänst och giltig status, och ta inte blint den första. En tom lista betyder inte att auktoriseringen misslyckades; användaren kanske ännu inte har skapat en tillämplig Key. Behörighetskontrollen för OAuth access token och API Key:s egna tjänsteomfattning, kvot och utgångsvillkor är olika begränsningar.
 
-När Access Token har löpt ut, använd Refresh Token för att byta till ett nytt tokenpar (kräver att `offline_access` begärdes från början):
+**Att tillåta läsning av API Key innebär att tredje part kan spara och använda den. Att återkalla OAuth-begäran eller rensa applikationens inloggningsstatus gör inte en redan kopierad API Key ogiltig; användaren måste återkalla eller rotera Key separat i autentiseringsuppgiftshanteringen.**
+
+## Körbart Public / PKCE-webbläsarexempel
+
+Distribuera följande sida till din registrerade `REDIRECT_URI`, och ersätt `CLIENT_ID` och återanropsadressen. Knappen initierar standardauktorisering och läser personuppgifter samt antalet befintliga Key när den återgår till samma sida. Exemplet visar eller sparar inte Key permanent; produktionsapplikationer använder resultaten enligt det faktiska ändamålet. Verifiera först på en fristående webbläsarsida och godkänn sedan enligt iframe-kraven längre fram.
+```html
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Anslut Ace Data Cloud</title>
+<button id="connect" type="button">Anslut konto</button>
+<p id="status" role="status">Inte ansluten</p>
+<script type="module">
+const CLIENT_ID = 'ersätt med ditt client_id';
+const REDIRECT_URI = 'https://your-app.example/connect';
+const AUTH_ORIGIN = 'https://auth.acedata.cloud';
+const button = document.querySelector('#connect');
+const status = document.querySelector('#status');
+const storageKey = state => `ace-oauth:${state}`;
+
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`API:et returnerade HTTP ${response.status}`);
+  return response.json();
+}
+
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  try {
+    const state = base64url(crypto.getRandomValues(new Uint8Array(24)));
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    sessionStorage.setItem(storageKey(state), JSON.stringify({
+      verifier, redirectUri: REDIRECT_URI, createdAt: Date.now()
+    }));
+    const url = new URL('/oauth2/authorize', AUTH_ORIGIN);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
+      scope: 'profile:read credentials:read', state,
+      code_challenge: base64url(new Uint8Array(digest)), code_challenge_method: 'S256'
+    }).toString();
+    window.location.assign(url);
+  } catch {
+    status.textContent = 'Det gick inte att påbörja anslutningen. Kontrollera webbläsarens lagringsinställningar och försök igen.';
+    button.disabled = false;
+  }
+});
+
+async function handleCallback() {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('code') && !url.searchParams.has('error')) return;
+  button.disabled = true;
+  try {
+    const state = url.searchParams.get('state');
+    const raw = state && sessionStorage.getItem(storageKey(state));
+    if (!raw) throw new Error('Auktoriseringssessionen matchar inte, anslut igen.');
+    const transaction = JSON.parse(raw);
+    const age = Date.now() - transaction.createdAt;
+    if (!Number.isFinite(age) || age < 0 || age > 10 * 60 * 1000 ||
+        transaction.redirectUri !== REDIRECT_URI || !transaction.verifier) {
+      throw new Error('Auktoriseringssessionen har upphört, anslut igen.');
+    }
+    sessionStorage.removeItem(storageKey(state));
+    const code = url.searchParams.get('code');
+    const denied = url.searchParams.get('error');
+    for (const key of ['code', 'state', 'error', 'error_description']) url.searchParams.delete(key);
+    window.history.replaceState({}, '', url);
+    if (denied) throw new Error('Auktoriseringen slutfördes inte, du kan ansluta igen.');
+    if (!code) throw new Error('Återanropet saknar auktoriseringskod, anslut igen.');
+    status.textContent = 'Ansluter…';
+    const token = await requestJson(`${AUTH_ORIGIN}/oauth2/token`, {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'authorization_code', client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI, code, code_verifier: transaction.verifier
+      })
+    });
+    if (!token.access_token) throw new Error('Auktoriseringstoken kunde inte hämtas.');
+    const headers = { Authorization: `Bearer ${token.access_token}` };
+    const profile = await requestJson(`${AUTH_ORIGIN}/api/v1/users/me`, { headers });
+    if (!profile.id) throw new Error('Användaridentifierare kunde inte hämtas.');
+    const keysUrl = new URL('https://platform.acedata.cloud/api/v1/credentials/');
+    keysUrl.search = new URLSearchParams({ user_id: profile.id, limit: '100' }).toString();
+    const credentials = await requestJson(keysUrl, { headers });
+    if (!Array.isArray(credentials.items)) throw new Error('Formatet på autentiseringslistan stämmer inte.');
+    const keyCount = credentials.items.filter(item => typeof item.token === 'string' && item.token).length;
+    status.textContent = `Ansluten till ${profile.nickname || profile.username || profile.id}; den här sidan har ${keyCount} API-nycklar.`;
+  } catch (error) {
+    status.textContent = `Anslutningen slutfördes inte: ${error.message || 'nätverksfel'} Klicka på anslut igen.`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+await handleCallback();
+</script>
+</html>
+```
+
+Exemplets återanrop och ingång måste ha samma origin och finnas i samma webbläsarflik/iframe för att kunna läsa den tidigare sparade `sessionStorage`. Produktionsapplikationer bör hantera token i sin egen sessionslösning, hantera utgång och rensa auktoriserings-URL-parametrar efter att svaret har tagits emot; sidans huvudgränssnitt bör renderas först och nätverksfel ska endast påverka anslutningsstatusen.
+
+## iframe på vitmärkta webbplatser
+
+### Kundens webbplats navigerar själv till auktoriseringssidan
+
+Använd vanliga OAuth-parametrar och egen hantering av återanrop; `window.location.assign()` navigerar den aktuella iframen, medan föräldrasidan behålls på den vitmärkta domänen. Det behövs inte att lägga till `embed=studio` för ikoner eller att implementera Studio-meddelandeprotokollet.
+
+Följande villkor måste uppfyllas:
+
+- Applikationssidan och återanropssidan använder HTTPS, är faktiskt åtkomliga och tillåter att den vitmärkta föräldradomänen bäddar in dem via iframe; kontrollera båda sidors `Content-Security-Policy: frame-ancestors` och `X-Frame-Options`.
+- sandbox tillåter de skript, formulär och origin-/lagringsfunktioner som sidan behöver. Vid stöd för popup-inloggning krävs även motsvarande popup-funktioner; använd helst konfigurationen för Website-komponenten som Studio tillhandahåller.
+- Webbläsaren tillåter lagring som krävs för auktoriseringstillståndet i det aktuella inbäddade scenariot. Inloggningstillståndet för den vitmärkta webbplatsen och inloggningstillståndet för AuthFrontend kan skilja sig åt; anta inte att en inloggning på den vitmärkta webbplatsen innebär att användaren redan är inloggad på auktoriseringssidan.
+- Tokenutbytestjänsten i återanropet är tillgänglig, och begäran över olika ursprung tillåter applikationens origin; DNS-, CORS- och HTTP-fel måste alla visa ett tillstånd där användaren kan försöka igen och får inte göra att hela sidan slutar renderas.
+
+Auktoriseringssidan läser OAuth-applikationens logotyp till vänster; till höger läser den webbplatsens favicon/logotyp när webbläsaren kan tillhandahålla förälderns origin och föräldradomänen klarar verifierad webbplatsvalidering, annars visas standardikonen. Detta avgör endast varumärkesvisningen, skapar ingen inloggningssession och ger inte kontobehörigheter till kundsidan.
+
+**Nuvarande begränsning: när vanlig OAuth i en iframe kräver ny inloggning finns det fortfarande en lucka i flödet för att återgå till auktoriseringssidan efter att inloggningen har slutförts.** Före lansering måste ”Auth redan inloggad” och ”Auth inte inloggad/utgången” godkännas separat. Innan denna lucka har åtgärdats och verifierats kan den första inloggningen genomföras med vanlig OAuth på en separat sida, eller med Studio-komponentens auktorisering nedan; lova inte att alla iframe-scenarier fungerar enbart baserat på testresultat där användaren redan är inloggad.
+
+### Auktorisera med Studios aktuella konto
+
+Aktivera OAuth i Studio under ”Inställningar → Startsida → Webbplatskomponenter”, och fyll i `client_id` och den registrerade återanropsadressen. Webbplatsen och återanropet måste använda samma HTTPS-origin och skilja sig från Studios origin. Tredjepartssidan behöver:
+
+1. Skicka `acedatacloud:oauth:ready` till den exakta föräldrawebbplatsens origin, ta emot och validera `acedatacloud:oauth:init`.
+2. Låta knappen generera state och PKCE verifier, skicka `acedatacloud:oauth:authorize` (state, S256 challenge); verifier stannar kvar på den egna sidan.
+3. Validera föräldrafönstret, origin och state, hantera code eller error i `acedatacloud:oauth:result` och växla enligt standardens token-slutpunkt.
+Studio visar auktoriseringssidan i komponentområdet och returnerar auktoriseringskoden via ett meddelande efter att användaren har godkänt, utan att applikationen behöver omdirigera. När ingen är inloggad returneras `login_required`, vid avslag returneras `access_denied`, och vid timeout för väntan returneras `authorization_timeout`. Kontobyten återskapar applikationens iframe och avbryter oavslutade auktoriseringar.
+
+Komponenten begär för närvarande `profile:read credentials:read` och inkluderar inte `offline_access`. Anta inte att en refresh token alltid kan tas emot. `embed=studio` och `embed_origin` hanteras av Studio-värden och auktoriseringssidan; kundsidan behöver endast följa meddelandeprotokollet.
+
+Ett fullständigt knappexempel finns i [Studio-webbkomponentens OAuth-integrationsguide](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
+
+## Livscykel, uppdatering och återkallande
+
+Access token har en standardgiltighet på 15 dagar och uppdatering eller omauktorisering bör planeras utifrån `expires_in` i varje svar; refresh token har som standard 30 dagar, och perioden påverkas av tjänstekonfigurationen. Hårdkoda inte dessa två värden som permanenta löften.
+
+Efter att `offline_access` har beviljats kan följande anropas:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=refresh_token \
-  -d refresh_token=<你的 refresh_token>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=refresh_token \
+  --data-urlencode "refresh_token=$OAUTH_REFRESH_TOKEN"
 ```
 
-Svarsstrukturen är densamma som i steg 3; scope behålls **oförändrat** från den ursprungliga auktoriseringen. Efter uppdatering blir den gamla Refresh Token ogiltig (rotation), spara den nya.
+Uppdatering returnerar nya token, och applikationen bör spara de senaste värdena. Vid uppdatering kontrolleras om applikationen fortfarande är giltig, om användaren är tillgänglig och om behörigheterna fortfarande är beviljade. Vid fel ska den egna anslutningsstatusen rensas och auktorisering genomföras på nytt.
 
-## Återkalla token
+**Den aktuella OAuth-implementeringen för uppdatering garanterar inte att den gamla refresh token omedelbart blir ogiltig efter uppdatering.** Betrakta inte mottagandet av en ny token som att den gamla token har återkallats, och använd inte rotering av en secret som ersättning för att avsluta befintliga token.
+
+Anropssättet för en återkallelsebegäran är:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/revoke \
-  -d token=<access_token 或 refresh_token>
+curl https://auth.acedata.cloud/oauth2/revoke \
+  --data-urlencode "token=$OAUTH_ACCESS_TOKEN"
 ```
 
-## Verkligt exempel: så här är våra egna MCP-servrar anslutna
+**Den aktuella återkallelseändpunkten returnerar HTTP 200, men implementerar inte omedelbar ogiltigförklaring av utfärdade JWT:er.** Applikationen bör rensa sina egna sparade token och får inte betrakta 200 som bevis på att alla utfärdade token eller API-nycklar har blivit ogiltiga. API-nycklar som har läckt eller kopierats måste återkallas eller roteras separat för motsvarande autentiseringsuppgifter.
 
-Ace Data Clouds fler än 15 MCP-servrar (NanoBanana, Midjourney, Suno, Seedance, Kling…) använder just detta flöde för anslutningen ”Sign in with Ace Data Cloud” som visas i Claude Desktop / Cursor: de är alla registrerade som OAuth-appar av typen **offentlig (PKCE)**, begär scope relaterade till `credentials`, och efter att användaren har auktoriserat dem kan MCP-servern anropa `api.acedata.cloud` på användarens vägnar — utan att användaren behöver klistra in en API Key manuellt. Din anslutning är exakt densamma som deras.
+## Vanliga fel och godkännande
 
-## Vanliga fel
+| Symptom／fel                         | Felsökning                                                                    |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `invalid_scope`               | Använd aktuella behörighetsnamn; kontrollera applikationsregistrerade scopes, delegeringsbegränsningar och användarbehörigheter. Discovery-hela katalogen är inte applikationens valbara katalog                      |
+| `invalid_request`             | Obligatoriska parametrar, exakt callback-adress, S256 challenge och method för Public-klienter                        |
+| `invalid_client`              | client ID, applikationsstatus, secret för Confidential-klienter; kontrollera om Basic-autentisering har använts felaktigt             |
+| `invalid_grant`               | code har löpt ut／har förbrukats, verifier eller redirect URI stämmer inte överens; vid uppdatering kontrolleras även ändringar i applikation och behörigheter                 |
+| `access_denied`               | Användaren avböjde, återställ anslutningsknappen, visa inte auktorisering i en loop                                                  |
+| `unsupported_grant_type`      | Stöder för närvarande `authorization_code`, `refresh_token`                             |
+| HTTP 401／403                  | Skilj mellan ogiltig inloggningsstatus, token, auktoriserings-scope och själva resursens åtkomstbehörighet                                     |
+| `Failed to fetch`, DNS／CORS-fel | Kontrollera den faktiska begärandevärden och kundbackendens tillgänglighet; det får inte tillskrivas att ”användaren saknar Key”                                      |
+| Auktoriserad men kan inte läsa Key                   | Använd `platform.acedata.cloud`, verkligt user ID, `items[*].token`; skilj mellan tom lista, sidindelning och felsvar |
+| Hela sidan är tom efter auktoriseringsretur                     | Rendera sidan först; hantera fel separat för callback, token, UserInfo och begäran om autentiseringsuppgifter; låt inte initieringsundantag stoppa hela sidan                      |
+| iframe fortsätter inte efter inloggning                 | Hantera enligt befintliga begränsningar ovan, testa scenarier för ej inloggad, utgången, avslag och återanslutning                                          |
 
-Felsvar har enhetligt formatet `{ "error": "<code>", "error_description": "<mänskligt läsbar beskrivning>" }`:
-
-| error                    | Betydelse / felsökning                                                         |
-| ------------------------ | ------------------------------------------------------------------------------- |
-| `invalid_request`        | Saknade eller ogiltiga parametrar (t.ex. `code` / `client_id` skickades inte) |
-| `invalid_client`         | `client_id` finns inte, appen har inaktiverats eller `client_secret` är fel    |
-| `invalid_grant`          | Auktoriseringskoden finns inte / har löpt ut (>10 minuter) / har redan använts / PKCE-verifiering misslyckades / `redirect_uri` skiljer sig från vid auktorisering |
-| `access_denied`          | Användaren klickade på ”Avvisa” på auktoriseringssidan                         |
-| `unsupported_grant_type` | `grant_type` är inte `authorization_code` eller `refresh_token`                |
-
-## Snabböversikt över begränsningar
-
-| Post                 | Värde                                                                  |
-| -------------------- | ---------------------------------------------------------------------- |
-| Maximalt antal OAuth-appar per konto | 20                                                   |
-| Auktoriseringskodens giltighetstid | 10 minuter, engångsanvändning                              |
-| Access Tokens giltighetstid | 15 dagar                                                        |
-| Refresh Tokens giltighetstid | 30 dagar (rotation)                                          |
-| `redirect_uri`       | Måste exakt matcha det registrerade värdet                              |
-| `client_secret`      | Visas endast en gång vid skapande / rotation, lagras på servern som SHA-256-hash |
-
-## Bädda in en OAuth-app från tredje part på Studios startsida
-
-Studios ”Inställningar → Startsida → Webbplatskomponenter” kan aktivera OAuth och konfigurera tredje parts apps `client_id` och registrerade återanropsadress.
-Webbplatsen och återanropet måste använda HTTPS, ha samma ursprung (protokoll, domännamn och port) och använda ett annat ursprung än Studio.
-`client_secret` får inte fyllas i i konfigurationen; appens hemlighet får endast lagras i tredje partens backend.
-
-Komponenten begär behörigheterna `profile:read credentials:read`. Varje besökare måste samtycka separat; att webbplatsägaren konfigurerar komponenten innebär inte att besökarna auktoriserar den.
-Tredje partens sida genererar ett slumpmässigt `state` och en PKCE verifier, och skickar en S256 challenge till Studio. Studio är värd för den officiella auktoriseringssidan i komponentområdet,
-och efter att användaren har samtyckt får tredje part en engångsauktoriseringskod och anropar token-slutpunkten för att byta den mot en OAuth access token, och läser därefter
-`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;用户ID>` för att läsa befintliga API Key.
-Användar-ID:t kommer från `id` som returneras av föregående steg `GET https://auth.acedata.cloud/api/v1/users/me`; gränssnittet för credential-listan accepterar inte `user_id=me`.
-Studio överför inte sin egen inloggningstoken till tredje part och läser inte heller direkt användarens Key och injicerar den.
-
-Offentliga klienter måste använda **S256 PKCE**. Vid byte till token måste `redirect_uri` skickas med och vara exakt samma som i auktoriseringsbegäran.
-Auktoriseringskoden kan endast lösas in en gång. Före auktorisering kontrolleras om återanropsadressen har registrerats.
-
-Tredje partens sida måste implementera meddelandeprotokollet; en befintlig godtycklig webbsida kan inte anslutas automatiskt bara genom att fylla i en URL.
-Se det fullständiga exemplet i [Guide för Studio OAuth-komponentintegration](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
-
-**Att auktorisera läsning av API Key innebär att tillåta tredje part att spara och använda denna Key. Att återkalla OAuth-auktoriseringen gör inte en Key som tredje part redan har kopierat ogiltig;
-användaren måste dessutom återkalla eller rotera Key.**
+Verifiera minst före leverans: korrekt callback, avslag, felaktigt state, utgången／förbrukad code, ingen Key, nätverksfel, utgången token, saknad erforderlig scope samt första inloggning och kontobyte i iframe-scenarier. Spara inte fullständig code, token eller API Key i testbevis.

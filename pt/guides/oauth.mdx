@@ -1,236 +1,348 @@
 ---
-title: "Integração com \"Entrar com Ace Data Cloud\" (OAuth 2.0)"
+title: "Integrar o Ace Data Cloud OAuth 2.0"
 ---
 
-Faça com que seu próprio produto suporte "Entrar com Ace Data Cloud" e, após a autorização do usuário, **em nome do usuário** leia e escreva seus recursos do Ace Data Cloud (perfil, API Token, assinatura, uso, pedidos etc.). A base é o padrão **modo de código de autorização OAuth 2.0 (Authorization Code) + PKCE**, exatamente igual à integração de login com GitHub / Google — qualquer biblioteca cliente OAuth que você já tenha pode ser usada diretamente.
+Permita que os usuários autorizem seu aplicativo a acessar seu perfil do Ace Data Cloud, assinaturas de serviços, API Key, uso ou pedidos. Use o padrão **Authorization Code + S256 PKCE**: o aplicativo abre a página de autorização e, após o usuário consentir, recebe um `code` de uso único, que é então trocado por um OAuth access token.
 
-> **Cenários adequados**: você está criando um aplicativo de terceiros / Agent / cliente MCP / fluxo de trabalho automatizado e deseja permitir que os usuários façam login com um clique usando uma conta Ace Data Cloud e acessem seus recursos na plataforma conforme necessário, sem precisar que copiem e colem manualmente uma API Key.
+O OAuth access token é usado para acessar as interfaces de recursos da conta; para chamar a API de modelos, use a API Key correspondente. A autorização OAuth não cria automaticamente uma API Key, ativa serviços ou adiciona saldo.
 
-## Referência rápida de termos & endpoints
+## Escolher o método de integração
 
-Todos os endpoints estão em `https://auth.acedata.cloud`, e os endereços mais recentes podem ser obtidos a qualquer momento pelo endpoint de descoberta (Discovery):
+| Método            | Cenários aplicáveis                                | Após a autorização                                           |
+| ------------- | ----------------------------------- | ----------------------------------------------- |
+| Redirecionamento OAuth padrão   | Sites independentes, clientes desktop ou móveis; sites incorporados iniciam a autorização por conta própria            | O navegador retorna ao `redirect_uri` registrado pelo aplicativo, e o aplicativo processa `code` e `state` |
+| Autorização por componente do site Studio | O site incorpora a página inicial do Studio e deseja usar a conta Studio atual do visitante | O Studio envia uma mensagem com o resultado da autorização ao aplicativo, o aplicativo não redireciona e a página original é preservada                  |
+
+O redirecionamento padrão não requer `embed=studio`, `embed_origin` ou `postMessage`. No modo de componente Studio, o host cria a página de autorização e mantém a ponte de mensagens; terceiros devem integrar conforme o protocolo de componentes no final deste documento e não devem montar esses dois parâmetros por conta própria.
+
+## Endpoints e documento de descoberta
 
 ```bash
 curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
 ```
 
-| Finalidade                 | Endpoint                                                |
-| ------------------ | ------------------------------------------------- |
-| Documento de descoberta (Discovery)    | `GET /.well-known/oauth-authorization-server`     |
-| Página de autorização do usuário (redirecionamento do navegador)       | `GET https://auth.acedata.cloud/oauth2/authorize` |
-| Endpoint de token (trocar / atualizar token) | `POST https://auth.acedata.cloud/oauth2/token`    |
-| Revogar token               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
-| Informações do usuário (UserInfo)     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
-| Gerenciamento de registro de aplicativos (autoatendimento)         | `https://auth.acedata.cloud/user/oauth-apps`      |
+| Finalidade                | Endereço                                                                                |
+| ----------------- | --------------------------------------------------------------------------------- |
+| Página de autorização do navegador            | `https://auth.acedata.cloud/oauth2/authorize`                                     |
+| Trocar／atualizar OAuth token | `POST https://auth.acedata.cloud/oauth2/token`                                    |
+| Enviar solicitação de revogação            | `POST https://auth.acedata.cloud/oauth2/revoke`                                   |
+| Informações do usuário atual            | `GET https://auth.acedata.cloud/api/v1/users/me`                                  |
+| Página de gerenciamento de aplicativos OAuth      | [Aplicativos OAuth](https://auth.acedata.cloud/user/oauth-apps)                            |
+| Lista／interface de registro de aplicativos do usuário autenticado   | `https://auth.acedata.cloud/api/v1/oauth2/applications/`                          |
+| Dados públicos do aplicativo usados pela página de autorização      | `GET https://auth.acedata.cloud/api/v1/oauth2/application/<client_id>/`           |
+| API Key existentes do usuário     | `GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;用户ID>&limit=100` |
 
-Recursos compatíveis: `response_type=code`, `grant_types=authorization_code, refresh_token`, `code_challenge_methods=S256, plain`, métodos de autenticação de cliente `client_secret_post` (cliente confidencial) / `none` (cliente público PKCE).
+A interface de gerenciamento de aplicativos requer autenticação de conta conectada e não é uma interface de registro dinâmico anônimo (DCR). Os endereços de descoberta／registro do próprio serviço MCP são entradas diferentes dos endpoints OAuth de conta nesta tabela; ao conectar a um MCP específico, siga a documentação e os resultados de descoberta desse serviço.
 
-## Escopos de permissão (Scope)
+O documento de descoberta é usado para obter endpoints e capacidades de protocolo. O fluxo atual retorna OAuth token e não retorna `id_token`; não processe como um fluxo completo de login OpenID Connect apenas porque existe o scope `openid`.
 
-Solicite conforme o "princípio do menor privilégio"; o usuário verá cada permissão solicitada na página de autorização.
+## Escopos de permissão: use os nomes de scope atuais
 
-**Identidade (compatível com OIDC)**
+`scope` é um nome de permissão separado por espaços e diferencia maiúsculas de minúsculas. Novos aplicativos usam permissões específicas como `profile:read`, `email:read`, `phone:read`.
 
-| Scope     | Significado      | Campos retornados por `/users/me`                                           |
-| --------- | ------- | ---------------------------------------------------------- |
-| `openid`  | Identificador único do usuário  | `id`                                                       |
-| `profile` | Informações básicas    | `username`、`nickname`、`avatar`、`is_verified`、`date_joined` |
-| `email`   | E-mail      | `email`                                                    |
-| `phone`   | Número de celular (sensível) | `phone`、`region`                                           |
+### Onde obter as permissões que podem ser solicitadas
 
-**Recursos da plataforma**
+Após fazer login, a interface da lista de aplicativos OAuth `GET /api/v1/oauth2/applications/` retorna `available_scopes`; o seletor de permissões da página de gerenciamento de aplicativos usa o mesmo catálogo. Estes são os escopos opcionais que aplicativos comuns de autoatendimento devem adotar.
 
-| Scope                                      | Significado                     |
-| ------------------------------------------ | ---------------------- |
-| `applications:read` / `applications:write` | Ler / alterar assinaturas de serviço e cotas do usuário       |
-| `credentials:read` / `credentials:write`   | Ler / criar e revogar API Tokens do usuário |
-| `usage:read`                               | Ler o histórico de chamadas do usuário               |
-| `orders:read` / `orders:write`             | Ler pedidos / criar pedidos e iniciar pagamentos          |
+**O `scopes_supported` do Discovery inclui todos os nomes de permissões reconhecidos pela plataforma, mas não significa que seu aplicativo possa solicitar cada um deles.** A autorização real verifica simultaneamente:
 
-**Agregados (expansão automática)**
+1. se a permissão pode ser delegada a esse tipo de aplicativo;
+2. se a permissão foi registrada nos escopos permitidos deste aplicativo OAuth;
+3. se o usuário atual possui a permissão solicitada.
 
-| Scope            | Expande para                                                                     |
-| ---------------- | ----------------------------------------------------------------------- |
-| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
-| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
-| `platform`       | `platform:read` + `platform:write`                                      |
+Permissões desconhecidas, não registradas, não permitidas para delegação ou que o usuário não possui retornam `invalid_scope`. A troca e a atualização do código de autorização também realizam nova verificação; as permissões não são automaticamente complementadas nem elevadas.
 
-**Especiais**
+### Permissões opcionais para aplicativos comuns de autoatendimento
 
-| Scope            | Significado                                                 |
-| ---------------- | -------------------------------------------------- |
-| `offline_access` | Emite **Refresh Token** (se não for solicitado, apenas Access Token será emitido; após expirar, será necessária nova autorização) |
+A seguir está o catálogo atual (2026-10-09); durante a integração, use `available_scopes` como referência.
 
-> Combinações típicas: "login com um clique" de terceiros = `openid profile`; clientes MCP / IDE que precisam configurar Key automaticamente = `openid profile credentials:read credentials:write`; console de gerenciamento completo = `openid profile email platform offline_access`.
+| Scope                                            | Finalidade                                      |
+| ------------------------------------------------ | --------------------------------------- |
+| `profile:read` / `profile:write`                 | Ler／atualizar perfil pessoal                               |
+| `email:read`                                     | Ler e-mail                                    |
+| `phone:read`                                     | Ler número de telefone e região                                |
+| `billing-profile:read` / `billing-profile:write` | Ler／gerenciar dados de faturamento                               |
+| `applications:read` / `applications:write`       | Ler／gerenciar assinaturas de serviços                               |
+| `credentials:read` / `credentials:write`         | Ler／gerenciar API Key                           |
+| `usage:read`                                     | Ler registros de chamadas                                  |
+| `orders:read` / `orders:write`                   | Ler／criar e gerenciar pedidos                              |
+| `auto-recharge:read` / `auto-recharge:write`     | Ler／gerenciar configurações de recarga automática                             |
+| `recharge-cards:redeem`                          | Resgatar cartões de recarga                                   |
+| `coin:read`                                      | Ler informações relacionadas a moedas                                |
+| `distribution:read`                              | Ler informações de distribuição                                  |
+| `connections:read` / `connections:write`         | Ler／gerenciar conexões                                 |
+| `skills:read` / `skills:write`                   | Ler／gerenciar habilidades                                 |
+| `openid`                                         | A implementação atual também permite que o UserInfo retorne dados básicos; não retorna ID Token    |
+| `offline_access`                                 | Solicitar refresh token para atualizar após o access token expirar |
 
-## Passo 1: registrar um aplicativo OAuth
+Por exemplo, para apenas ler o perfil pessoal, use `profile:read`; para precisar também de e-mail, adicione `email:read`; para ler API Keys existentes, use `profile:read credentials:read`. Solicite `credentials:write` apenas quando realmente precisar criar ou modificar Keys, e adicione `offline_access` quando precisar atualizar.
 
-Abra [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) → "Criar aplicativo", preencha:
+Algumas permissões são destinadas apenas a aplicativos confiáveis aprovados pela plataforma, como `sites:read`, `sites:write`, `platform-tokens:read`; outras permissões não são abertas a aplicativos OAuth comuns de terceiros. Os tipos de cliente `public`／`confidential` descrevem se o secret pode ser mantido em segurança e não têm relação com o aplicativo ser confiável. Aplicativos criados por autoatendimento não podem ativar permissões confiáveis por conta própria.
 
-1. **Nome / descrição / logo do aplicativo**: serão exibidos na página de consentimento de autorização do usuário.
-2. **Tipo de cliente (Client Type)**:
-   - **Confidencial (confidential)** — você possui um backend e pode armazenar com segurança o `client_secret` (serviço Web, serviço backend).
-   - **Público (public)** — frontend puro / desktop / CLI / mobile, **não é possível** armazenar uma chave, sendo obrigatório usar **PKCE**.
-3. **URIs de redirecionamento (Redirect URIs)**: endereços para os quais o usuário será redirecionado após a autorização ser concluída, **devem ser exatamente iguais ao `redirect_uri` enviado quando você iniciar a autorização**, podendo haver vários.
-4. **Escopos de permissão (Scopes)**: marque os scopes de que você precisa na seção anterior.
+`account` é o seletor de permissões de conta usado pelo MCP oficial especificado de gerenciamento de conta, não é um scope de “todas as permissões” para aplicativos de terceiros e não pode ser usado junto com outros scopes. Terceiros devem listar explicitamente as permissões específicas de que precisam.
 
-Após salvar, você receberá o **`client_id`**; clientes confidenciais também exibirão **uma única vez** o **`client_secret`** — salve-o imediatamente, pois não será possível visualizá-lo novamente após fechar (é possível gerar outro em "Rotacionar chave / Rotate Secret" na página de detalhes, e a chave antiga será invalidada imediatamente).
+### Migrar de documentação antiga
 
-> Cada conta pode criar no máximo **20** aplicativos OAuth.
+| Forma antiga                                         | Método atual                       |
+| ------------------------------------------- | -------------------------- |
+| `profile`                                   | `profile:read`             |
+| `email`                                     | `email:read`               |
+| `phone`                                     | `phone:read`               |
+| `platform`、`platform:read`、`platform:write` | Liste individualmente as permissões específicas realmente necessárias; não há valor substituto universal de “selecionar tudo” |
 
-## Passo 2: redirecionar o usuário para a página de autorização
+Os nomes antigos não são aceitos como aliases de compatibilidade. Atualize simultaneamente os scopes registrados do aplicativo OAuth, a URL de autorização e sua própria verificação de permissões; modificar a configuração do aplicativo não adiciona permissões aos tokens já emitidos, sendo necessário que o usuário autorize novamente.
 
-No seu aplicativo, redirecione o navegador do usuário para a página de autorização, incluindo parâmetros de consulta:
+## Etapa 1: registrar um aplicativo OAuth
 
+Abra o [Gerenciamento de aplicativos OAuth](https://auth.acedata.cloud/user/oauth-apps), crie um aplicativo e preencha:
+- Nome, descrição, Logo do aplicativo: exibidos em um lado do aplicativo na página de autorização.
+- Tipo de cliente: para clientes puramente frontend, móveis ou desktop, selecione **Public**; para serviços que podem manter o secret no backend, selecione **Confidential**.
+- Endereço de callback: use HTTPS no ambiente de produção e registre a URL completa que o aplicativo realmente usa para processar o callback.
+- Permissões: selecione os scopes realmente necessários no catálogo fornecido pela página.
+
+Salve o `client_id`. Clientes Confidential devem salvar o `client_secret` no lado do servidor e não podem colocá-lo em HTML, variáveis de build do frontend ou URLs. Clientes Public não usam secret para trocar token; mesmo que a resposta de registro contenha esse campo, ele não pode ser tratado como uma credencial que o cliente pode manter em segredo.
+
+O `redirect_uri` deve ser exatamente idêntico no registro, na autorização e na troca de token, incluindo caminho, barra final e parâmetros de consulta. Cada conta pode criar no máximo 20 aplicativos. O Secret é exibido apenas na criação/rotação; após a rotação, o secret antigo não pode mais realizar trocas que exigem autenticação do cliente.
+
+## Etapa 2: o botão inicia a autorização
+
+A cada clique em conectar, gere um novo `state` aleatório e `code_verifier`, calcule:
+
+```text
+code_challenge = BASE64URL(SHA256(code_verifier))
 ```
+
+Salve o `state`, o verifier e o endereço de callback na própria sessão do aplicativo e, em seguida, abra a página de autorização com os parâmetros codificados em URL:
+
+```text
 https://auth.acedata.cloud/oauth2/authorize
   ?response_type=code
-  &client_id=<你的 client_id>
-  &redirect_uri=<你注册的回调地址>
-  &scope=openid%20profile%20credentials:read
-  &state=<随机防 CSRF 串>
-  &code_challenge=<PKCE 挑战值>          # 公开客户端必填
-  &code_challenge_method=S256            # 公开客户端必填
+  &client_id=<client_id>
+  &redirect_uri=<URL completa de callback>
+  &scope=profile%3Aread%20credentials%3Aread
+  &state=<valor aleatório desta vez>
+  &code_challenge=<valor de desafio S256 desta vez>
+  &code_challenge_method=S256
 ```
 
-- `state`: gere você mesmo uma string aleatória; ela será retornada inalterada no callback e serve para prevenir CSRF; **certifique-se de validá-la**.
-- **PKCE (obrigatório para clientes públicos, também recomendado para clientes confidenciais)**: primeiro gere um `code_verifier` aleatório e depois calcule
-  `code_challenge = BASE64URL( SHA256( code_verifier ) )`; coloque o `code_challenge` na URL de autorização,
-  e guarde o `code_verifier` para uso no passo 4.
+Clientes Public devem enviar PKCE S256. Embora o Discovery também liste `plain`, clientes Public não podem usá-lo. Clientes Confidential também são recomendados a usar S256; se PKCE foi usado ao iniciar a autorização, o verifier correspondente deve ser enviado na troca.
 
-Após o usuário fazer login e clicar em "Concordar", o navegador será redirecionado de volta para:
+Após o usuário consentir, ele retorna ao `redirect_uri`, e os parâmetros de consulta contêm `code` e o `state` retornado sem alteração. Em caso de recusa, retorna `error=access_denied`, a descrição do erro e `state`. Antes de processar o callback, verifique primeiro se o state corresponde à sessão atual. O código de autorização é válido por 10 minutos e só pode ser trocado uma vez; após uma falha, inicie a conexão novamente, não atualize repetidamente a URL de callback antiga.
 
-```
-<redirect_uri>?code=<授权码>&state=<原样返回的 state>
-```
+## Etapa 3: trocar por OAuth token
 
-Se o usuário recusar: `<redirect_uri>?error=access_denied&error_description=...&state=...`.
-
-> O código de autorização é válido por **10 minutos** e **só pode ser usado uma vez**.
-
-## Passo 3: trocar o código de autorização por tokens
-
-No seu **backend** (cliente confidencial) ou cliente (cliente público PKCE), use `code` para chamar o endpoint de token.
-
-**Cliente confidencial (com client_secret):**
+Clientes Public realizam a troca diretamente do navegador ou cliente; clientes Confidential realizam a troca em seu próprio backend. O corpo da solicitação aceita codificação de formulário, e as variáveis abaixo representam os dados obtidos pelo aplicativo nesta autorização:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<上一步拿到的 code> \
-  -d client_id=<你的 client_id> \
-  -d client_secret=<你的 client_secret> \
-  -d redirect_uri=<和第 2 步完全一致的回调地址>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI" \
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "code_verifier=$PKCE_VERIFIER"
 ```
 
-**Cliente público (PKCE, sem client_secret):**
-```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<code> \
-  -d client_id=<你的 client_id> \
-  -d code_verifier=<第 2 步生成的 code_verifier> \
-  -d redirect_uri=<回调地址>
-```
+Clientes Confidential também precisam adicionar o campo de formulário `client_secret` no lado do servidor. Atualmente, `client_secret_post` é suportado; não trate a autenticação de cliente HTTP Basic como um método já suportado.
 
-Retorno em caso de sucesso (o `refresh_token` aparece somente quando `offline_access` foi solicitado):
+Na resposta de sucesso, leia `access_token`, `token_type`, `expires_in` e o `scope` efetivamente concedido. Há `refresh_token` apenas se `offline_access` foi solicitado e aprovado. Não trate o OAuth access token como a API Key da API de modelos, nem grave token, verifier ou código de autorização em logs, eventos de análise ou links compartilhados.
 
-```json
-{
-  "access_token": "<JWT>",
-  "token_type": "Bearer",
-  "expires_in": 1296000,
-  "scope": "openid profile credentials:read",
-  "refresh_token": "<JWT，仅 offline_access 时>"
-}
-```
+## Etapa 4: ler informações do usuário e API Key
 
-O `access_token` é um JWT, contendo a declaração `scope`; o período de validade é de **15 dias** (segundos em `expires_in`). O Refresh Token é válido por **30 dias**.
-
-## Etapa 4: usar o Access Token para chamar a interface
-
-Basta colocar o token no cabeçalho `Authorization: Bearer`.
-
-**Ler informações do usuário (UserInfo, campos filtrados de acordo com o scope autorizado):**
+Primeiro, use o OAuth access token para solicitar UserInfo:
 
 ```bash
 curl https://auth.acedata.cloud/api/v1/users/me \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-**Chamar a interface de recursos da plataforma** (`platform.acedata.cloud`, autenticada por scope). Por exemplo, se `credentials:read` foi concedido:
+Os campos retornados dependem do scope: `id` é o identificador do usuário; `profile:read` ou `openid` permitem ler informações básicas (como `username`, `nickname`, `avatar`, `is_verified`, `date_joined`, `registration_method`); o e-mail requer `email:read`, e o número de telefone e a região requerem `phone:read`. Não dependa de campos não autorizados estarem sempre presentes.
+
+Quando for necessário ter uma API Key existente e `credentials:read` tiver sido aprovado, use o `id` de UserInfo como condição de filtro:
 
 ```bash
-curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<UserInfo返回的id>" \
-  -H "Authorization: Bearer <access_token>"
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=$USER_ID&limit=100&offset=0" \
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-O backend da plataforma verificará a declaração `scope` no JWT — o token só pode acessar os recursos autorizados pelo usuário. Se recursos não autorizados forem acessados, retornará `403`.
+A lista retornada usa `count` e `items`, e o campo da Key é **`items[*].token`**, não `data[0].value`. `user_id=me` não é um ID de usuário válido para esta interface. Para dados em várias páginas, continue lendo conforme `offset`／`limit`; não trate a primeira página como todas as credenciais.
 
-## Atualizar token
+Selecione a credencial aplicável de acordo com o aplicativo, serviço e status de validade; não escolha cegamente a primeira. Uma lista vazia não significa falha de autorização; o usuário talvez ainda não tenha criado uma Key aplicável. O controle de permissões do OAuth access token e o escopo de serviço, cota e condições de expiração da própria API Key são restrições diferentes.
 
-Após o Access Token expirar, use o Refresh Token para trocar por um novo par de tokens (é necessário ter solicitado `offline_access` originalmente):
+**Permitir a leitura da API Key significa que terceiros podem salvá-la e usá-la. Revogar a solicitação OAuth ou limpar o estado de login do aplicativo não invalidará a API Key já copiada; é necessário que o usuário revogue ou faça a rotação dessa Key separadamente no gerenciamento de credenciais.**
+
+## Exemplo executável de navegador Public / PKCE
+
+Implante a página abaixo no `REDIRECT_URI` que você registrou e substitua `CLIENT_ID` e o endereço de callback. O botão inicia a autorização padrão e, após retornar à mesma página, lê o perfil e a quantidade de Keys existentes. O exemplo não exibe nem persiste Keys; aplicações de produção consomem os resultados conforme o uso real. Primeiro, valide em uma página independente do navegador e, em seguida, faça a aceitação de acordo com os requisitos de iframe posteriores.
+```html
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Conectar ao Ace Data Cloud</title>
+<button id="connect" type="button">Conectar conta</button>
+<p id="status" role="status">Ainda não conectado</p>
+<script type="module">
+const CLIENT_ID = 'substitua pelo seu client_id';
+const REDIRECT_URI = 'https://your-app.example/connect';
+const AUTH_ORIGIN = 'https://auth.acedata.cloud';
+const button = document.querySelector('#connect');
+const status = document.querySelector('#status');
+const storageKey = state => `ace-oauth:${state}`;
+
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`A interface retornou HTTP ${response.status}`);
+  return response.json();
+}
+
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  try {
+    const state = base64url(crypto.getRandomValues(new Uint8Array(24)));
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    sessionStorage.setItem(storageKey(state), JSON.stringify({
+      verifier, redirectUri: REDIRECT_URI, createdAt: Date.now()
+    }));
+    const url = new URL('/oauth2/authorize', AUTH_ORIGIN);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
+      scope: 'profile:read credentials:read', state,
+      code_challenge: base64url(new Uint8Array(digest)), code_challenge_method: 'S256'
+    }).toString();
+    window.location.assign(url);
+  } catch {
+    status.textContent = 'Não foi possível iniciar a conexão; verifique as configurações de armazenamento do navegador e tente novamente.';
+    button.disabled = false;
+  }
+});
+
+async function handleCallback() {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('code') && !url.searchParams.has('error')) return;
+  button.disabled = true;
+  try {
+    const state = url.searchParams.get('state');
+    const raw = state && sessionStorage.getItem(storageKey(state));
+    if (!raw) throw new Error('A sessão de autorização não corresponde; reconecte-se.');
+    const transaction = JSON.parse(raw);
+    const age = Date.now() - transaction.createdAt;
+    if (!Number.isFinite(age) || age < 0 || age > 10 * 60 * 1000 ||
+        transaction.redirectUri !== REDIRECT_URI || !transaction.verifier) {
+      throw new Error('A sessão de autorização expirou; reconecte-se.');
+    }
+    sessionStorage.removeItem(storageKey(state));
+    const code = url.searchParams.get('code');
+    const denied = url.searchParams.get('error');
+    for (const key of ['code', 'state', 'error', 'error_description']) url.searchParams.delete(key);
+    window.history.replaceState({}, '', url);
+    if (denied) throw new Error('A autorização não foi concluída; você pode reconectar-se.');
+    if (!code) throw new Error('O retorno de chamada não possui código de autorização; reconecte-se.');
+    status.textContent = 'Conectando…';
+    const token = await requestJson(`${AUTH_ORIGIN}/oauth2/token`, {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'authorization_code', client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI, code, code_verifier: transaction.verifier
+      })
+    });
+    if (!token.access_token) throw new Error('Não foi obtido o token de autorização.');
+    const headers = { Authorization: `Bearer ${token.access_token}` };
+    const profile = await requestJson(`${AUTH_ORIGIN}/api/v1/users/me`, { headers });
+    if (!profile.id) throw new Error('Não foi obtido o identificador do usuário.');
+    const keysUrl = new URL('https://platform.acedata.cloud/api/v1/credentials/');
+    keysUrl.search = new URLSearchParams({ user_id: profile.id, limit: '100' }).toString();
+    const credentials = await requestJson(keysUrl, { headers });
+    if (!Array.isArray(credentials.items)) throw new Error('O formato da lista de credenciais não corresponde.');
+    const keyCount = credentials.items.filter(item => typeof item.token === 'string' && item.token).length;
+    status.textContent = `Conectado a ${profile.nickname || profile.username || profile.id}; esta página possui ${keyCount} chaves de API.`;
+  } catch (error) {
+    status.textContent = `A conexão não foi concluída: ${error.message || 'Erro de rede'} Clique em conectar novamente.`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+await handleCallback();
+</script>
+</html>
+```
+
+O retorno de chamada e a entrada do exemplo devem estar na mesma origem e na mesma aba do navegador/iframe para que seja possível ler o `sessionStorage` salvo anteriormente. Aplicações de produção devem gerenciar tokens em seu próprio esquema de sessão, tratar expirações e limpar os parâmetros da URL de autorização após receber a resposta; a interface principal da página deve ser renderizada primeiro, e falhas de rede devem afetar apenas o status da conexão.
+
+## iframe em sites white-label
+
+### O site do cliente redireciona por conta própria para a página de autorização
+
+Basta usar parâmetros OAuth padrão e seu próprio tratamento de retorno de chamada; `window.location.assign()` navega no iframe atual, e a página pai permanece no domínio white-label. Não é necessário adicionar `embed=studio` para o ícone nem implementar o protocolo de mensagens do Studio.
+
+As seguintes condições devem ser atendidas:
+
+- A página da aplicação e a página de retorno de chamada usam HTTPS, são realmente acessíveis e permitem incorporação via iframe pelo domínio pai white-label; verifique `Content-Security-Policy: frame-ancestors` e `X-Frame-Options` de ambas as partes.
+- O sandbox permite os scripts, formulários e capacidades de origem/armazenamento exigidos pela página. Ao oferecer suporte a login em janela pop-up, também são necessárias as capacidades correspondentes de pop-up; dê preferência à configuração do componente Website fornecida pelo Studio.
+- O navegador permite o uso do armazenamento necessário para o estado de autorização no cenário de incorporação atual. O estado de login do site white-label e o estado de login do AuthFrontend podem ser diferentes; não se deve supor que estar conectado ao site white-label significa já estar conectado à página de autorização.
+- O serviço de troca de token no retorno de chamada está disponível, e as solicitações entre origens permitem a origem da aplicação; erros de DNS, CORS e HTTP devem todos exibir um status que permita nova tentativa e não podem interromper a renderização de toda a página.
+
+O lado esquerdo da página de autorização lê o Logo do aplicativo OAuth; o lado direito lê o favicon/logo desse Site quando o navegador pode fornecer a origem pai e o domínio pai passa pela verificação de site validado, caso contrário exibe o ícone padrão. Isso determina apenas a exibição da marca, não estabelece uma sessão de login nem fornece permissões de conta à página do cliente.
+
+**Limitação atual: quando o OAuth comum precisa de novo login dentro de um iframe, ainda há uma lacuna no fluxo de continuar de volta à página de autorização após a conclusão do login.** Antes do lançamento, é necessário validar separadamente “Auth conectado” e “Auth não conectado/expirado”. Antes que essa lacuna seja corrigida e validada, o primeiro login pode usar uma página independente para concluir o OAuth padrão ou usar a autorização por componente Studio abaixo; não prometa que todos os cenários de iframe estão disponíveis baseando-se apenas em resultados de testes já conectados.
+
+### Usar a autorização da conta atual do Studio
+
+Em Studio, ative OAuth em «Configurações → Página inicial → Componentes do site» e preencha `client_id` e o endereço de retorno de chamada registrado. O site e o retorno de chamada devem usar a mesma origem HTTPS e ser diferentes da origem do Studio. A página de terceiros precisa:
+
+1. Enviar `acedatacloud:oauth:ready` para a origin exata do site pai, receber e validar `acedatacloud:oauth:init`.
+2. O botão gera state e o verificador PKCE, envia `acedatacloud:oauth:authorize` (state, desafio S256); o verificador permanece em sua própria página.
+3. Validar a janela pai, a origin e o state, processar o code ou error em `acedatacloud:oauth:result` e trocar no endpoint de token padrão.
+O Studio exibe a página de autorização na área de componentes e, após o usuário concordar, retorna o código de autorização por mensagem; a aplicação não precisa redirecionar. Quando não há login, retorna `login_required`; em caso de recusa, retorna `access_denied`; quando a espera expira, retorna `authorization_timeout`. Mudanças de conta recriam o iframe da aplicação e cancelam autorizações não concluídas.
+
+O componente atualmente solicita `profile:read credentials:read`, sem incluir `offline_access`. Não presuma que sempre será possível receber um refresh token. `embed=studio` e `embed_origin` são mantidos pelo host do Studio e pela página de autorização; a página do cliente precisa apenas seguir o protocolo de mensagens.
+
+Veja o exemplo completo de botão no [Guia de integração OAuth de componentes do site Studio](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
+
+## Ciclo de vida, atualização e revogação
+
+O período de validade padrão do access token é de 15 dias, e a atualização ou nova autorização deve ser agendada com base no `expires_in` de cada resposta; o refresh token tem validade padrão de 30 dias, e o prazo é afetado pela configuração do serviço. Não codifique esses dois valores como compromissos permanentes.
+
+Após obter permissão para `offline_access`, é possível chamar:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=refresh_token \
-  -d refresh_token=<你的 refresh_token>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=refresh_token \
+  --data-urlencode "refresh_token=$OAUTH_REFRESH_TOKEN"
 ```
 
-A estrutura de retorno é a mesma da etapa 3; o scope será **mantido inalterado** a partir da autorização original. Após a atualização, o antigo Refresh Token se torna inválido (rotação); salve o novo.
+A atualização retorna novos tokens, e a aplicação deve salvar os valores mais recentes. Durante a atualização, será verificado se a aplicação ainda é válida, se o usuário está disponível e se as permissões continuam concedidas. Em caso de falha, limpe o próprio estado de conexão e autorize novamente.
 
-## Revogar token
+**A implementação atual de atualização OAuth não garante que o refresh token antigo se torne inválido imediatamente após a atualização.** Não considere a obtenção de um novo token como prova de que o token antigo foi revogado, nem use a rotação de secret como substituta para encerrar tokens existentes.
+
+A forma de chamar a solicitação de revogação é:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/revoke \
-  -d token=<access_token 或 refresh_token>
+curl https://auth.acedata.cloud/oauth2/revoke \
+  --data-urlencode "token=$OAUTH_ACCESS_TOKEN"
 ```
 
-## Caso real: é assim que nossos próprios servidores MCP se conectam
+**O endpoint de revogação atual retorna HTTP 200, mas não implementa a invalidação imediata de JWTs já emitidos.** A aplicação deve limpar os tokens que ela própria salvou e não pode considerar o 200 como prova de que todos os tokens ou API Keys emitidos foram invalidados. Para API Keys que foram expostas ou copiadas, revogue ou rotacione as credenciais correspondentes separadamente.
 
-Os mais de 15 servidores MCP da Ace Data Cloud (NanoBanana, Midjourney, Suno, Seedance, Kling…) usam este fluxo para a conexão “Sign in with Ace Data Cloud” exibida no Claude Desktop / Cursor: todos são registrados como aplicações OAuth do tipo **público (PKCE)**, solicitam scopes relacionados a `credentials` e, após a autorização do usuário, os servidores MCP podem chamar `api.acedata.cloud` em nome do usuário — sem que o usuário precise colar manualmente uma API Key. Sua integração é exatamente igual à deles.
+## Erros comuns e aceitação
 
-## Erros comuns
+| Sintoma／erro                         | Verificação                                                                    |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `invalid_scope`               | Use os nomes de permissões atuais; verifique o escopo de registro da aplicação, as restrições de delegação e as permissões do usuário. Todo o diretório Discovery não é um diretório selecionável pela aplicação                      |
+| `invalid_request`             | Parâmetros obrigatórios, endereço de callback exato, challenge e method S256 do cliente Public                        |
+| `invalid_client`              | client ID, estado da aplicação, secret do cliente Confidential; verifique se a autenticação Basic foi usada incorretamente             |
+| `invalid_grant`               | code expirado／já consumido, verifier ou redirect URI não correspondem; durante a atualização, também verifique mudanças na aplicação e nas permissões                 |
+| `access_denied`               | O usuário recusou; restaure o botão de conexão, não exiba repetidamente a autorização                                                  |
+| `unsupported_grant_type`      | Atualmente são suportados `authorization_code` e `refresh_token`                             |
+| HTTP 401／403                  | Diferencie estado de login inválido, token, scope de autorização e permissões de acesso do próprio recurso                                     |
+| `Failed to fetch`、erros de DNS／CORS | Verifique o host real da solicitação e a disponibilidade do backend do cliente; não atribua isso a “o usuário não tem Key”                                      |
+| Autorizado, mas não consegue ler a Key                   | Use `platform.acedata.cloud`, o user ID real, `items[*].token`; diferencie lista vazia, paginação e respostas com falha |
+| Página inteira em branco após o retorno da autorização                     | Renderize a página primeiro; trate separadamente erros de callback, token, UserInfo e solicitação de credenciais; não permita que uma exceção de inicialização interrompa a página inteira                      |
+| iframe não continua após o login                 | Trate conforme as limitações existentes acima; teste cenários de não autenticado, expirado, recusa e reconexão                                          |
 
-A resposta de erro é uniformemente `{ "error": "<code>", "error_description": "<explicação legível por humanos>" }`:
-
-| error                    | Significado / verificação                                                         |
-| ------------------------ | --------------------------------------------------------------------------------- |
-| `invalid_request`        | Parâmetro ausente ou inválido (por exemplo, `code` / `client_id` não foi enviado) |
-| `invalid_client`         | `client_id` não existe, a aplicação foi desativada ou o `client_secret` está incorreto |
-| `invalid_grant`          | Código de autorização não existe / expirou (>10 minutos) / já foi usado / falha na verificação PKCE / `redirect_uri` não corresponde ao da autorização |
-| `access_denied`          | O usuário clicou em “Recusar” na página de autorização                            |
-| `unsupported_grant_type` | `grant_type` não é `authorization_code` nem `refresh_token`                       |
-
-## Referência rápida de limites
-
-| Item                 | Valor                                                           |
-| -------------------- | --------------------------------------------------------------- |
-| Máximo de aplicações OAuth por conta | 20                                              |
-| Validade do código de autorização | 10 minutos, uso único                            |
-| Validade do Access Token | 15 dias                                                   |
-| Validade do Refresh Token | 30 dias (rotação)                                       |
-| `redirect_uri`       | Deve corresponder exatamente ao valor registrado                |
-| `client_secret`      | Exibido apenas uma vez na criação / rotação, armazenado no servidor como hash SHA-256 |
-
-## Incorporar aplicações OAuth de terceiros na página inicial do Studio
-
-Em “Configurações → Página inicial → Componentes do site” do Studio, é possível ativar OAuth e configurar o `client_id` e o endereço de retorno registrado da aplicação de terceiros.
-O site e o retorno devem usar HTTPS, ter a mesma origem (protocolo, domínio e porta) e usar uma origem diferente da do Studio.
-O `client_secret` não deve ser preenchido na configuração; a chave da aplicação só pode ser armazenada no backend de terceiros.
-
-As permissões solicitadas pelo componente são `profile:read credentials:read`. Cada visitante precisa consentir separadamente; a configuração do componente pelo proprietário do site não representa a autorização dos visitantes.
-A página de terceiros gera um `state` aleatório e um verifier PKCE, e envia um challenge S256 ao Studio. O Studio hospeda a página oficial de autorização na área do componente,
-e, após o consentimento do usuário, terceiros recebem um código de autorização de uso único, chamam o endpoint de token para trocá-lo por um OAuth access token e, em seguida, acessam
-`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=&lt;用户ID>` para ler a API Key existente.
-O ID do usuário vem do `id` retornado pela etapa anterior `GET https://auth.acedata.cloud/api/v1/users/me`; a interface de lista de credenciais não aceita `user_id=me`.
-O Studio não transmite seu próprio token de login a terceiros, nem lê e injeta diretamente a Key do usuário.
-
-Clientes públicos devem usar **S256 PKCE**. Ao trocar o token, é obrigatório enviar o `redirect_uri` exatamente igual ao da solicitação de autorização.
-O código de autorização só pode ser trocado uma vez. Antes da autorização, será verificado se o endereço de retorno foi registrado.
-
-A página de terceiros precisa implementar o protocolo de mensagens; qualquer página web existente não pode ser integrada automaticamente apenas preenchendo uma URL.
-Veja o exemplo completo em [Guia de integração do componente OAuth do Studio](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
-
-**Autorizar a leitura da API Key equivale a permitir que terceiros salvem e usem essa Key. Cancelar a autorização OAuth não invalida a Key que terceiros já copiaram;
-o usuário precisa revogar ou rotacionar a Key separadamente.**
+Antes da entrega, valide pelo menos: callback correto, recusa, state incorreto, code expirado／já consumido, ausência de Key, falha de rede, expiração de token, ausência do scope necessário e, em cenários de iframe, o primeiro login e a troca de conta. Não salve code, token ou API Key completos nas evidências de teste.
