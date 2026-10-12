@@ -1,237 +1,348 @@
 ---
-title: "「Kirjaudu sisään Ace Data Cloudilla」 -toiminnon (OAuth 2.0) integrointi"
+title: "Ace Data Cloud OAuth 2.0 -yhteyden muodostaminen"
 ---
 
-Anna oman tuotteesi tukea toimintoa 「Kirjaudu sisään Ace Data Cloudilla」 ja lue sekä kirjoita käyttäjän valtuutuksen jälkeen **käyttäjän puolesta** hänen Ace Data Cloud -resurssejaan (profiili, API Token, tilaukset, käyttö, tilaukset jne.). Taustalla on vakio **OAuth 2.0 -valtuutuskoodimalli (Authorization Code) + PKCE**, ja integrointi on täysin samanlainen kuin GitHub- / Google-kirjautumisessa — voit käyttää suoraan mitä tahansa olemassa olevaa OAuth-asiakaskirjastoasi.
+Anna käyttäjien valtuuttaa sovelluksesi käyttämään heidän Ace Data Cloud -profiiliaan, palvelutilauksiaan, API-avaimiaan, käyttöään tai tilauksiaan. Käytä standardia **Authorization Code + S256 PKCE**: sovellus avaa valtuutussivun, käyttäjä saa suostumuksen jälkeen kertakäyttöisen `code`-koodin, joka vaihdetaan OAuth access tokeniin.
 
-> **Sopivat käyttötapaukset**: Teet kolmannen osapuolen sovellusta / Agentia / MCP-asiakasta / automatisoitua työnkulkua ja haluat käyttäjien kirjautuvan sisään Ace Data Cloud -tilillään yhdellä painalluksella sekä käyttää tarvittaessa heidän alustaresurssejaan ilman, että käyttäjän tarvitsee kopioida ja liittää API Keytä manuaalisesti.
+OAuth access tokenia käytetään tiliresurssien rajapintojen käyttämiseen; mallin API:n kutsumiseen käytetään vastaavaa API-avainta. OAuth-valtuutus ei automaattisesti luo API-avainta, ota palvelua käyttöön tai lisää saldoa.
 
-## Termit & päätepisteiden pikaopas
+## Integraatiotavan valitseminen
 
-Kaikki päätepisteet ovat osoitteessa `https://auth.acedata.cloud`, ja uusimmat osoitteet voi hakea milloin tahansa löytöpäätepisteen (Discovery) kautta:
+| Tapa            | Käyttötapaus                                | Valtuutuksen valmistuttua                                           |
+| ------------- | ----------------------------------- | ----------------------------------------------- |
+| Tavallinen OAuth-uudelleenohjaus   | Itsenäinen verkkosivusto, työpöytä- tai mobiiliasiakas; upotettu verkkosivusto käynnistää valtuutuksen itse            | Selain palaa sovelluksen rekisteröimään `redirect_uri`-osoitteeseen, sovellus käsittelee `code`- ja `state`-arvot |
+| Studio-verkkosivustokomponentin valtuutus | Verkkosivusto upottaa Studion etusivun ja haluaa käyttää vierailijan nykyistä Studio-tiliä | Studio lähettää sovellukselle viestin valtuutustuloksesta, sovellusta ei uudelleenohjata ja alkuperäinen sivu säilyy                  |
+
+Tavallinen uudelleenohjaus ei edellytä `embed=studio`-, `embed_origin`- tai `postMessage`-asetusta. Studio-komponenttitilassa isäntä luo valtuutussivun ja ylläpitää viestisiltaa; kolmannet osapuolet integroituvat tämän asiakirjan lopussa olevan komponenttiprotokollan mukaisesti eivätkä muodosta näitä kahta parametria itse.
+
+## Päätepisteet ja löytöasiakirja
 
 ```bash
 curl https://auth.acedata.cloud/.well-known/oauth-authorization-server
 ```
 
-| Käyttötarkoitus                 | Päätepiste                                                |
-| ------------------ | ------------------------------------------------- |
-| Löytöasiakirja (Discovery)    | `GET /.well-known/oauth-authorization-server`     |
-| Käyttäjän valtuutussivu (selainsiirto)       | `GET https://auth.acedata.cloud/oauth2/authorize` |
-| Token-päätepiste (tokenin vaihto / päivitys) | `POST https://auth.acedata.cloud/oauth2/token`    |
-| Tokenin peruutus               | `POST https://auth.acedata.cloud/oauth2/revoke`   |
-| Käyttäjätiedot (UserInfo)     | `GET https://auth.acedata.cloud/api/v1/users/me`  |
-| Sovellusrekisteröinnin hallinta (itsepalvelu)         | `https://auth.acedata.cloud/user/oauth-apps`      |
+| Käyttötarkoitus                | Osoite                                                                                |
+| ----------------- | --------------------------------------------------------------------------------- |
+| Selaimen valtuutussivu            | `https://auth.acedata.cloud/oauth2/authorize`                                     |
+| OAuth tokenin vaihtaminen／päivittäminen | `POST https://auth.acedata.cloud/oauth2/token`                                    |
+| Peruutuspyynnön lähettäminen            | `POST https://auth.acedata.cloud/oauth2/revoke`                                   |
+| Nykyisen käyttäjän tiedot            | `GET https://auth.acedata.cloud/api/v1/users/me`                                  |
+| OAuth-sovellusten hallintasivu      | [OAuth-sovellukset](https://auth.acedata.cloud/user/oauth-apps)                            |
+| Kirjautuneen käyttäjän sovellusluettelo／rekisteröintirajapinta   | `https://auth.acedata.cloud/api/v1/oauth2/applications/`                          |
+| Valtuutussivun käyttämät julkiset sovellustiedot      | `GET https://auth.acedata.cloud/api/v1/oauth2/application/<client_id>/`           |
+| Käyttäjän olemassa olevat API-avaimet     | `GET https://platform.acedata.cloud/api/v1/credentials/?user_id=<käyttäjätunnus>&limit=100` |
 
-Tuetut ominaisuudet: `response_type=code`, `grant_types=authorization_code, refresh_token`, `code_challenge_methods=S256, plain`, asiakkaan todennustavat `client_secret_post` (luottamuksellinen asiakas) / `none` (PKCE-julkinen asiakas).
+Sovellusten hallintarajapinta edellyttää tilin kirjautumistodennusta; se ei ole anonyymi dynaamisen rekisteröinnin (DCR) rajapinta. MCP-palvelun omat löytö-/rekisteröintiosoitteet ovat eri sisääntulopisteitä kuin tämän taulukon tilin OAuth-päätepisteet; kun yhdistät tiettyyn MCP:hen, toimi kyseisen palvelun dokumentaation ja löytötulosten mukaisesti.
 
-## Käyttöoikeusalueet (Scope)
+Löytöasiakirjaa käytetään päätepisteiden ja protokollaominaisuuksien hakemiseen. Nykyinen työnkulku palauttaa OAuth tokenin, ei `id_token`ia; älä käsittele sitä kokonaisena OpenID Connect -kirjautumisvirtana vain siksi, että `openid` scope on olemassa.
 
-Pyydä 「vähimmäisoikeuksien」 mukaisesti; käyttäjä näkee valtuutussivulla jokaisen pyytämäsi käyttöoikeuden.
+## Käyttöoikeusalueet: käytä nykyisiä scope-nimiä
 
-**Identiteettiin liittyvät (OIDC-yhteensopivat)**
+`scope` on välilyönnein eroteltu, kirjainkoon huomioiva käyttöoikeusnimien luettelo. Uudet sovellukset käyttävät tarkkoja oikeuksia, kuten `profile:read`, `email:read` ja `phone:read`.
 
-| Scope     | Merkitys      | `/users/me` palautettavat kentät                                           |
-| --------- | ------- | ---------------------------------------------------------- |
-| `openid`  | Käyttäjän yksilöllinen tunniste  | `id`                                                       |
-| `profile` | Perustiedot    | `username`、`nickname`、`avatar`、`is_verified`、`date_joined` |
-| `email`   | Sähköposti      | `email`                                                    |
-| `phone`   | Puhelinnumero (arkaluonteinen) | `phone`、`region`                                           |
+### Mistä haetaan haettavissa olevat oikeudet
 
-**Alustaresurssit**
+Kirjautumisen jälkeen OAuth-sovellusluettelorajapinta `GET /api/v1/oauth2/applications/` palauttaa `available_scopes`-arvon; sovellusten hallintasivun käyttöoikeusvalitsin käyttää samaa luetteloa. Nämä ovat tavallisten itsepalvelusovellusten käytettävissä olevat valinnaiset alueet.
 
-| Scope                                      | Merkitys                     |
-| ------------------------------------------ | ---------------------- |
-| `applications:read` / `applications:write` | Käyttäjän palvelutilausten ja kiintiöiden luku / muokkaus       |
-| `credentials:read` / `credentials:write`   | Käyttäjän API Tokenien luku / luonti ja peruutus |
-| `usage:read`                               | Käyttäjän kutsuhistorian luku               |
-| `orders:read` / `orders:write`             | Tilausten luku / tilauksen tekeminen ja maksun käynnistäminen          |
+**Discoveryn `scopes_supported` sisältää kaikki alustan tunnistamat käyttöoikeusnimet, eikä tarkoita, että sovelluksesi voi hakea jokaista niistä.** Todellinen valtuutus tarkistaa samanaikaisesti:
 
-**Koostetut (laajennetaan automaattisesti)**
+1. onko oikeus sallittu delegoitavaksi kyseiselle sovellustyypille;
+2. onko oikeus rekisteröity tämän OAuth-sovelluksen sallittuihin alueisiin;
+3. onko nykyisellä käyttäjällä pyydetty oikeus.
 
-| Scope            | Laajennetaan muotoon                                                                     |
-| ---------------- | ----------------------------------------------------------------------- |
-| `platform:read`  | `applications:read` + `credentials:read` + `usage:read` + `orders:read` |
-| `platform:write` | `applications:write` + `credentials:write` + `orders:write`             |
-| `platform`       | `platform:read` + `platform:write`                                      |
+Tuntemattomat, rekisteröimättömät, delegointiin kielletyt tai käyttäjältä puuttuvat oikeudet palauttavat `invalid_scope`-virheen. Ne tarkistetaan uudelleen myös valtuutuskoodin vaihdon ja päivityksen yhteydessä; oikeuksia ei täydennetä tai koroteta automaattisesti.
 
-**Erityiset**
+### Tavallisten itsepalvelusovellusten valittavat oikeudet
 
-| Scope            | Merkitys                                                 |
-| ---------------- | -------------------------------------------------- |
-| `offline_access` | Myöntää **Refresh Tokenin** (jos sitä ei pyydetä, myönnetään vain Access Token; vanhenemisen jälkeen valtuutus on tehtävä uudelleen) |
+Seuraava on nykyinen luettelo (2026-10-09); integraatiossa käytä `available_scopes`-arvoa ensisijaisena lähteenä.
 
-> Tyypilliset yhdistelmät: kolmannen osapuolen 「yhden napsautuksen kirjautuminen」 = `openid profile`; MCP / IDE -asiakas tarvitsee automaattista Keyn määritystä varten = `openid profile credentials:read credentials:write`; täydellinen hallintapaneeli = `openid profile email platform offline_access`.
+| Scope                                            | Käyttötarkoitus                                      |
+| ------------------------------------------------ | --------------------------------------- |
+| `profile:read` / `profile:write`                 | Profiilin lukeminen／päivittäminen                               |
+| `email:read`                                     | Sähköpostiosoitteen lukeminen                                    |
+| `phone:read`                                     | Puhelinnumeron ja alueen lukeminen                                |
+| `billing-profile:read` / `billing-profile:write` | Laskutusprofiilin lukeminen／hallinta                               |
+| `applications:read` / `applications:write`       | Palvelutilausten lukeminen／hallinta                               |
+| `credentials:read` / `credentials:write`         | API-avainten lukeminen／hallinta                           |
+| `usage:read`                                     | Kutsutietueiden lukeminen                                  |
+| `orders:read` / `orders:write`                   | Tilausten lukeminen／luominen ja hallinta                              |
+| `auto-recharge:read` / `auto-recharge:write`     | Automaattisen latauksen asetusten lukeminen／hallinta                             |
+| `recharge-cards:redeem`                          | Latauskorttien lunastaminen                                   |
+| `coin:read`                                      | Kolikoihin liittyvien tietojen lukeminen                                |
+| `distribution:read`                              | Jakelutietojen lukeminen                                  |
+| `connections:read` / `connections:write`         | Yhteyksien lukeminen／hallinta                                 |
+| `skills:read` / `skills:write`                   | Taitojen lukeminen／hallinta                                 |
+| `openid`                                         | Nykyinen toteutus sallii myös UserInfon palauttaa perustiedot; ei palauta ID Tokenia    |
+| `offline_access`                                 | Refresh tokenin pyytäminen access tokenin vanhennuttua tapahtuvaa päivitystä varten |
 
-## Vaihe 1: Rekisteröi OAuth-sovellus
+Esimerkiksi pelkkään profiilin lukemiseen käytä `profile:read`; lisää `email:read`, jos tarvitset myös sähköpostin; olemassa olevien API-avainten lukemiseen käytä `profile:read credentials:read`. Hae `credentials:write` vain, kun avaimia todella tarvitsee luoda tai muokata, ja lisää `offline_access`, kun tarvitset päivityksen.
 
-Avaa [auth.acedata.cloud/user/oauth-apps](https://auth.acedata.cloud/user/oauth-apps) → 「Luo sovellus」, ja täytä:
+Jotkin oikeudet ovat vain alustan hyväksymien luotettujen sovellusten käytössä, esimerkiksi `sites:read`, `sites:write` ja `platform-tokens:read`; jotkin muut oikeudet eivät ole avoinna tavallisille kolmannen osapuolen OAuth-sovelluksille. Asiakastyyppi `public`／`confidential` kuvaa, voidaanko secret säilyttää, eikä sitä, onko sovellus luotettu. Itsepalveluna luodut sovellukset eivät voi ottaa luotettuja oikeuksia käyttöön itse.
 
-1. **Sovelluksen nimi / kuvaus / logo**: Näytetään käyttäjän valtuutuksen suostumussivulla.
-2. **Asiakastyyppi (Client Type)**:
-   - **Luottamuksellinen (confidential)** — sinulla on taustajärjestelmä, joka voi säilyttää `client_secret`-salaisuuden turvallisesti (Web-palvelu, taustapalvelu).
-   - **Julkinen (public)** — pelkkä käyttöliittymä / työpöytä / CLI / mobiilipääte, joka **ei voi** säilyttää salaisuutta, ja sen on käytettävä **PKCE:tä**.
-3. **Paluuosoitteet (Redirect URIs)**: Osoitteet, joihin käyttäjä uudelleenohjataan valtuutuksen valmistuttua. Niiden **on oltava täysin samat kuin valtuutusta käynnistettäessä välitetty `redirect_uri`**, ja niitä voi lisätä useita.
-4. **Käyttöoikeusalueet (Scopes)**: Valitse edellisestä osiosta tarvitsemasi scopet.
+`account` on määritetyn virallisen tilinhallinta-MCP:n käyttämä tilioikeuksien valitsin, ei kolmannen osapuolen sovellusten ”kaikkien oikeuksien” scope, eikä sitä voi käyttää yhdessä muiden scopejen kanssa. Kolmansien osapuolten tulee luetella tarvittavat tarkat oikeudet selkeästi.
 
-Tallennuksen jälkeen saat **`client_id`**-arvon; luottamukselliselle asiakkaalle näytetään lisäksi **kertaluonteisesti** **`client_secret`** — tallenna se välittömästi, sillä sitä ei voi enää nähdä sulkemisen jälkeen (voit luoda sen uudelleen tietosivun 「Kierrätä salaisuus / Rotate Secret」 -kohdassa, jolloin vanha salaisuus mitätöityy välittömästi).
+### Siirtyminen vanhasta dokumentaatiosta
 
-> Jokainen tili voi luoda enintään **20** OAuth-sovellusta.
+| Vanha kirjoitusasu                                         | Nykyinen tapa                       |
+| ------------------------------------------- | -------------------------- |
+| `profile`                                   | `profile:read`             |
+| `email`                                     | `email:read`               |
+| `phone`                                     | `phone:read`               |
+| `platform`、`platform:read`、`platform:write` | Luettele todellisuudessa tarvittavat tarkat oikeudet yksitellen; yleistä ”valitse kaikki” -korvaavaa arvoa ei ole |
 
-## Vaihe 2: Ohjaa käyttäjä valtuutussivulle
+Vanhoja nimiä ei hyväksytä yhteensopivuusaliaksina. Päivitä samanaikaisesti OAuth-sovelluksen rekisteröidyt scopet, valtuutus-URL ja oma käyttöoikeuksien tarkistuksesi; sovellusmäärityksen muuttaminen ei lisää oikeuksia jo myönnettyihin tokeneihin, vaan käyttäjän on valtuutettava uudelleen.
 
-Ohjaa käyttäjän selain sovelluksessasi valtuutussivulle ja välitä kyselyparametrit:
+## Vaihe 1: OAuth-sovelluksen rekisteröinti
 
+Avaa [OAuth-sovellusten hallinta](https://auth.acedata.cloud/user/oauth-apps), luo sovellus ja täytä:
+- Nimi, kuvaus, sovelluksen logo: näytetään sovelluksen puolella valtuutussivulla.
+- Asiakastyyppi: valitse **Public** puhtaalle frontendille, mobiili- tai työpöytäasiakkaalle; valitse **Confidential** palvelulle, joka voi säilyttää secretin backendissä.
+- Takaisinkutsuosoite: käytä tuotantoympäristössä HTTPS:ää ja rekisteröi sovelluksen todellisuudessa takaisinkutsun käsittelevä täydellinen URL.
+- Oikeudet: valitse sivun tarjoamasta luettelosta todellisuudessa tarvittavat scopet.
+
+Tallenna `client_id`. Confidential-asiakkaat säilyttävät `client_secret`in palvelinpuolella, eikä sitä saa sijoittaa HTML:ään, frontendin rakennusmuuttujiin tai URL:ään. Public-asiakkaat eivät käytä secretiä tokenin vaihtamiseen; vaikka rekisteröintivastaus sisältäisi kyseisen kentän, sitä ei saa pitää tunnisteena, jonka asiakas voi pitää salassa.
+
+`redirect_uri`n on oltava täsmälleen sama rekisteröinnin, valtuutuksen ja tokenin vaihdon yhteydessä, mukaan lukien polku, lopussa oleva kauttaviiva ja kyselyparametrit. Kukin tili voi luoda enintään 20 sovellusta. Secret näytetään vain luonnin/kierrätyksen yhteydessä; kierrätyksen jälkeen vanhaa secretiä ei voi enää käyttää asiakastodennusta vaativissa vaihdoissa.
+
+## Vaihe 2: Painike käynnistää valtuutuksen
+
+Luo jokaisella yhdistämisklikkauksella uusi satunnainen `state` ja `code_verifier`, laske:
+
+```text
+code_challenge = BASE64URL(SHA256(code_verifier))
 ```
+
+Tallenna `state`, verifier ja takaisinkutsuosoite sovelluksen omaan istuntoon ja avaa sitten valtuutussivu URL-koodatuilla parametreilla:
+
+```text
 https://auth.acedata.cloud/oauth2/authorize
   ?response_type=code
-  &client_id=<oma client_id>
-  &redirect_uri=<rekisteröimäsi paluuosoite>
-  &scope=openid%20profile%20credentials:read
-  &state=<satunnainen CSRF-estomerkkijono>
-  &code_challenge=<PKCE-haastearvo>          # Pakollinen julkiselle asiakkaalle
-  &code_challenge_method=S256            # Pakollinen julkiselle asiakkaalle
+  &client_id=<client_id>
+  &redirect_uri=<完整回调地址>
+  &scope=profile%3Aread%20credentials%3Aread
+  &state=<本次随机值>
+  &code_challenge=<本次S256挑战值>
+  &code_challenge_method=S256
 ```
 
-- `state`: Itse luotu satunnainen merkkijono, joka palautetaan sellaisenaan takaisin kutsun yhteydessä. Sitä käytetään CSRF:n estämiseen, ja se **on ehdottomasti tarkistettava**.
-- **PKCE (pakollinen julkisille asiakkaille, suositellaan myös luottamuksellisille asiakkaille)**: Luo ensin satunnainen `code_verifier` ja laske sitten
-  `code_challenge = BASE64URL( SHA256( code_verifier ) )`, lisää `code_challenge` valtuutus-URL:ään
-  ja säilytä `code_verifier` itse vaihetta 4 varten.
+Public-asiakkaiden on lähetettävä S256 PKCE. Vaikka Discovery luettelee edelleen `plain`in, Public-asiakkaat eivät saa käyttää sitä. S256:ta suositellaan myös Confidential-asiakkaille; jos PKCE:tä käytettiin valtuutusta käynnistettäessä, vastaava verifier on toimitettava vaihdon yhteydessä.
 
-Kun käyttäjä on kirjautunut sisään ja napsauttanut 「Hyväksy」, selain ohjataan takaisin:
+Käyttäjän hyväksynnän jälkeen palataan osoitteeseen `redirect_uri`, ja kyselyparametrit sisältävät `code`n sekä sellaisenaan palautetun `state`n. Hylkäyksen yhteydessä palautetaan `error=access_denied`, virhekuvaus ja `state`. Vahvista ennen takaisinkutsun käsittelyä, että state vastaa tämän istunnon statea. Valtuutuskoodi on voimassa 10 minuuttia, ja se voidaan vaihtaa vain kerran; epäonnistumisen jälkeen yhteys tulee käynnistää uudelleen, eikä vanhaa takaisinkutsu-URL:ää pidä päivittää toistuvasti.
 
-```
-<redirect_uri>?code=<valtuutuskoodi>&state=<sellaisenaan palautettu state>
-```
+## Vaihe 3: OAuth-tokenin vaihtaminen
 
-Jos käyttäjä kieltäytyy: `<redirect_uri>?error=access_denied&error_description=...&state=...`。
-
-> Valtuutuskoodi on voimassa **10 minuuttia**, ja sitä **voi käyttää vain kerran**.
-
-## Vaihe 3: Vaihda valtuutuskoodi tokeniksi
-
-Kutsu `code`-arvolla token-päätepistettä **taustajärjestelmässäsi** (luottamuksellinen asiakas) tai asiakkaassa (PKCE-julkinen asiakas).
-
-**Luottamuksellinen asiakas (`client_secret` mukana):**
+Public-asiakkaat vaihtavat sen suoraan selaimesta tai asiakkaasta; Confidential-asiakkaat vaihtavat sen omassa backendissään. Pyynnön runko tukee lomakekoodausta, ja seuraavat muuttujat edustavat sovelluksen tämän valtuutuksen yhteydessä saamia tietoja:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<上一步拿到的 code> \
-  -d client_id=<你的 client_id> \
-  -d client_secret=<你的 client_secret> \
-  -d redirect_uri=<和第 2 步完全一致的回调地址>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "redirect_uri=$REDIRECT_URI" \
+  --data-urlencode "code=$AUTHORIZATION_CODE" \
+  --data-urlencode "code_verifier=$PKCE_VERIFIER"
 ```
 
-**Julkinen asiakas (PKCE, ilman `client_secret`):**
-```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=authorization_code \
-  -d code=<code> \
-  -d client_id=<你的 client_id> \
-  -d code_verifier=<第 2 步生成的 code_verifier> \
-  -d redirect_uri=<回调地址>
-```
+Confidential-asiakkaiden on lisäksi lisättävä `client_secret`-lomakekenttä palvelinpuolella. Tällä hetkellä tuetaan `client_secret_post`ia; älä pidä HTTP Basic -asiakastodennusta tuettuna tapana.
 
-Onnistunut vastaus (`refresh_token` näkyy vain, kun `offline_access` on pyydetty):
+Lue onnistuneesta vastauksesta `access_token`, `token_type`, `expires_in` ja tosiasiallisesti myönnetty `scope`. `refresh_token` saadaan vain, jos `offline_access` on sekä pyydetty että hyväksytty. Älä pidä OAuth access tokenia malli-API:n API Keynä, äläkä kirjoita tokenia, verifieriä tai valtuutuskoodia lokeihin, analytiikkatapahtumiin tai jaettuihin linkkeihin.
 
-```json
-{
-  "access_token": "<JWT>",
-  "token_type": "Bearer",
-  "expires_in": 1296000,
-  "scope": "openid profile credentials:read",
-  "refresh_token": "<JWT，仅 offline_access 时>"
-}
-```
+## Vaihe 4: Käyttäjätietojen ja API Keyn lukeminen
 
-`access_token` on JWT, joka sisältää `scope`-väitteen; voimassaoloaika on **15 päivää** (`expires_in`-sekunteina). Refresh Tokenin voimassaoloaika on **30 päivää**.
-
-## Vaihe 4: Kutsu rajapintaa Access Tokenilla
-
-Lisää token `Authorization: Bearer` -otsakkeeseen.
-
-**Käyttäjätietojen lukeminen (UserInfo, kentät suodatetaan myönnetyn scopen mukaan):**
+Käytä ensin OAuth access tokenia UserInfo-pyynnön tekemiseen:
 
 ```bash
 curl https://auth.acedata.cloud/api/v1/users/me \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-**Alustan resurssirajapinnan kutsuminen** (`platform.acedata.cloud`, valtuutus scopen mukaan). Esimerkiksi kun `credentials:read` on myönnetty:
+Palautettavat kentät riippuvat scopesta: `id` on käyttäjätunniste; `profile:read` tai `openid` mahdollistaa perustietojen lukemisen (kuten `username`, `nickname`, `avatar`, `is_verified`, `date_joined`, `registration_method`); sähköposti vaatii `email:read`in, ja puhelinnumero sekä alue vaativat `phone:read`in. Älä oleta, että valtuuttamattomia kenttiä on aina olemassa.
+
+Kun olemassa oleva API Key tarvitaan ja `credentials:read` on hyväksytty, käytä UserInfon `id`-arvoa suodatusehtona:
 
 ```bash
-curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=<UserInfo返回的id>" \
-  -H "Authorization: Bearer <access_token>"
+curl "https://platform.acedata.cloud/api/v1/credentials/?user_id=$USER_ID&limit=100&offset=0" \
+  -H "Authorization: Bearer $OAUTH_ACCESS_TOKEN"
 ```
 
-Alustan taustajärjestelmä tarkistaa JWT:n `scope`-väitteen — token voi käyttää vain resursseja, joihin käyttäjä on antanut valtuutuksen. Jos käytetään valtuuttamatonta resurssia, palautetaan `403`.
+Palautuslista käyttää `count`ia ja `items`iä, ja Key-kenttä on **`items[*].token`**, ei `data[0].value`. `user_id=me` ei ole tämän rajapinnan kelvollinen käyttäjä-ID. Lue monisivuiset tiedot edelleen käyttämällä `offset`ia／`limit`iä; älä pidä ensimmäistä sivua kaikkina tunnisteina.
 
-## Tokenin päivittäminen
+Valitse sovelluksen, palvelun ja voimassaolotilan perusteella soveltuva tunniste; älä valitse sokeasti ensimmäistä. Tyhjä lista ei tarkoita, että valtuutus epäonnistui; käyttäjä ei ehkä ole vielä luonut soveltuvaa Keytä. OAuth access tokenin käyttöoikeuksien hallinta sekä API Keyn oman palvelualueen, kiintiön ja vanhenemisehtojen hallinta ovat eri rajoituksia.
 
-Kun Access Token vanhenee, vaihda Refresh Tokenilla uuteen token-pariin (edellyttää, että `offline_access` on alun perin pyydetty):
+**API Keyn lukemisen salliminen tarkoittaa, että kolmas osapuoli voi tallentaa ja käyttää sitä. OAuth-pyynnön peruuttaminen tai sovelluksen kirjautumistilan tyhjentäminen ei mitätöi jo kopioitua API Keytä; käyttäjän on peruutettava tai kierrettävä kyseinen Key erikseen tunnisteiden hallinnassa.**
+
+## Ajettava Public / PKCE -selainesimerkki
+
+Ota seuraava sivu käyttöön rekisteröimässäsi `REDIRECT_URI`-osoitteessa ja korvaa `CLIENT_ID` sekä takaisinkutsuosoite. Painike käynnistää vakio-valtuutuksen, ja samalle sivulle palattaessa luetaan profiilitiedot sekä olemassa olevien Keyjen määrä. Esimerkki ei näytä eikä tallenna pysyvästi Keytä; tuotantosovellukset käyttävät tuloksia todellisen käyttötarkoituksen mukaisesti. Vahvista ensin erillisessä selainikkunassa, ja hyväksy sitten myöhemmin esitettyjen iframe-vaatimusten mukaisesti.
+```html
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Yhdistä Ace Data Cloudiin</title>
+<button id="connect" type="button">Yhdistä tili</button>
+<p id="status" role="status">Ei vielä yhdistetty</p>
+<script type="module">
+const CLIENT_ID = 'korvaa omalla client_id:lläsi';
+const REDIRECT_URI = 'https://your-app.example/connect';
+const AUTH_ORIGIN = 'https://auth.acedata.cloud';
+const button = document.querySelector('#connect');
+const status = document.querySelector('#status');
+const storageKey = state => `ace-oauth:${state}`;
+
+function base64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`Rajapinta palautti HTTP ${response.status}`);
+  return response.json();
+}
+
+button.addEventListener('click', async () => {
+  button.disabled = true;
+  try {
+    const state = base64url(crypto.getRandomValues(new Uint8Array(24)));
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    sessionStorage.setItem(storageKey(state), JSON.stringify({
+      verifier, redirectUri: REDIRECT_URI, createdAt: Date.now()
+    }));
+    const url = new URL('/oauth2/authorize', AUTH_ORIGIN);
+    url.search = new URLSearchParams({
+      response_type: 'code', client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
+      scope: 'profile:read credentials:read', state,
+      code_challenge: base64url(new Uint8Array(digest)), code_challenge_method: 'S256'
+    }).toString();
+    window.location.assign(url);
+  } catch {
+    status.textContent = 'Yhteyden muodostamista ei voi aloittaa. Tarkista selaimen tallennusasetukset ja yritä uudelleen.';
+    button.disabled = false;
+  }
+});
+
+async function handleCallback() {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('code') && !url.searchParams.has('error')) return;
+  button.disabled = true;
+  try {
+    const state = url.searchParams.get('state');
+    const raw = state && sessionStorage.getItem(storageKey(state));
+    if (!raw) throw new Error('Valtuutusistunto ei täsmää. Yhdistä uudelleen.');
+    const transaction = JSON.parse(raw);
+    const age = Date.now() - transaction.createdAt;
+    if (!Number.isFinite(age) || age < 0 || age > 10 * 60 * 1000 ||
+        transaction.redirectUri !== REDIRECT_URI || !transaction.verifier) {
+      throw new Error('Valtuutusistunto on vanhentunut. Yhdistä uudelleen.');
+    }
+    sessionStorage.removeItem(storageKey(state));
+    const code = url.searchParams.get('code');
+    const denied = url.searchParams.get('error');
+    for (const key of ['code', 'state', 'error', 'error_description']) url.searchParams.delete(key);
+    window.history.replaceState({}, '', url);
+    if (denied) throw new Error('Valtuutusta ei suoritettu loppuun. Voit yhdistää uudelleen.');
+    if (!code) throw new Error('Takaisinkutsusta puuttuu valtuutuskoodi. Yhdistä uudelleen.');
+    status.textContent = 'Yhdistetään…';
+    const token = await requestJson(`${AUTH_ORIGIN}/oauth2/token`, {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'authorization_code', client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI, code, code_verifier: transaction.verifier
+      })
+    });
+    if (!token.access_token) throw new Error('Valtuutustunnusta ei saatu.');
+    const headers = { Authorization: `Bearer ${token.access_token}` };
+    const profile = await requestJson(`${AUTH_ORIGIN}/api/v1/users/me`, { headers });
+    if (!profile.id) throw new Error('Käyttäjätunnistetta ei saatu.');
+    const keysUrl = new URL('https://platform.acedata.cloud/api/v1/credentials/');
+    keysUrl.search = new URLSearchParams({ user_id: profile.id, limit: '100' }).toString();
+    const credentials = await requestJson(keysUrl, { headers });
+    if (!Array.isArray(credentials.items)) throw new Error('Tunnistetietoluettelon muoto ei vastaa odotettua.');
+    const keyCount = credentials.items.filter(item => typeof item.token === 'string' && item.token).length;
+    status.textContent = `Yhdistetty käyttäjään ${profile.nickname || profile.username || profile.id}; tällä sivulla on ${keyCount} API Key -avainta.`;
+  } catch (error) {
+    status.textContent = `Yhteyttä ei suoritettu loppuun: ${error.message || 'verkkovirhe'} Napsauta yhdistämistä uudelleen.`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+await handleCallback();
+</script>
+</html>
+```
+
+Esimerkin takaisinkutsun ja aloituskohdan on oltava samassa originissa, samassa selaimen välilehdessä／iframe-kehyksessä, jotta aiemmin tallennettu `sessionStorage` voidaan lukea. Tuotantosovelluksen tulee hallita tunnuksia omassa istuntoratkaisussaan, käsitellä vanheneminen ja poistaa valtuutus-URL:n parametrit vastauksen vastaanottamisen jälkeen; sivun pääkäyttöliittymän tulee renderöityä ensin, ja verkkovirheiden tulee vaikuttaa vain yhteystilaan.
+
+## iframe valkoisen etiketin sivustossa
+
+### Asiakkaan sivusto siirtyy itse valtuutussivulle
+
+Käytä tavallisia OAuth-parametreja ja omaa takaisinkutsunkäsittelyäsi; `window.location.assign()` navigoi nykyistä iframe-kehystä, ja yläsivu säilyy valkoisen etiketin verkkotunnuksessa. Kuvaketta varten ei tarvitse lisätä `embed=studio`-parametria eikä toteuttaa Studio-viestiprotokollaa.
+
+Seuraavien ehtojen on täytyttävä:
+
+- Sovellussivun ja takaisinkutsusivun on käytettävä HTTPS:ää, niiden on oltava tosiasiallisesti saavutettavissa ja niiden on sallittava valkoisen etiketin yläverkkotunnuksen upotus iframeen; tarkista molempien `Content-Security-Policy: frame-ancestors` ja `X-Frame-Options`.
+- sandboxin on sallittava sivun tarvitsemat komentosarjat, lomakkeet sekä origin-/tallennusominaisuudet. Ponnahdusikkunakirjautumisen tukeminen edellyttää myös vastaavia ponnahdusikkunaominaisuuksia; käytä ensisijaisesti Studion tarjoamaa Website-komponentin määritystä.
+- Selaimen on sallittava nykyisessä upotusskenaariossa valtuutustilan edellyttämä tallennus. Valkoisen etiketin sivuston kirjautumistila ja AuthFrontend-kirjautumistila voivat olla erilaisia; ei tule olettaa, että valkoisen etiketin sivustolle kirjautuminen tarkoittaisi myös kirjautumista valtuutussivulle.
+- Takaisinkutsun tokeninvaihtopalvelun on oltava käytettävissä, ja eri originin pyyntöjen on sallittava sovelluksen origin; DNS-, CORS- ja HTTP-virheiden on kaikissa tapauksissa näytettävä uudelleenyrityksen mahdollistava tila, eivätkä ne saa estää koko sivun renderöintiä.
+
+Valtuutussivun vasen puoli lukee OAuth-sovelluksen Logon; oikea puoli lukee kyseisen Siten faviconin／logon, kun selain voi tarjota ylätason originin ja yläverkkotunnus läpäisee varmennetun sivuston tarkistuksen, muussa tapauksessa näytetään oletuskuvake. Tämä määrittää vain brändin esitystavan, ei muodosta kirjautumisistuntoa eikä tarjoa tilioikeuksia asiakkaan sivulle.
+
+**Nykyinen rajoitus: kun tavallinen OAuth tarvitsee iframe-kehyksessä uudelleenkirjautumisen, kirjautumisen jälkeen valtuutussivulle palaavassa jatkoprosessissa on edelleen aukko.** Ennen käyttöönottoa on hyväksyttävä erikseen tilanteet ”Auth on kirjautunut sisään” ja ”Auth ei ole kirjautunut sisään／on vanhentunut”. Ennen kuin tämä aukko on korjattu ja varmennettu, ensimmäinen kirjautuminen voi käyttää erillistä sivua tavallisen OAuthin suorittamiseen tai alla olevaa Studio-komponentin valtuutusta; älä lupaa pelkkien kirjautuneiden testitulosten perusteella, että kaikki iframe-skenaariot toimivat.
+
+### Käytä Studion nykyisen tilin valtuutusta
+
+Ota OAuth käyttöön Studiossa kohdassa 「Asetukset → Etusivu → Verkkosivustokomponentit」, ja täytä `client_id` sekä rekisteröity takaisinkutsuosoite. Verkkosivuston ja takaisinkutsun on käytettävä samaa HTTPS-originia, ja niiden on erottava Studio-originista. Kolmannen osapuolen sivun tulee:
+
+1. Lähettää `acedatacloud:oauth:ready` tarkalle yläsivuston originille, vastaanottaa ja validoida `acedatacloud:oauth:init`.
+2. Painike luo staten ja PKCE verifierin ja lähettää `acedatacloud:oauth:authorize`-viestin (state, S256 challenge); verifier pysyy omalla sivulla.
+3. Validoida ylätason ikkuna, origin ja state, käsitellä `acedatacloud:oauth:result`-viestin code tai error ja vaihtaa se tavallisen token-päätepisteen kautta.
+Studio näyttää valtuutussivun komponenttialueella, ja käyttäjän suostumuksen jälkeen palauttaa valtuutuskoodin viestinä, sovelluksen ei tarvitse uudelleenohjata. Kun ei ole kirjauduttu sisään, palautetaan `login_required`, hylättäessä palautetaan `access_denied`, ja odotuksen aikakatkaisu palauttaa `authorization_timeout`. Tilin vaihtuminen luo sovelluksen iframe-kehyksen uudelleen ja peruuttaa keskeneräiset valtuutukset.
+
+Komponentti pyytää tällä hetkellä `profile:read credentials:read`, eikä sisällä `offline_access`-oikeutta. Älä oleta, että refresh token varmasti voidaan vastaanottaa. `embed=studio` ja `embed_origin` ylläpidetään Studio-isännän ja valtuutussivun toimesta, asiakassivun tarvitsee vain noudattaa viestiprotokollaa.
+
+Täydellinen painike-esimerkki löytyy [Studio-verkkosivukomponentin OAuth-integrointioppaasta](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
+
+## Elinkaari, päivitys ja peruutus
+
+Access tokenin oletusvoimassaoloaika on 15 päivää, ja päivitys tai uudelleenvaltuutus tulee ajoittaa jokaisen vastauksen `expires_in`-arvon perusteella; refresh tokenin oletusvoimassaoloaika on 30 päivää, ja voimassaoloaikaan vaikuttaa palvelun kokoonpano. Älä kovakoodaa näitä kahta arvoa pysyviksi sitoumuksiksi.
+
+Kun `offline_access` on myönnetty, voidaan kutsua:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/token \
-  -d grant_type=refresh_token \
-  -d refresh_token=<你的 refresh_token>
+curl https://auth.acedata.cloud/oauth2/token \
+  --data-urlencode grant_type=refresh_token \
+  --data-urlencode "refresh_token=$OAUTH_REFRESH_TOKEN"
 ```
 
-Palautusrakenne on sama kuin vaiheessa 3; scope säilytetään alkuperäisestä valtuutuksesta **sellaisenaan**. Päivityksen jälkeen vanha Refresh Token mitätöityy (kierto), joten tallenna uusi.
+Päivitys palauttaa uuden tokenin, ja sovelluksen tulee tallentaa uusin arvo. Päivityksen aikana tarkistetaan, onko sovellus edelleen voimassa, onko käyttäjä käytettävissä ja ovatko oikeudet edelleen myönnettyjä. Epäonnistuessa tyhjennä oma yhteystila ja valtuuta uudelleen.
 
-## Tokenin peruuttaminen
+**Nykyinen OAuth-päivitystoteutus ei takaa, että vanha refresh token mitätöityy välittömästi päivityksen jälkeen.** Älä pidä uuden tokenin saamista merkkinä siitä, että vanha token on peruutettu, äläkä korvaa olemassa olevien tokenien lopettamista secretin kierrolla.
+
+Peruutuspyyntö kutsutaan näin:
 
 ```bash
-curl -X POST https://auth.acedata.cloud/oauth2/revoke \
-  -d token=<access_token 或 refresh_token>
+curl https://auth.acedata.cloud/oauth2/revoke \
+  --data-urlencode "token=$OAUTH_ACCESS_TOKEN"
 ```
 
-## Todellinen esimerkki: omat MCP-palvelimemme on integroitu juuri näin
+**Nykyinen peruutuspäätepiste palauttaa HTTP 200:n, mutta ei toteuta jo myönnettyjen JWT:iden välitöntä mitätöintiä.** Sovelluksen tulee tyhjentää itse tallentamansa tokenit, eikä 200-vastausta saa pitää todisteena siitä, että kaikki myönnetyt tokenit tai API Keyt ovat mitätöityneet. Vuotaneiden tai kopioitujen API Key -avainten tapauksessa vastaavat tunnistetiedot tulee peruuttaa tai kierrättää erikseen.
 
-Ace Data Cloudin yli 15 MCP-palvelimen (NanoBanana, Midjourney, Suno, Seedance, Kling…) Claude Desktopissa / Cursorissa näkyvä ”Sign in with Ace Data Cloud” -yhteys käyttää juuri tätä työnkulkua: ne kaikki on rekisteröity OAuth-sovelluksiksi **julkisella (PKCE)** tyypillä, ne pyytävät `credentials`-aiheista scopea, ja käyttäjän valtuutuksen jälkeen MCP-palvelin voi kutsua `api.acedata.cloud`-rajapintaa käyttäjän puolesta — käyttäjän ei tarvitse liittää API Keytä käsin. Integraatiosi on täysin samanlainen kuin niiden.
+## Yleiset virheet ja hyväksyntä
 
-## Yleiset virheet
+| Ilmiö／virhe                         | Selvitys                                                                    |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `invalid_scope`               | Käytä nykyisiä käyttöoikeusnimiä; tarkista sovelluksen rekisteröidyt alueet, delegointirajoitukset ja käyttäjän oikeudet. Discoveryn koko hakemisto ei ole sovelluksen valittavissa oleva hakemisto                      |
+| `invalid_request`             | Pakolliset parametrit, tarkka callback-osoite, Public-asiakkaan S256 challenge ja method                        |
+| `invalid_client`              | client ID, sovelluksen tila, Confidential-asiakkaan secret; tarkista, ettei Basic-autentikointia käytetä virheellisesti             |
+| `invalid_grant`               | code on vanhentunut／jo käytetty, verifier tai redirect URI ei täsmää; päivityksessä tarkistetaan myös sovelluksen ja oikeuksien muutokset                 |
+| `access_denied`               | Käyttäjä hylkäsi pyynnön, palauta yhteyspainike, älä näytä valtuutuspyyntöä toistuvasti                                                  |
+| `unsupported_grant_type`      | Tällä hetkellä tuetaan `authorization_code`- ja `refresh_token`-tyyppejä                             |
+| HTTP 401／403                  | Erottele virheellinen kirjautumistila, token, valtuutuksen scope ja itse resurssin käyttöoikeudet                                     |
+| `Failed to fetch`, DNS／CORS-virhe | Tarkista todellinen pyyntöisäntä ja asiakastaustan käytettävyys, älä selitä sitä sillä, että ”käyttäjällä ei ole Keytä”                                      |
+| Valtuutettu, mutta Keytä ei voi lukea                   | Käytä `platform.acedata.cloud`-osoitetta, todellista user ID:tä ja `items[*].token`-arvoa; erottele tyhjä lista, sivutus ja epäonnistuneet vastaukset |
+| Koko sivu on tyhjä valtuutuksen palautuksen jälkeen                     | Renderöi sivu ensin; käsittele callbackin, tokenin, UserInfon ja tunnistepyyntöjen virheet erikseen; älä anna alustuksen poikkeuksen pysäyttää koko sivua                      |
+| iframe ei jatka kirjautumisen jälkeen                 | Käsittele yllä mainittujen nykyisten rajoitusten mukaisesti, testaa tilanteet ilman kirjautumista, vanhentuneella istunnolla, hylkäyksellä ja uudelleenyhdistämisellä                                          |
 
-Virhevastaus on yhtenäisesti muotoa `{ "error": "<code>", "error_description": "<ihmiselle luettava selitys>" }`:
-
-| error                    | Merkitys / vianmääritys                                             |
-| ------------------------ | ------------------------------------------------------------------- |
-| `invalid_request`        | Parametri puuttuu tai on virheellinen (esim. `code` / `client_id` puuttuu) |
-| `invalid_client`         | `client_id` ei ole olemassa, sovellus on poistettu käytöstä tai `client_secret` on virheellinen |
-| `invalid_grant`          | Valtuutuskoodia ei ole / se on vanhentunut (>10 minuuttia) / sitä on jo käytetty / PKCE-tarkistus epäonnistui / `redirect_uri` ei vastaa valtuutuksen aikaista arvoa |
-| `access_denied`          | Käyttäjä napsautti valtuutussivulla ”Hylkää”                        |
-| `unsupported_grant_type` | `grant_type` ei ole `authorization_code` tai `refresh_token`       |
-
-## Rajoitusten pikakatsaus
-
-| Kohta                 | Arvo                            |
-| --------------------- | ------------------------------- |
-| OAuth-sovellusten enimmäismäärä tiliä kohden | 20                              |
-| Valtuutuskoodin voimassaoloaika | 10 minuuttia, kertakäyttöinen   |
-| Access Tokenin voimassaoloaika | 15 päivää                       |
-| Refresh Tokenin voimassaoloaika | 30 päivää (kierto)              |
-| `redirect_uri`        | On vastattava rekisteröityä arvoa täsmälleen |
-| `client_secret`       | Näytetään vain kerran luomisen / kierron yhteydessä, palvelin tallentaa sen SHA-256-hajautuksena |
-
-## Kolmannen osapuolen OAuth-sovelluksen upottaminen Studion etusivulle
-
-Studion kohdassa ”Asetukset → Etusivu → Verkkosivustokomponentit” voidaan ottaa OAuth käyttöön ja määrittää kolmannen osapuolen sovelluksen `client_id` sekä rekisteröity takaisinsoitto-osoite.
-Verkkosivuston ja takaisinsoiton on käytettävä HTTPS:ää, niillä on oltava sama alkuperä (protokolla, verkkotunnus ja portti), ja niiden on käytettävä eri alkuperää kuin Studio.
-
-Määrityksessä ei saa antaa `client_secret`-arvoa; sovelluksen salaisuus voidaan tallentaa vain kolmannen osapuolen taustajärjestelmään.
-
-Komponentin pyytämät oikeudet ovat `profile:read credentials:read`. Jokaisen vierailijan on annettava suostumuksensa erikseen; sivuston omistajan komponenttimääritys ei tarkoita vierailijan valtuutusta.
-Kolmannen osapuolen sivu luo satunnaisen `state`-arvon ja PKCE verifierin sekä lähettää Studioon S256 challengen. Studio isännöi virallista valtuutussivua komponenttialueella,
-ja käyttäjän suostumuksen jälkeen kolmas osapuoli vastaanottaa kertakäyttöisen valtuutuskoodin, kutsuu token-päätepistettä OAuth access tokenin vaihtamiseksi ja käyttää sitten
-`GET https://platform.acedata.cloud/api/v1/credentials/?user_id=<käyttäjätunnus>` -kutsua olemassa olevan API Keyn lukemiseen.
-Käyttäjätunnus tulee edellisen vaiheen `GET https://auth.acedata.cloud/api/v1/users/me` -kutsun palauttamasta `id`-arvosta; tunnusluettelorajapinta ei hyväksy arvoa `user_id=me`.
-Studio ei välitä kolmansille osapuolille omaa kirjautumistokeniaan eikä lue ja injektoi käyttäjän Keytä suoraan.
-
-Julkisten asiakkaiden on käytettävä **S256 PKCE:tä**. Tokenia vaihdettaessa on annettava `redirect_uri`, joka on täysin sama kuin valtuutuspyynnössä.
-Valtuutuskoodi voidaan vaihtaa vain kerran. Ennen valtuutusta tarkistetaan, onko takaisinsoitto-osoite rekisteröity.
-
-Kolmannen osapuolen sivun on toteutettava viestiprotokolla; mitään valmista verkkosivua ei voi liittää automaattisesti vain URL-osoitteen täyttämällä.
-Täydellinen esimerkki on kohdassa [Studio OAuth -komponentin integraatio-opas](https://github.com/AceDataCloud/Nexior/blob/main/docs/integrations/studio-home-oauth.md).
-
-**API Keyn lukuoikeuden valtuuttaminen tarkoittaa, että kolmas osapuoli saa tallentaa ja käyttää tätä Keytä. OAuth-valtuutuksen peruuttaminen ei mitätöi kolmannen osapuolen jo kopioimaa Keytä;
-käyttäjän on peruutettava tai kierretettävä Key erikseen.**
+Varmista ennen toimitusta vähintään: oikea callback, hylkäys, virheellinen state, vanhentunut／jo käytetty code, ei Keytä, verkkovirhe, tokenin vanheneminen, vaaditun scopen puuttuminen sekä iframe-tilanteessa ensimmäinen kirjautuminen ja tilin vaihtaminen. Älä tallenna testinäyttöön täydellisiä codeja, tokeneita tai API Key -avaimia.

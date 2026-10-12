@@ -3,149 +3,792 @@ title: "Vodič za integraciju Suno Studio projekta"
 description: "Suno Music Generation API guide - Ace Data Cloud"
 ---
 
-Suno Studio Project API upravlja višekanalnim muzičkim projektima kroz jednu ulaznu tačku:
+`POST https://api.acedata.cloud/suno/projects` je Beta interfejs za upravljanje višekanalnim projektima. Kreiranje, čuvanje, generisanje kandidata, potvrđivanje kandidata i izvoz razlikuju se putem `action`.
 
 ```http
 POST /suno/projects
 Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
+Idempotency-Key: <每次写操作的新 UUID>
 ```
 
-`action` u zahtevu određuje tip operacije. Primarni ključ projekta ujednačeno koristi `id`; `version_id` označava trenutnu verziju projekta, a sve operacije izmene i izvoza moraju podneti najnoviju verziju kako bi se izbeglo istovremeno prepisivanje.
+Osim za `retrieve`, **svaka operacija zahteva** `Idempotency-Key`. Isti ključ i isti zahtev samo ponovo čitaju originalni rezultat; isti ključ sa drugačijim zahtevom vraća 409. Kada naplatna generacija naiđe na mrežni istek vremena ili je rezultat predaje neizvestan, prvo koristite originalni ID zadatka ili isti idempotentni ključ za upit, i ne smete direktno promeniti ključ i ponovo poslati zahtev.
 
-## Pregled operacija
+## Identifikatori i vremenske jedinice
 
-| action             | Režim  | Namena                      |
-| ------------------ | --- | ----------------------- |
-| `create`           | Sinhrono  | Kreiranje praznog projekta                   |
-| `retrieve`         | Sinhrono  | Čitanje projekta i kompletnog izmenjivog `state`      |
-| `save`             | Sinhrono  | Čuvanje kompletnog stanja projekta                |
-| `upload`           | Asinhrono  | Inicijalizacija materijala koji se može dodati u projekat iz HTTPS audio adrese |
-| `add_track`        | Asinhrono  | Dodavanje postojećeg zvuka u projekat               |
-| `generate_track`   | Asinhrono  | Generisanje kandidata nove audio trake za navedeni interval            |
-| `replace_section`  | Asinhrono  | Generisanje kandidata za lokalnu zamenu                |
-| `commit_candidate` | Asinhrono  | Potvrđivanje izabranog kandidata u projekat             |
-| `remove_track`     | Sinhrono  | Brisanje navedene trake                  |
-| `render`           | Asinhrono  | Izvoz sačuvane verzije kao kompletne pesme           |
+| Naziv                             | Odakle se preuzima                                                                                      | Gde se koristi                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| `id`                           | `create` odgovor `data.id`                                                                      | svi naredni zahtevi trenutnog projekta                                      |
+| `version_id`                   | najnoviji `retrieve`, `save`, `add_track`, `commit_candidate` ili `remove_track` `data.version_id` | izmena, generisanje kandidata i izvoz; mora se koristiti najnovija verzija                              |
+| `audio_id` / `source_audio_id` | `upload` konačno stanje `response.data.candidate.audio_id`, ili postojeći završeni audio ID                                | referenciranje originalnog zvuka pri `add_track`, generisanju ili zameni                          |
+| `render_audio_id`              | `render` konačno stanje `response.data.audio_id`                                                       | referenca za miks projekta u `generate_track`                         |
+| `operation_id`                 | `generate_track` ili `replace_section` konačno stanje `response.data.operation_id`                       | `commit_candidate`; obično je isti kao `task_id` zadatka generisanja, ali treba pročitati povratnu vrednost |
+| `candidate_id`                 | konačno stanje generisanja `response.data.candidates[].id`                                                       | izbor jednog kandidata za potvrđivanje                                         |
+| `track_id`                     | projekat `data.state.tracks[].id`                                                                | potvrđivanje kandidata ili brisanje trake                                        |
+| `task_id`                      | odgovor na predaju asinhrone operacije                                                                                   | korišćenje `/suno/tasks` za upit konačnog stanja; to nije ID projekta                   |
 
-Asinhrone operacije odmah vraćaju `task_id`. Koristite besplatni `/suno/tasks` interfejs za anketiranje ili prosledite `callback_url` da biste primili rezultat završnog stanja.
+`start_seconds` / `end_seconds` su **sekunde unutar izvornog zvuka**; `start_beats` / `end_beats` su** brojevi taktova na vremenskoj liniji projekta**. `state.timing.bps` je broj taktova u sekundi, podrazumevano 2. Na primer, segment od 41 sekunde počinje od 0. takta, a podrazumevani kraj je na 82. taktu. Opseg sekundi za `generate_track` koristi se za određivanje reference generisanja i ne garantuje da kandidat ima samo dužinu tog opsega.
 
-## Kreiranje i čitanje
+## Tok operacija
 
-```json
-{"action":"create","title":"My Studio Project"}
+| Redosled  | `action`                             | Svrha                         | Način povratka         |
+| --- | ------------------------------------ | -------------------------- | ------------ |
+| 1   | `create`                             | Kreiranje praznog projekta                      | Sinhroni podaci projekta       |
+| 2   | `retrieve`                           | Čitanje najnovije verzije i kompletnog `state`          | Sinhroni podaci projekta       |
+| 3   | `save`                               | Prvo čuvanje ili ukupno čuvanje izmenjenog `state`      | Sinhroni podaci projekta       |
+| 4   | `upload`                             | Kreiranje materijala iz HTTPS audio adrese           | Asinhroni zadatak         |
+| 5   | `add_track`                          | Postavljanje audio materijala u projekat                  | Asinhroni zadatak, ažurira verziju    |
+| 6   | `save`                               | Ako je potrebno primati kandidate nove trake, prvo sačuvajte praznu ciljnu traku        | Sinhroni podaci projekta, ažurira verziju  |
+| 7   | `render`                             | Izvoz trenutno čujnih traka, preuzimanje reference miksa `audio_id` | Asinhroni zadatak         |
+| 8   | `generate_track` ili `replace_section` | Generisanje kandidata nove trake odnosno kandidata za lokalnu zamenu            | Asinhroni zadatak, privremeno ne menja projekat  |
+| 9   | `commit_candidate`                   | Izbor i potvrđivanje jednog kandidata                  | Asinhroni zadatak, ažurira verziju nakon uspeha |
+| Opciono  | `remove_track`                       | Brisanje određene trake                     | Sinhroni podaci projekta, ažurira verziju  |
+
+Ako se radi samo lokalna zamena, dovoljan je postojeći dostupni izvorni zvuk i nije potrebno prvo izvršiti `render`; ako je izvorni zvuk već u projektu, mogu se preskočiti i `upload` i `add_track`. `render_audio_id` je samo obavezna referenca za `generate_track`.
+
+Prilikom predaje asinhrone operacije prvo se vraća `{ "task_id": "...", "trace_id": "..." }`, što **ne znači da je generisanje uspešno**. Anketiranje:
+
+```http
+POST /suno/tasks
+Content-Type: application/json
+
+{"action":"retrieve","id":"上一步返回的 task_id"}
 ```
 
-Sve operacije izmene treba da šalju jedinstveni `Idempotency-Key` Header. Nakon uspešnog kreiranja, `data.id` u odgovoru je Project ID. Novi prazan projekat možda nema `version_id` pre prvog čuvanja.
+Zapis zadatka mora imati `finished_at`, a `response.success` u njemu mora biti `true` da bi se smatrao uspešnim; kada je `response.success=false`, pročitajte `response.error`. Iako `save` može sadržati `task_id`, on se u ovom interfejsu završava sinhrono. `upload`, `render`, `generate_track`, `replace_section` ne menjaju verziju projekta; nakon uspeha `save`, `add_track`, `commit_candidate`, `remove_track` treba preuzeti novi `version_id`.
 
-```json
-{"action":"retrieve","id":"PROJECT_ID"}
-```
+## Konvencije zahteva
 
-Odgovor čitanja sadrži kompletan `state`. Novi prazan projekat vraća `{"tracks":[],"timing":{"bps":2}}`, što se može direktno koristiti za prvo čuvanje. `timing.bps` označava broj bitova u sekundi, podrazumevano je 2 (120 BPM), i mora biti pozitivan broj; `startBeats`, `endBeats` i `readStartBeats` segmenata koriste jedinice bitova projekta, a pozicije taktova u audio analizi ne mogu se direktno tretirati kao koordinate vremenske ose.
+| Parametar                | Tip i opseg primene                                                                                   | Objašnjenje                                                              |
+| ----------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `action`          | Obavezan string                                                                                     | Fiksno je jedno ime operacije navedeno na ovoj stranici; jedan zahtev izvršava samo jednu operaciju.                                      |
+| `id`              | Obavezan string osim za `create`                                                                         | ID projekta, iz `create.data.id`.                                      |
+| `version_id`      | Obavezan string pri izmeni, generisanju kandidata i izvozu; može se izostaviti pri prvom `save` praznog projekta                                                         | Koristite najnoviju verziju, stare verzije će biti odbijene. `retrieve` ga ne zahteva.                                 |
+| `Idempotency-Key` | Obavezno zaglavlje zahteva osim za `retrieve`, 1–128 znakova                                                              | Koristite novi ključ za svaku novu operaciju; isti ključ i isti zahtev ponovo čitaju originalni rezultat, bez ponovnog generisanja ili naplate.                                   |
+| `async`           | Opciono logičko polje za `upload`, `add_track`, `generate_track`, `replace_section`, `commit_candidate`, `render` | Ove operacije su uvek asinhrone; ni `false` ne pretvara generisanje u sinhrono.                                    |
+| `callback_url`    | Opciono URL za asinhrone operacije                                                                                | Prima obaveštenja o konačnom stanju; kada se izostavi, upitajte `/suno/tasks` prema `task_id`. I dalje morate proveriti `response.success`. |
 
-## Čuvanje kompletnog stanja
+Sledeći primeri povezano prikazuju prenošenje ID-jeva i verzija između operacija. Odgovori navode samo polja povezana sa trenutnim korakom; pri integraciji zamenite primer ID-jeve vrednostima odgovora trenutne aplikacije.
 
-```json
-{
-  "action":"save",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "title":"Edited Project",
-  "state":{"tracks":[],"timing":{"bps":2}}
-}
-```
+## Kreiranje i čitanje projekta
 
-Prvo čuvanje novog praznog projekta može izostaviti `version_id`; nakon što prvo čuvanje generiše verziju, naredna čuvanja moraju podneti najnoviju vrednost. Ako se verzija promenila, interfejs vraća HTTP 409. Tada ponovo izvršite `retrieve`, spojite izmene i zatim podnesite sa novim idempotentnim ključem; nemojte naslepo ponavljati stari zahtev.
+| Operacija         | Parametar      | Tip i objašnjenje                              |
+| ---------- | ------- | ---------------------------------- |
+| `create`   | `title` | Obavezan string, 1–200 znakova; naslov novog projekta.              |
+| `retrieve` | Nema posebnih parametara   | Koristite `id` projekta za čitanje trenutne verzije i kompletnog `state`, bez potrebe za idempotentnim ključem. |
 
-## Otpremanje i dodavanje traka
+### Kreiranje projekta: `create`
 
-```json
-{
-  "action":"upload",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "audio_url":"https://cdn.example.com/reference.mp3",
-  "async":true
-}
-```
-
-Nakon uspešnog otpremanja, pročitajte audio ID iz `response.data.candidate.audio_id`. Zatim ga dodajte u projekat:
-
-```json
-{
-  "action": "add_track",
-  "id": "PROJECT_ID",
-  "version_id": "CURRENT_VERSION_ID",
-  "audio_id": "AUDIO_ID",
-  "name": "Backing Vocals"
-}
-```
-
-Dodavanje trake podrazumevano zadržava brzinu reprodukcije zvuka i konvertuje trajanje zvuka u broj bitova prema `timing.bps` projekta. Nakon svakog `save`, `add_track`, `commit_candidate` ili `remove_track`, treba koristiti novi `version_id` iz odgovora.
-
-## Generisanje i zamena
-
-`generate_track` generiše kandidate audio trake za interval projekta; `replace_section` vraća dva kandidata za lokalnu zamenu. Nijedna od dve operacije ne bira automatski umetnički rezultat. Model mora koristiti javni naziv: `chirp-v3-5`, `chirp-v4`, `chirp-v4-5`, `chirp-v4-5-plus`, `chirp-v5`, `chirp-v5-5`, `chirp-v6`, `chirp-v6-wild` ili `chirp-v6-mini`; dostupnost konkretne operacije i dalje zavisi od završnog stanja zadatka, nepodržani nazivi vraćaju 400 pre podnošenja. Drugi model se neće automatski koristiti.
+Zahtev:
 
 ```json
 {
-  "action":"replace_section",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "source_audio_id":"AUDIO_ID",
-  "start_seconds":35.12,
-  "end_seconds":48.76,
-  "model":"chirp-v6",
-  "replacement_lyrics":"Novi segment teksta",
-  "async":true
+  "action": "create",
+  "title": "Suno Projects Documentation Verification 2026-10-09"
 }
 ```
 
-`generate_track` takođe mora pružiti `render_audio_id` (audio završenog izvoza projekta), `stem_control_tags` i izvorni audio `source_audio_id`. `batch_size` je 1–4, podrazumevano je 2; `start_seconds`, `end_seconds` su sekunde izvornog zvuka. Interval zamene sa `fixed=true` mora biti kraći od 26 sekundi.
-
-Nakon izbora kandidata, potvrdite ga:
+Odgovor:
 
 ```json
 {
-  "action":"commit_candidate",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "operation_id":"OPERATION_ID",
-  "candidate_id":"CANDIDATE_ID",
-  "track_id":"TRACK_ID"
+  "success": true,
+  "trace_id": "42408a82-988b-4127-ba68-9b89348a7c56",
+  "data": {
+    "id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+    "title": "Suno Projects Documentation Verification 2026-10-09",
+    "state": {
+      "tracks": [],
+      "timing": {
+        "bps": 2
+      }
+    }
+  }
 }
 ```
 
-Kandidat je vezan za verziju projekta u trenutku generisanja. Kada se projekat već promenio, stari kandidat se ne može direktno potvrditi.
+### Čitanje projekta: `retrieve`
+Zahtev:```json
+&#123;
+"action": "retrieve",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6"
+&#125;
 
-Kandidat lokalne zamene potvrđuje se na originalnoj traci koja sadrži jedinstveni izvorni segment, kandidat kompletnog take-a zadržava originalnu poziciju i zamenjuje originalni segment; kandidat intervala zamenjuje samo zahtevani interval, zadržavajući prethodne i naredne segmente. Kada se trajanje ne može pouzdano uskladiti, vraća se 400 i originalni projekat se zadržava; tada nemojte slati `start_beats`, `end_beats`. Kandidat nove trake treba potvrditi na praznoj traci sačuvanoj unapred, podrazumevano nasleđuje početnu tačku izvornog segmenta, ili eksplicitno unesite opseg bez preklapanja; preklapanje sa postojećim segmentima na istoj traci vraća 400. Nemojte prvo generisati pa zatim kreirati novu traku, jer će promena verzije učiniti kandidata zastarelim.
-
-## Izvoz kompletne pesme
-
-```json
-{
-  "action":"render",
-  "id":"PROJECT_ID",
-  "version_id":"CURRENT_VERSION_ID",
-  "title":"Final Mix",
-  "lyrics":"[Instrumental]",
-  "async":true,
-  "callback_url":"https://example.com/webhooks/suno"
-}
+```
+Odgovor:
 ```
 
-Server čita autoritativno stanje projekta navedene verzije i sastavlja parametre izvoza. Kada se izostave `start_beats`, `end_beats`, podrazumevano se izvozi od najranije početne tačke do najkasnije završne tačke svih čujnih segmenata; utišane trake/segmenti ne učestvuju, a kada postoje solo trake, biraju se samo solo trake. Prazan projekat ili projekat bez važećih čujnih traka vraća 400. Rezultat završnog stanja sadrži `render_id`, `audio_id`, `audio_url` i trajanje. Projekat je vezan za izvršno okruženje pri kreiranju i ne može se migrirati između okruženja niti automatski prebaciti u slučaju kvara.
+&#123;
+"success": true,
+"trace_id": "a335ceac-5cb7-4b1c-9773-77b9d5c84bd7",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
 
-> Možete otpremati ili obrađivati samo audio za koji imate zakonsko pravo korišćenja. Project API je trenutno u Beta fazi; trajno sačuvajte konačni audio URL u važnim rezultatima.
-
-## Anketiranje i oporavak od neuspeha
-
-```json
-{"action":"retrieve","id":"TASK_ID"}
 ```
-Pošaljite gornji zahtev na `/suno/tasks`. Projects zadatak se smatra uspešnim kada `finished_at` postoji i `response.success=true`; `response.success=false` označava neuspeh. HTTP 200 vraćen pri slanju ili `task_id` samo znači da je zahtev prihvaćen, ne da je audio završen.
 
-Isti `Idempotency-Key` sa istim zahtevom će vratiti originalni rezultat (uključujući neuspeh), bez automatskog ponovnog generisanja ili ponovljene naplate. Kada želite eksplicitno ponovo pokušati neuspešnu operaciju, prvo upitajte originalni zadatak da potvrdite neuspeh, zatim koristite novi ključ; nemojte ponovo slati dok je originalni zadatak još u obradi ili je rezultat neizvestan.
+## Sačuvajte stanje projekta
 
-Kategorije grešaka uključuju `studio_unavailable` / `studio_model_unavailable` (503, privremeno nije moguće obraditi ili model nije dostupan), `studio_model_unsupported` (400, model ne podržava tu operaciju), `studio_state_invalid` (400, stanje projekta ili opseg izvoza je nevažeći), `too_many_requests` (429), `studio_audio_unavailable` (403, referencirani audio se ne može koristiti za izvoz projekta) i `content_rejected` (403). Sačuvajte `trace_id` radi otklanjanja problema.
+| Parametar | Tip i opis |
+|---|---|
+| `state` | Obavezan objekat. Pošaljite **kompletno stanje projekta**, a ne delimičnu zakrpu; zasnivajte ga na `data.state` vraćenom najnovijom operacijom čitanja ili izmene i zadržite nepoznata polja. |
+| `title` | Opcioni string; kada se izostavi, koristi se `state.title`, a ako ni njega nema, koristi se podrazumevani naslov. |
+| `version_id` | Može se izostaviti pri prvom čuvanju novog praznog projekta; nakon toga se mora koristiti najnovija verzija. |
+
+`state.timing.bps` mora biti pozitivan broj, podrazumevano je 2. `state.tracks` je niz traka; `clipId` postojećih audio isečaka referencira audio ID, a `startBeats`, `endBeats`, `readStartBeats` koriste jedinice taktova projekta. Najsigurniji način uređivanja je da pročitate kompletan `state`, izmenite samo ciljnu traku ili isečak, a zatim sačuvate celinu putem `save`. Nova prazna ciljna traka treba da ima najmanje jedinstveni `id`, `type:"audio"`, `clips:[]`; kompletnu strukturu prazne trake pogledajte u primeru u odeljku „Generisanje nove audio trake“. Ne koristite direktno tačke taktova iz rezultata audio analize kao koordinate vremenske linije projekta.
+
+### Prvo čuvanje: `save`
+
+Novi projekat nema `version_id`, izostavite ga pri prvom čuvanju:
+```
+
+&#123;
+"action": "save",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"title": "Suno Projects Documentation Verification 2026-10-09",
+"state": &#123;
+"tracks": [],
+"timing": &#123;
+"bps": 2
+&#125;
+&#125;
+&#125;
+
+```
+Odgovor:
+```
+
+&#123;
+"success": true,
+"task_id": "ab172b47-4d89-404b-a10e-71f67c36ccba",
+"trace_id": "fc7b2e43-7a7a-4276-8671-27008a1153ea",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"state": &#123;
+"timing": &#123;
+"bps": 2
+&#125;,
+"tracks": []
+&#125;
+&#125;
+&#125;
+
+```
+
+## Otpremanje zvuka i dodavanje trake
+
+| Operacija | Parametar | Tip i opis |
+|---|---|---|
+| `upload` | `audio_url` | Obavezan HTTPS URL, koji pokazuje na javno dostupan zvuk za čije korišćenje imate pravo. `candidate.audio_id` u konačnom stanju može se koristiti za dodavanje trake. |
+| `add_track` | `audio_id` | Obavezan string; audio ID dovršenog materijala, a ne URL. |
+| `add_track` | `name`、`color` | Opcioni stringovi; naziv trake podrazumevano preuzima naslov zvuka, preporučena boja je `#RRGGBB`, podrazumevano `#7251F7`. |
+| `add_track` | `title` | Opcioni string; istovremeno menja naslov projekta, obično se izostavlja. |
+| `add_track` | `start_beats`、`end_beats` | Opcioni nenegativni brojevi, krajnja tačka mora biti veća od početne; podrazumevano počinje od 0. takta, a krajnja tačka se računa prema trajanju zvuka i `timing.bps`. |
+| `add_track` | `gain` | Opcioni nenegativni broj, podrazumevano 1; koeficijent jačine zvuka isečka i trake. |
+
+### Otpremanje materijala: `upload`
+
+```
+
+&#123;
+"action": "upload",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_url": "https://cdn.acedata.cloud/suno_demo.mp3",
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18"
+&#125;
+
+```
+Konačno stanje zadatka:
+```
+
+&#123;
+"success": true,
+"task_id": "3fe60d9c-cada-4aab-b1f4-8c0b28247243",
+"trace_id": "4a54cb56-befb-45da-8001-2a20cdb67d18",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"candidate": &#123;
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"title": "suno_demo",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/b21be571-bfe4-47c1-b59c-2abc55c6f9c3.m4a"
+&#125;
+&#125;
+&#125;
+
+```
+
+### Dodavanje izvorne trake: `add_track`
+
+```
+
+&#123;
+"action": "add_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "8f0c62fb-304f-420e-9707-426e8b64b5e3",
+"audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"name": "Source demo",
+"start_beats": 0
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07"
+&#125;
+
+```
+Konačno stanje zadatka:
+```
+
+&#123;
+"success": true,
+"task_id": "03f0f74f-c3ed-4d03-896b-74b2a366838b",
+"trace_id": "3442a5b2-7b16-4225-b8af-24eb872d0e07",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cf8a6aa5-0f6d-4da3-844e-cc156aa1b731",
+"track": &#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"name": "Source demo",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+
+## Generisanje nove audio trake
+
+Kandidati su vezani za verziju projekta u trenutku generisanja. Najpre sačuvajte praznu traku koja prima kandidate, zatim izvezite trenutni miks kao referencu za generisanje; nakon završetka generisanja, izaberite jednog kandidata i pošaljite ga na tu praznu traku.
+
+### Rezervisanje ciljne trake: `save`
+
+Kandidati `generate_track` su vezani za trenutnu verziju projekta. U **kompletnom** `state` vraćenom u konačnom stanju prethodnog `add_track`, dodajte sledeću praznu traku u `state.tracks`, a zatim je sačuvajte putem `save`; sva ostala postojeća polja zadržite neizmenjena:
+```
+&#123;
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"type": "audio",
+"name": "Generisani klavir",
+"clips": [],
+"takeLanes": [],
+"mute": false,
+"solo": false,
+"amplitude": 1,
+"instrument": &#123;
+"type": "song"
+&#125;,
+"color": "#7251F7"
+&#125;
+
+```
+保存响应：
+```
+
+&#123;
+"success": true,
+"task_id": "783f8d49-cc59-4a65-9f9d-ca00e7d7b8a9",
+"trace_id": "0a9c8f13-7e4f-4915-8a40-010ce4ac61dc",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d"
+&#125;
+&#125;
+
+```
+
+### Izvoz referentnog miksa: `render`
+
+| Parametar | Tip i opis |
+|---|---|
+| `title` | Obavezan string; naslov izvezenog zvuka. |
+| `lyrics`、`tags` | Opcioni stringovi; tekst je podrazumevano `[Instrumental]`, a `tags` je opis stila. |
+| `start_beats`、`end_beats` | Opcioni nenegativni brojevi, krajnja tačka mora biti veća od početne; kada se izostave, obuhvataju sve čujne klipove. Utišani klipovi ne učestvuju; kada postoje solo numere, biraju se samo solo numere. |
+
+Nakon uspeha, uzmite `render_audio_id` iz terminalnog stanja zadatka `response.data.audio_id`.
+
+```
+
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"title": "Suno Projects Docs Source Mix",
+"lyrics": "[Instrumental]",
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154"
+&#125;
+
+```
+Terminalno stanje zadatka:
+```
+
+&#123;
+"success": true,
+"task_id": "adc559fa-4a87-4a53-9336-28d4302a151b",
+"trace_id": "165fde93-f34b-4b0b-a7cd-0fba7d7ac154",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"render_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/41038732-4dc4-40bf-b00d-2728d99bc26e.m4a"
+&#125;
+&#125;
+
+```
+
+### Generisanje kandidata: `generate_track`
+
+| Parametar | Tip i opis |
+|---|---|
+| `source_audio_id` | Obavezan; ID završenog izvornog zvuka. Prvo dodajte izvorni zvuk u projekat, tek tada se može odrediti pozicija kandidata. |
+| `render_audio_id` | Obavezan; `response.data.audio_id` iz gore navedenog terminalnog stanja `render`, a ne URL zvuka. |
+| `model` | Obavezan; opcije su `chirp-v3-5`、`chirp-v4`、`chirp-v4-5`、`chirp-v4-5-plus`、`chirp-v5`、`chirp-v5-5`、`chirp-v6`、`chirp-v6-wild`、`chirp-v6-mini`. Da li je određena kombinacija dostupna određuje terminalno stanje zadatka. |
+| `start_seconds`、`end_seconds` | Obavezni brojevi, `0 ≤ start_seconds < end_seconds`; interval sekundi unutar izvornog zvuka, a ne broj taktova projekta, i nije zagarantovano trajanje izlaza. |
+| `stem_control_tags` | Obavezan string; opis dodate deonice, na primer `add Piano`、`add Drums`、`add Bass`, a nije fiksni skup vrednosti. |
+| `batch_size` | Opcioni ceo broj 1–4, podrazumevano 2; broj kandidata. |
+| `instrumental`、`vocal_gender` | Opcioni; čisto instrumentalno je podrazumevano `true`, preferencija vokala može biti `f`、`m`、`unspecified`, podrazumevano je `unspecified`. |
+| `title`、`tags`、`negative_tags`、`prompt` | Opcioni stringovi; redom su naslov kandidata, željeni stil, stil koji treba izbeći, tekstualni ili lirski upit za novu deonicu. |
+
+```
+
+&#123;
+"action": "generate_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"render_audio_id": "41038732-4dc4-40bf-b00d-2728d99bc26e",
+"model": "chirp-v5",
+"start_seconds": 12,
+"end_seconds": 20,
+"stem_control_tags": "add Piano",
+"title": "Documentation Piano Take",
+"tags": "gentle piano, instrumental",
+"batch_size": 2,
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f"
+&#125;
+
+```
+Terminalno stanje zadatka:
+```
+
+&#123;
+"success": true,
+"task_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"trace_id": "81a4cf70-d9f6-48b3-a889-b68e74d6307f",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidates": [
+&#123;
+"id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 41.76,
+"audio_url": "https://cdn.acedata2.cloud/suno/20f8ffe5063111b1eb866336242e2c0b2b9b7103a8dc0c0c19106cbf50843f86.mp3"
+&#125;,
+&#123;
+"id": "18d6e0a4-2d73-43c3-92e9-be87cf11e139",
+"title": "Documentation Piano Take",
+"state": "complete",
+"duration": 40.96,
+"audio_url": "https://cdn.acedata2.cloud/suno/c1c50a016333e3a037f18f651c0a88061880b3069aee7c6a258d6c9cdc041a6b.mp3"
+&#125;
+]
+&#125;
+&#125;
+```
+
+12–20 sekundi u zahtevu predstavljaju referentni interval izvornog zvuka, a kandidatski zvuk traje oko 41 sekundu; `start_seconds`/`end_seconds` nisu garancija trajanja izlaza.
+
+### Usvajanje kandidata: `commit_candidate`
+
+| Parametar | Tip i opis |
+|---|---|
+| `operation_id` | Obavezno; terminalno stanje zadatka generisanja `data.operation_id`. |
+| `candidate_id` | Obavezno; izabrani `data.candidates[].id`. |
+| `track_id` | Obavezno; prazna traka sačuvana pre generisanja `state.tracks[].id`. |
+| `start_beats`、`end_beats` | Opciono za kandidata na novoj traci; određuje opseg broja taktova projekta i ne sme se preklapati sa postojećim klipovima na ciljnoj traci. Kada se izostavi, koristi se početna tačka izvornog klipa i završna tačka se izračunava prema trajanju kandidata. |
+| `name`、`gain` | Opciono za kandidata na novoj traci; naziv klipa i nenegativni koeficijent jačine zvuka, podrazumevana vrednost za `gain` je 1. |
+
+Generisanje proizvodi samo kandidate, **neće ih automatski staviti u projekat**. `commit_candidate` proverava da kandidat i dalje pripada trenutnoj verziji. Kandidat za lokalnu zamenu može se automatski poslati samo kada se stvarno trajanje može pouzdano uskladiti sa kompletnim izvornim zvukom ili izabranim intervalom; kada se ne podudara, originalni projekat se zadržava i vraća se greška, a nije moguće nasilno spajanje ručnim nagađanjem broja taktova.
+
+```
+
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "cb0a82c9-aa5b-48cc-9395-0528675fc18d",
+"operation_id": "66a7356f-3b2a-4472-bdfd-f7b973380644",
+"candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6"
+&#125;
+
+```
+Terminalno stanje zadatka:
+```
+
+&#123;
+"success": true,
+"task_id": "3291bd86-d524-4720-9b6e-655efa600e3d",
+"trace_id": "1bfee6c0-e936-4147-8a75-a903173d13d6",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"committed_candidate_id": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"clips": [
+&#123;
+"clipId": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"startBeats": 0,
+"endBeats": 82
+&#125;
+]
+&#125;,
+&#123;
+"id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"clips": [
+&#123;
+"clipId": "1a4788a8-6f04-47d7-9698-4199b585b9a8",
+"startBeats": 0,
+"endBeats": 83.52
+&#125;
+]
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+
+### Izvoz nakon slanja
+
+Nakon slanja kandidata na novu traku, izvoz cele pesme koja uključuje tog kandidata je odbijen. Zahtev i terminalno stanje:
+```
+
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"title": "Suno Projects Docs Mix With Piano",
+"lyrics": "[Instrumental]",
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0"
+&#125;
+
+```
+Terminalno stanje zadatka:
+```
+
+&#123;
+"success": false,
+"task_id": "12fe503c-017e-46db-9d99-8cfb861ad4fc",
+"trace_id": "2f376c45-a081-4c2a-b6a5-658401fe8dc0",
+"error": &#123;
+"code": "studio_audio_unavailable",
+"message": "A referenced audio is not available for project rendering. Keep the original project and use a supported audio."
+&#125;
+&#125;
+
+```
+
+To što je veza kandidatskog zvuka čitljiva ne znači da se projekat koji ga sadrži nužno može izvesti. Kada se primi `studio_audio_unavailable`, treba zadržati originalni projekat i proveriti dostupnost referenciranog zvuka.
+
+## Zamena postojećeg klipa
+
+`replace_section` može direktno koristiti postojeći izvorni zvuk, bez potrebe da se prethodno izveze miks. Generisanje vraća samo kandidate; pri slanju izaberite originalnu traku koja sadrži jedinstveni izvorni klip.
+
+| Parametar | Tip i opis |
+|---|---|
+| `source_audio_id` | Obavezno; ID dovršenog izvornog zvuka koji treba zameniti. |
+| `model` | Obavezno; koristite javne modele navedene u „Generisanje kandidata“, a dostupnost modela i operacije određuje terminalno stanje zadatka. |
+| `start_seconds`、`end_seconds` | Obavezni brojevi, `0 ≤ start_seconds < end_seconds ≤ trajanje izvornog zvuka`; interval u sekundama unutar izvornog zvuka. |
+| `prompt`、`replacement_lyrics` | Opcioni stringovi; prvi predstavlja originalne stihove ili kontekst, a drugi nove stihove za interval zamene. |
+| `title`、`tags`、`negative_tags` | Opcioni stringovi; naslov kandidata, željeni stil i stilovi koje treba izbeći. |
+| `fixed` | Opciona Bulova vrednost, podrazumevano `false`; kada je postavljena na `true`, interval mora biti kraći od 26 sekundi, a model je možda ne podržava. |
+
+### Generisanje kandidata za zamenu: `replace_section`
+
+```
+
+&#123;
+"action": "replace_section",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"source_audio_id": "b21be571-bfe4-47c1-b59c-2abc55c6f9c3",
+"model": "chirp-v5",
+"title": "Documentation Verse Edit",
+"tags": "dreamy Chinese pop",
+"prompt": "[Verse 1]\n晨光洒在海边\n浪花笑得灿烂\n你和我在沙滩\n钟表停止转动\n冰淇淋在融化\n手牵手去散步\n[Chorus]\n风儿轻轻吹过\n心跳不停鼓\n夏天夏天\n时间停在这一天\n笑声回荡\n微蓝天空在身旁",
+"replacement_lyrics": "我们走在海边\n微风吹过晴天",
+"start_seconds": 12,
+"end_seconds": 20,
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+&#123;
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc"
+&#125;
+
+```
+Konačno stanje zadatka:
+```
+
+&#123;
+"success": true,
+"task_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"trace_id": "9f9c0bec-963d-417f-aaf2-0b7f89e0dcbc",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidates": [
+&#123;
+"id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/287a448c0e6099b5e66901f363607bcfcf38d06312c344b03a3486bbb4fe037b.mp3"
+&#125;,
+&#123;
+"id": "f0b66dff-9f8e-45f2-b441-c94e2ecd3a11",
+"title": "Documentation Verse Edit",
+"state": "complete",
+"duration": 36,
+"audio_url": "https://cdn.acedata2.cloud/suno/172227abd70f2201081a8f58e4c3b401f1e75fd0b29c03aa95abdb6689bfd0a5.mp3"
+&#125;
+]
+&#125;
+&#125;
+
+```
+
+### Trajanje kandidata se ne podudara
+
+Prilikom slanja kandidata za delimičnu zamenu, `track_id` treba da pokazuje na originalnu numeru koja sadrži jedinstveni izvorni segment, a `start_beats` i `end_beats` treba izostaviti. Interfejs će ažurirati projekat samo kada se trajanje kandidata može pouzdano podudarati sa kompletnim izvornim zvukom ili izabranim intervalom.
+
+Nakon izbora intervala od 8 sekundi, oba kandidata imaju po 36 sekundi, što nije jednako ni originalnom zvuku od 41 sekunde ni izabranim 8 sekundama. Prilikom slanja jednog od kandidata vraća se:
+```
+
+&#123;
+"action": "commit_candidate",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"operation_id": "e742a2d5-35f1-4a43-b351-c6aa5a744c4c",
+"candidate_id": "c486e799-5f89-4db0-b414-3b666e0db2b3",
+"track_id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9",
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3"
+&#125;
+
+```
+Konačno stanje zadatka:
+```
+
+&#123;
+"success": false,
+"task_id": "2261a2a6-d7fb-42ac-ae58-41005cfc8173",
+"trace_id": "25c6e92d-e0b9-4f9b-ba35-434635ec7bb3",
+"error": &#123;
+"code": "bad_request",
+"message": "Trajanje kandidata se ne podudara sa izvornikom ili izabranim odeljkom. Zadržite originalnu numeru i pregledajte kandidata pre uređivanja."
+&#125;
+&#125;
+
+```
+
+Stoga originalna numera nije izmenjena. Kada se pojavi ova greška, kandidate treba zadržati za preslušavanje i ručnu obradu, ne treba ih smatrati uspešno umetnutim u projekat niti automatski ponovo slati plaćenu generaciju.
+
+## Brisanje numere
+
+`remove_track` zahteva trenutni `version_id` i `state.tracks[].id`; nakon uspeha koristi se vraćena nova verzija. U nastavku se briše numera kandidata koja se ne može koristiti za izvoz cele pesme, a zatim se ponovo učitava stanje projekta.
+
+```
+
+&#123;
+"action": "remove_track",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "1ff01ada-e26b-444e-a618-a91f76754360",
+"track_id": "bdec15b5-ce96-43fa-b681-26298e013b06"
+&#125;
+
+```
+Odgovor:
+```
+
+&#123;
+"success": true,
+"trace_id": "5df2f4b4-6f09-4006-93bd-ad44f4ccb8c1",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"removed_track_id": "bdec15b5-ce96-43fa-b681-26298e013b06",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+Ponovo učitajte projekat:
+```
+
+&#123;
+"success": true,
+"trace_id": "c7613f9b-6484-47b1-83ff-f8a0c1529d8e",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"state": &#123;
+"tracks": [
+&#123;
+"id": "b7ee9e97-f517-44d7-af4c-e9dad71498c9"
+&#125;
+]
+&#125;
+&#125;
+&#125;
+
+```
+
+### Izvoz nakon brisanja
+
+Nakon brisanja te numere kandidata, originalna izvorna numera i dalje postoji, a izvoz je ponovo uspešan korišćenjem najnovije verzije:
+```
+
+&#123;
+"action": "render",
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"title": "Suno Projects Docs Mix After Remove",
+"async": true
+&#125;
+
+```
+Odgovor o prihvatanju:
+```
+
+&#123;
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9"
+&#125;
+
+```
+Konačno stanje zadatka:
+```
+
+&#123;
+"success": true,
+"task_id": "41c8bcb2-eb98-4da7-8081-7755bcc7be8d",
+"trace_id": "6480a230-7553-4dd1-a8e2-9131dab418a9",
+"data": &#123;
+"id": "af0e104a-2a4c-40e0-9c70-7614566824a6",
+"version_id": "c3f650a9-1c49-4e80-88ef-27deb9b16ce8",
+"render_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"audio_id": "75aaaa5f-e633-4006-9200-98d03f3542af",
+"duration": 41,
+"audio_url": "https://cdn.acedata2.cloud/suno/75aaaa5f-e633-4006-9200-98d03f3542af.m4a"
+&#125;
+&#125;
+```
+
+Uspešno izvezeni `audio_url` može se koristiti za preuzimanje ili reprodukciju. To što je audio veza dostupna ne dokazuje da i drugi kandidati imaju pravo na izvoz projekta.
+
+## Greške i oporavak
+
+| Rezultat | Značenje | Sledeći korak |
+|---|---|---|
+| `project_version_conflict` / `project_candidate_stale`（409） | Verzija projekta se promenila ili kandidat ne pripada trenutnoj verziji. | `retrieve` najnoviji projekat i ponovo isplanirajte izmene; nemojte ponavljati stare kandidate. |
+| `bad_request` / `studio_state_invalid` / `studio_model_unsupported`（obično 400） | Parametri, stanje numere, trajanje kandidata ili model ne odgovaraju operaciji. | Pogledajte grešku završnog stanja zadatka, ispravite unos; kada kandidat ne može bezbedno da se spoji, zadržite originalni projekat. |
+| `studio_audio_unavailable` / `studio_access_denied` / `content_rejected`（403） | Referentni audio nije dostupan za tu operaciju projekta, nemate pravo pristupa ili je provera sadržaja odbila zahtev. | Proverite izvor zvuka i `trace_id` zadatka; nemojte izjednačavati već generisani kandidat sa mogućnošću izvoza cele numere. |
+| `too_many_requests`（429） | Zahtev je ograničen učestalošću. | Najpre upitajte originalni zadatak, zatim odlučite da li da pokrenete novu operaciju sa novim idempotentnim ključem. |
+| `studio_unavailable` / `studio_model_unavailable`（503） | Obrada projekta ili izabrani model privremeno nisu dostupni. | Zadržite rezultat originalnog zadatka; kasnije eksplicitno pokušajte ponovo, nemojte automatski menjati model. |
+| `studio_processing_failed` / istek vremena（500/504） | Obrada nije uspela ili je završno stanje neizvesno. | Upitajte prema `task_id` ili originalnom idempotentnom ključu, izbegnite generisanje uz dvostruku naplatu. |
+
+Projekti i kandidati su vezani za aplikaciju i okruženje izvršavanja koje ih je kreiralo, i ne može se pretpostaviti ponovna upotreba između aplikacija ili automatsko prebacivanje pri kvaru. Trajno sačuvajte URL konačnog uspešno izvezenog zvuka i zadržite `trace_id` radi otklanjanja problema.
+```
