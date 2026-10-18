@@ -1,0 +1,336 @@
+---
+title: "Gemini Generate Content API 使用說明"
+description: "Gemini AI 整合指南 - Ace Data Cloud"
+---
+
+Google Gemini 是一個非常強大的 AI 對話系統，透過輸入提示就能在幾秒內生成流暢自然的回覆。本文檔主要描述 Gemini Generate Content API 的使用方法，這是 Google 官方原生 API 格式，支援 `generateContent` 和 `streamGenerateContent` 兩個端點。
+
+## 與 Chat Completions API 的差異
+
+Gemini Generate Content API 使用 Google 官方原生請求格式（`contents` 欄位），而不是 OpenAI 相容格式（`messages` 欄位）。如果你已經使用 Google Gemini SDK 或熟悉官方 API 格式，可以直接使用此 API 而無需修改請求格式。
+
+## 目前支援範圍
+
+介面接受文字、圖片、影片和音訊輸入（`inlineData` 或 `fileData`）、思考設定及自訂函式宣告。音訊輸出、內建工具和明確內容快取等原生欄位尚無統一可用性保證，請以具體模型的實際回傳為準。
+
+使用 `fileData.fileUri` 提交音訊等檔案時，請確保檔案可透過 HTTPS 直接存取，不依賴登入狀態，並讓簽名連結的有效期覆蓋整個請求處理時間。非串流音訊分析需要在模型完成處理後才回傳結果，可能超過 90 秒；用戶端應按檔案大小和業務情境設定足夠長的總逾時，避免在伺服器端仍在處理時中斷連線。
+
+## 申請流程
+
+使用 Gemini Generate Content API 前，請先造訪 [Gemini Generate Content API](https://platform.acedata.cloud/documents/gemini-generate-content-api) 頁面，點擊「取得」按鈕來獲得請求所需的憑證。
+
+如果尚未登入或註冊，會自動跳轉到登入頁面。首次申請會有免費額度。
+
+## 基本用法
+
+### Non-Streaming（非串流）
+
+傳送 POST 請求至 `/v1beta/models/{model}:generateContent`：
+
+> **提示**：`gemini-3.x` 系列 flash 為思考模型，會先消耗 reasoning tokens；請把 `generationConfig.maxOutputTokens` 設至 512 以上，否則可能只回傳空內容。
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-3.5-flash:generateContent" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "你好，请介绍一下你自己"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+回傳結果範例：
+
+```json
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [{"text": "你好！很高兴与你交流。"}]
+      },
+      "finishReason": "MAX_TOKENS"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 6,
+    "candidatesTokenCount": 19,
+    "thoughtsTokenCount": 489,
+    "totalTokenCount": 514
+  },
+  "usage": {
+    "prompt_tokens": 6,
+    "completion_tokens": 19,
+    "total_tokens": 514,
+    "thoughts_tokens": 489,
+    "cost": {
+      "amount": 0.008860916380159999,
+      "currency": "credit",
+      "list_amount": 0.009631430847999998
+    }
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "model": "gemini-3.5-flash"
+}
+```
+
+`usageMetadata` 中的 token 欄位會按原生 Gemini 語義計費：
+
+- `promptTokenCount` 包含 `cachedContentTokenCount`，快取命中的部分按快取讀取價格計算，不會重複計為一般輸入。
+- `promptTokensDetails` 與 `cacheTokensDetails` 會正規化為 `usage.prompt_tokens_details` 下的 `text_tokens`、`image_tokens`、`video_tokens`、`audio_tokens` 及對應 `cached_*` 明細。這些值分別包含在 `prompt_tokens` 與 `cached_tokens` 中；不同模態僅按各自價格重新計算，不會重複計費。
+- `candidatesTokenCount` 和 `thoughtsTokenCount` 均按輸出 token 價格計算。
+- `toolUsePromptTokenCount` 是獨立的工具輸入 token，按輸入 token 價格計算。
+
+Ace Data Cloud 額外回傳正規化的 `usage` 物件，跨模型協議統一從 `usage.cost` 讀取本次呼叫費用。`cost` 是可選的費用預覽；價格預覽暫時不可用時，模型回應仍會正常回傳，但可能不包含該欄位。最終帳單以用量記錄為準。
+
+### Streaming（串流）
+
+傳送 POST 請求至 `/v1beta/models/{model}:streamGenerateContent?alt=sse`：
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "写一首关于春天的诗"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+串流回傳會以 SSE（Server-Sent Events）格式逐步回傳內容。中間事件通常只包含增量內容；含權威用量的終態事件會包含 `usageMetadata` 和正規化的 `usage`，費用仍位於 `usage.cost`：
+
+```text
+data: {"candidates":[{"content":{"parts":[{"text":"Hello!"}],"role":"model"},"index":0}],"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":89,"totalTokenCount":96},"usage":{"prompt_tokens":7,"completion_tokens":89,"total_tokens":96,"cost":{"amount":0.00026161075472,"currency":"credit","list_amount":0.000284359516}},"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+```
+
+連線關閉即表示串流結束；原生 Gemini 串流不會傳送 `data: [DONE]`。如果終態價格預覽暫時不可用，`usage` 仍會回傳 token 用量，但會省略 `cost`。
+
+## 支援的模型
+| 模型名稱                     | 說明                       |
+| ------------------------ | ------------------------ |
+| `gemini-3.8-flash`       | 最新 Flash 模型，適合高品質通用任務    |
+| `gemini-3.7-flash`       | 高品質通用 Flash 模型           |
+| `gemini-3.6-flash`       | 穩定的高效能多模態模型              |
+| `gemini-3.5-flash`       | 高吞吐量多模態模型                 |
+| `gemini-3.5-flash-lite`  | 低延遲、低成本模型                |
+| `gemini-3.1-flash-lite`  | 穩定版輕量模型                  |
+| `gemini-3.1-pro-preview` | 複雜推理與編碼模型                |
+| `gemini-3-flash-preview` | Gemini 3 Flash 預覽模型      |
+| `gemini-2.5-pro`         | Gemini 2.5 Pro 模型        |
+| `gemini-2.5-flash`       | Gemini 2.5 Flash 模型      |
+| `gemini-2.5-flash-lite`  | Gemini 2.5 Flash-Lite 模型 |
+| `gemini-3.1-flash-image` | 圖像生成模型                   |
+| `gemini-3-pro-image`     | 高品質圖像生成模型                |
+| `gemini-2.5-flash-image` | Gemini 2.5 圖像生成模型        |
+
+## 進階功能
+
+### 系統指令
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好"}]
+    }
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "你是一位專業的詩人，所有回覆都使用詩歌形式。"}]
+  }
+}
+```
+
+### 生成設定
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "講一個故事"}]
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.7,
+    "maxOutputTokens": 1024,
+    "topP": 0.9,
+    "topK": 40
+  }
+}
+```
+
+### JSON 模式
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "列出三個中國城市及其人口"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "population": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 思考模式（Thinking）
+
+支援思考功能的模型（如 gemini-2.5-flash、gemini-2.5-pro）可以啟用思考模式：
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "解釋量子糾纏"}]
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": 2048
+    }
+  }
+}
+```
+
+### 函數呼叫
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "北京現在的天氣怎麼樣？"}]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "取得指定城市的天氣資訊",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "城市名稱"
+              }
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 多輪對話
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好，我叫小明"}]
+    },
+    {
+      "role": "model",
+      "parts": [{"text": "你好小明！很高興認識你。"}]
+    },
+    {
+      "role": "user",
+      "parts": [{"text": "我叫什麼名字？"}]
+    }
+  ]
+}
+```
+
+### 圖片理解
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {"text": "描述這張圖片"},
+        {
+          "inlineData": {
+            "mimeType": "image/jpeg",
+            "data": "base64_encoded_image_data..."
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+## 安全設定
+
+可透過 `safetySettings` 控制內容過濾：
+
+```json
+{
+  "contents": [...],
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    }
+  ]
+}
+```
+
+## 錯誤處理
+
+| HTTP 狀態碼 | 含義             |
+| -------- | -------------- |
+| 400      | 請求參數無效         |
+| 401      | 驗證失敗，請檢查 Token |
+| 403      | 內容被安全過濾器攔截     |
+| 429      | 請求過於頻繁         |
+| 500      | 伺服器內部錯誤        |
