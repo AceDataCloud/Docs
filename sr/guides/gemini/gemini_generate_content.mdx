@@ -1,0 +1,336 @@
+---
+title: "Uputstvo za korišćenje Gemini Generate Content API-ja"
+description: "Gemini AI API guide - Ace Data Cloud"
+---
+
+Google Gemini je veoma moćan AI sistem za razgovor, koji putem unosa upita može za nekoliko sekundi generisati tečne i prirodne odgovore. Ovaj dokument uglavnom opisuje način korišćenja Gemini Generate Content API-ja, što je format Google-ovog zvaničnog izvornog API-ja, koji podržava dve krajnje tačke: `generateContent` i `streamGenerateContent`.
+
+## Razlika u odnosu na Chat Completions API
+
+Gemini Generate Content API koristi Google-ov zvanični izvorni format zahteva (polje `contents`), umesto formata kompatibilnog sa OpenAI-jem (polje `messages`). Ako već koristite Google Gemini SDK ili ste upoznati sa formatom zvaničnog API-ja, možete direktno koristiti ovaj API bez izmene formata zahteva.
+
+## Trenutno podržani opseg
+
+Interfejs prihvata tekstualne, slikovne, video i audio ulaze (`inlineData` ili `fileData`), konfiguracije razmišljanja i deklaracije prilagođenih funkcija. Za izvorna polja kao što su audio izlaz, ugrađeni alati i eksplicitno keširanje konteksta još ne postoji garancija jedinstvene dostupnosti; oslonite se na stvarni povratni rezultat konkretnog modela.
+
+Kada šaljete fajlove kao što je audio putem `fileData.fileUri`, uverite se da fajl može biti direktno dostupan preko HTTPS-a, da ne zavisi od statusa prijave i da period važenja potpisanog linka pokriva celokupno vreme obrade zahteva. Nestrimovana audio analiza vraća rezultat tek nakon što model završi obradu, što može trajati duže od 90 sekundi; klijent treba da postavi dovoljno dugo ukupno vremensko ograničenje prema veličini fajla i poslovnom scenariju, kako bi se izbeglo prekidanje veze dok server i dalje obrađuje zahtev.
+
+## Postupak prijave
+
+Pre korišćenja Gemini Generate Content API-ja, prvo posetite stranicu [Gemini Generate Content API](https://platform.acedata.cloud/documents/gemini-generate-content-api), a zatim kliknite na dugme „Preuzmi“ da biste dobili potrebne akreditive za zahtev.
+
+Ako još niste prijavljeni ili registrovani, automatski ćete biti preusmereni na stranicu za prijavu. Prva prijava ima besplatnu kvotu.
+
+## Osnovna upotreba
+
+### Bez strimovanja
+
+Pošaljite POST zahtev na `/v1beta/models/{model}:generateContent`:
+
+> **Napomena**: flash serije `gemini-3.x` su modeli za razmišljanje i prvo troše reasoning tokene; postavite `generationConfig.maxOutputTokens` na više od 512, u suprotnom može biti vraćen samo prazan sadržaj.
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-3.5-flash:generateContent" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "你好，请介绍一下你自己"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Primer povratnog rezultata:
+
+```json
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [{"text": "你好！很高兴与你交流。"}]
+      },
+      "finishReason": "MAX_TOKENS"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 6,
+    "candidatesTokenCount": 19,
+    "thoughtsTokenCount": 489,
+    "totalTokenCount": 514
+  },
+  "usage": {
+    "prompt_tokens": 6,
+    "completion_tokens": 19,
+    "total_tokens": 514,
+    "thoughts_tokens": 489,
+    "cost": {
+      "amount": 0.008860916380159999,
+      "currency": "credit",
+      "list_amount": 0.009631430847999998
+    }
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "model": "gemini-3.5-flash"
+}
+```
+
+Polja tokena u `usageMetadata` se naplaćuju prema izvornoj Gemini semantici:
+
+- `promptTokenCount` uključuje `cachedContentTokenCount`, deo pogođen iz keša obračunava se po ceni čitanja iz keša i neće se ponovo računati kao običan ulaz.
+- `promptTokensDetails` i `cacheTokensDetails` će biti normalizovani kao `text_tokens`, `image_tokens`, `video_tokens`, `audio_tokens` i odgovarajuće stavke `cached_*` u okviru `usage.prompt_tokens_details`. Ove vrednosti su redom uključene u `prompt_tokens` i `cached_tokens`; različiti modaliteti se ponovo obračunavaju samo prema svojim cenama i neće biti dvostruko naplaćeni.
+- `candidatesTokenCount` i `thoughtsTokenCount` se oba obračunavaju po ceni izlaznih tokena.
+- `toolUsePromptTokenCount` je nezavisan token ulaza alata, koji se obračunava po ceni ulaznih tokena.
+
+Ace Data Cloud dodatno vraća normalizovani objekat `usage`, a trošak ovog poziva se jedinstveno čita iz `usage.cost` kroz protokole modela. `cost` je opcionalni pregled troškova; kada pregled cena privremeno nije dostupan, odgovor modela će i dalje biti normalno vraćen, ali možda neće sadržati ovo polje. Konačni račun se zasniva na evidenciji korišćenja.
+
+### Strimovanje
+
+Pošaljite POST zahtev na `/v1beta/models/{model}:streamGenerateContent?alt=sse`:
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "写一首关于春天的诗"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Strimovani povrat će postepeno vraćati sadržaj u SSE (Server-Sent Events) formatu. Međudogađaji obično sadrže samo inkrementalni sadržaj; završni događaj sa merodavnom potrošnjom će sadržati `usageMetadata` i normalizovani `usage`, a trošak se i dalje nalazi u `usage.cost`:
+
+```text
+data: {"candidates":[{"content":{"parts":[{"text":"Hello!"}],"role":"model"},"index":0}],"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":89,"totalTokenCount":96},"usage":{"prompt_tokens":7,"completion_tokens":89,"total_tokens":96,"cost":{"amount":0.00026161075472,"currency":"credit","list_amount":0.000284359516}},"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+```
+
+Zatvaranje veze označava kraj strima; izvorni Gemini strim ne šalje `data: [DONE]`. Ako pregled cene završnog stanja privremeno nije dostupan, `usage` će i dalje vratiti potrošnju tokena, ali će izostaviti `cost`.
+
+## Podržani modeli
+| Naziv modela              | Opis                                |
+| ------------------------ | ----------------------------------- |
+| `gemini-3.8-flash`       | Najnoviji Flash model, pogodan za visokokvalitetne opšte zadatke |
+| `gemini-3.7-flash`       | Visokokvalitetni univerzalni Flash model |
+| `gemini-3.6-flash`       | Stabilan multimodalni model visokih performansi |
+| `gemini-3.5-flash`       | Multimodalni model velike propusnosti |
+| `gemini-3.5-flash-lite`  | Model niske latencije i niske cene |
+| `gemini-3.1-flash-lite`  | Stabilna verzija lakog modela |
+| `gemini-3.1-pro-preview` | Model za složeno rezonovanje i kodiranje |
+| `gemini-3-flash-preview` | Gemini 3 Flash model za pregled |
+| `gemini-2.5-pro`         | Gemini 2.5 Pro model |
+| `gemini-2.5-flash`       | Gemini 2.5 Flash model |
+| `gemini-2.5-flash-lite`  | Gemini 2.5 Flash-Lite model |
+| `gemini-3.1-flash-image` | Model za generisanje slika |
+| `gemini-3-pro-image`     | Model za generisanje slika visokog kvaliteta |
+| `gemini-2.5-flash-image` | Gemini 2.5 model za generisanje slika |
+
+## Napredne funkcije
+
+### Sistemska uputstva
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好"}]
+    }
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "你是一个专业的诗人，所有回复都用诗歌形式。"}]
+  }
+}
+```
+
+### Konfiguracija generisanja
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "讲一个故事"}]
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.7,
+    "maxOutputTokens": 1024,
+    "topP": 0.9,
+    "topK": 40
+  }
+}
+```
+
+### JSON režim
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "列出三个中国城市及其人口"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "population": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Režim razmišljanja (Thinking)
+
+Modeli koji podržavaju funkciju razmišljanja (kao što su gemini-2.5-flash, gemini-2.5-pro) mogu da omoguće režim razmišljanja:
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "解释量子纠缠"}]
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": 2048
+    }
+  }
+}
+```
+
+### Pozivanje funkcija
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "北京现在的天气怎么样？"}]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "获取指定城市的天气信息",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "城市名称"
+              }
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Višekružni razgovor
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好，我叫小明"}]
+    },
+    {
+      "role": "model",
+      "parts": [{"text": "你好小明！很高兴认识你。"}]
+    },
+    {
+      "role": "user",
+      "parts": [{"text": "我叫什么名字？"}]
+    }
+  ]
+}
+```
+
+### Razumevanje slika
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {"text": "描述这张图片"},
+        {
+          "inlineData": {
+            "mimeType": "image/jpeg",
+            "data": "base64_encoded_image_data..."
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Bezbednosna podešavanja
+
+Filtriranje sadržaja može se kontrolisati putem `safetySettings`:
+
+```json
+{
+  "contents": [...],
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    }
+  ]
+}
+```
+
+## Obrada grešaka
+
+| HTTP statusni kod | Značenje                         |
+| -------- | ------------------------------ |
+| 400      | Parametri zahteva nisu važeći  |
+| 401      | Autentifikacija nije uspela, proverite Token |
+| 403      | Sadržaj je blokirao bezbednosni filter |
+| 429      | Zahtevi su previše učestali    |
+| 500      | Interna greška servera         |
