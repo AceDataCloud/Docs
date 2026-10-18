@@ -1,0 +1,336 @@
+---
+title: "Gemini Generate Content API 사용 설명"
+description: "Gemini AI API guide - Ace Data Cloud"
+---
+
+Google Gemini는 입력 프롬프트를 통해 몇 초 안에 유창하고 자연스러운 응답을 생성할 수 있는 매우 강력한 AI 대화 시스템입니다. 본 문서는 Gemini Generate Content API의 사용 방법을 주로 설명하며, 이는 Google 공식 네이티브 API 형식으로 `generateContent` 및 `streamGenerateContent` 두 엔드포인트를 지원합니다.
+
+## Chat Completions API와의 차이점
+
+Gemini Generate Content API는 OpenAI 호환 형식(`messages` 필드)이 아닌 Google 공식 네이티브 요청 형식(`contents` 필드)을 사용합니다. 이미 Google Gemini SDK를 사용하고 있거나 공식 API 형식에 익숙하다면, 요청 형식을 수정하지 않고 직접 이 API를 사용할 수 있습니다.
+
+## 현재 지원 범위
+
+인터페이스는 텍스트, 이미지, 비디오 및 오디오 입력(`inlineData` 또는 `fileData`), 사고 설정 및 사용자 지정 함수 선언을 받습니다. 오디오 출력, 내장 도구 및 명시적 컨텍스트 캐시 등의 네이티브 필드는 아직 통일된 가용성이 보장되지 않으므로, 구체적인 모델의 실제 반환값을 기준으로 하십시오.
+
+`fileData.fileUri`를 사용하여 오디오 등의 파일을 제출할 때는 파일에 HTTPS를 통해 직접 접근할 수 있고 로그인 상태에 의존하지 않도록 하며, 서명 링크의 유효 기간이 전체 요청 처리 시간을 포괄하도록 하십시오. 비스트리밍 오디오 분석은 모델이 처리를 완료한 후에야 결과를 반환하므로 90초를 초과할 수 있습니다. 클라이언트는 파일 크기와 비즈니스 시나리오에 따라 충분히 긴 총 타임아웃을 설정하여 서버가 아직 처리 중일 때 연결이 끊어지는 것을 방지해야 합니다.
+
+## 신청 절차
+
+Gemini Generate Content API를 사용하기 전에 먼저 [Gemini Generate Content API](https://platform.acedata.cloud/documents/gemini-generate-content-api) 페이지에 접속하여 "획득" 버튼을 클릭해 요청에 필요한 자격 증명을 받으십시오.
+
+아직 로그인하거나 등록하지 않은 경우 자동으로 로그인 페이지로 이동합니다. 최초 신청 시 무료 할당량이 제공됩니다.
+
+## 기본 사용법
+
+### Non-Streaming(비스트리밍)
+
+`/v1beta/models/{model}:generateContent`로 POST 요청을 전송합니다:
+
+> **팁**: `gemini-3.x` 시리즈 flash는 사고 모델로, 먼저 reasoning tokens를 소모합니다. `generationConfig.maxOutputTokens`를 512 이상으로 설정하십시오. 그렇지 않으면 빈 콘텐츠만 반환될 수 있습니다.
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-3.5-flash:generateContent" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "你好，请介绍一下你自己"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+반환 결과 예시:
+
+```json
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [{"text": "你好！很高兴与你交流。"}]
+      },
+      "finishReason": "MAX_TOKENS"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 6,
+    "candidatesTokenCount": 19,
+    "thoughtsTokenCount": 489,
+    "totalTokenCount": 514
+  },
+  "usage": {
+    "prompt_tokens": 6,
+    "completion_tokens": 19,
+    "total_tokens": 514,
+    "thoughts_tokens": 489,
+    "cost": {
+      "amount": 0.008860916380159999,
+      "currency": "credit",
+      "list_amount": 0.009631430847999998
+    }
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "model": "gemini-3.5-flash"
+}
+```
+
+`usageMetadata`의 token 필드는 네이티브 Gemini 의미론에 따라 과금됩니다:
+
+- `promptTokenCount`에는 `cachedContentTokenCount`가 포함되며, 캐시 적중 부분은 캐시 읽기 가격으로 계산되고 일반 입력으로 중복 계산되지 않습니다.
+- `promptTokensDetails`와 `cacheTokensDetails`는 `usage.prompt_tokens_details` 아래의 `text_tokens`, `image_tokens`, `video_tokens`, `audio_tokens` 및 해당 `cached_*` 세부 정보로 정규화됩니다. 이러한 값은 각각 `prompt_tokens`와 `cached_tokens`에 포함되며, 서로 다른 모달리티는 각자의 가격으로만 재계산되고 중복 과금되지 않습니다.
+- `candidatesTokenCount`와 `thoughtsTokenCount`는 모두 출력 token 가격으로 계산됩니다.
+- `toolUsePromptTokenCount`는 독립적인 도구 입력 token으로, 입력 token 가격으로 계산됩니다.
+
+Ace Data Cloud는 정규화된 `usage` 객체를 추가로 반환하며, 모델 프로토콜 전반에서 이번 호출 비용은 `usage.cost`로 통일하여 읽습니다. `cost`는 선택적인 비용 미리보기입니다. 가격 미리보기를 일시적으로 사용할 수 없는 경우에도 모델 응답은 정상적으로 반환되지만, 이 필드가 포함되지 않을 수 있습니다. 최종 청구서는 사용량 기록을 기준으로 합니다.
+
+### Streaming(스트리밍)
+
+`/v1beta/models/{model}:streamGenerateContent?alt=sse`로 POST 요청을 전송합니다:
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "写一首关于春天的诗"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+스트리밍 반환은 SSE(Server-Sent Events) 형식으로 콘텐츠를 점진적으로 반환합니다. 중간 이벤트는 일반적으로 증분 콘텐츠만 포함합니다. 권위 있는 사용량을 포함하는 최종 상태 이벤트에는 `usageMetadata` 및 정규화된 `usage`가 포함되며, 비용은 계속해서 `usage.cost`에 위치합니다:
+
+```text
+data: {"candidates":[{"content":{"parts":[{"text":"Hello!"}],"role":"model"},"index":0}],"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":89,"totalTokenCount":96},"usage":{"prompt_tokens":7,"completion_tokens":89,"total_tokens":96,"cost":{"amount":0.00026161075472,"currency":"credit","list_amount":0.000284359516}},"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+```
+
+연결이 닫히면 스트림이 종료되었음을 의미합니다. 네이티브 Gemini 스트림은 `data: [DONE]`을 전송하지 않습니다. 최종 상태 가격 미리보기를 일시적으로 사용할 수 없는 경우에도 `usage`는 token 사용량을 반환하지만 `cost`는 생략됩니다.
+
+## 지원되는 모델
+| 모델 이름                     | 설명                       |
+| ------------------------ | ------------------------ |
+| `gemini-3.8-flash`       | 최신 Flash 모델, 고품질 범용 작업에 적합    |
+| `gemini-3.7-flash`       | 고품질 범용 Flash 모델           |
+| `gemini-3.6-flash`       | 안정적인 고성능 멀티모달 모델              |
+| `gemini-3.5-flash`       | 고처리량 멀티모달 모델                 |
+| `gemini-3.5-flash-lite`  | 저지연, 저비용 모델                |
+| `gemini-3.1-flash-lite`  | 안정 버전 경량 모델                  |
+| `gemini-3.1-pro-preview` | 복잡한 추론 및 코딩 모델                |
+| `gemini-3-flash-preview` | Gemini 3 Flash 미리보기 모델      |
+| `gemini-2.5-pro`         | Gemini 2.5 Pro 모델        |
+| `gemini-2.5-flash`       | Gemini 2.5 Flash 모델      |
+| `gemini-2.5-flash-lite`  | Gemini 2.5 Flash-Lite 모델 |
+| `gemini-3.1-flash-image` | 이미지 생성 모델                   |
+| `gemini-3-pro-image`     | 고품질 이미지 생성 모델                |
+| `gemini-2.5-flash-image` | Gemini 2.5 이미지 생성 모델        |
+
+## 고급 기능
+
+### 시스템 지침
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "안녕하세요"}]
+    }
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "당신은 전문 시인이며, 모든 응답은 시 형식으로 합니다."}]
+  }
+}
+```
+
+### 생성 구성
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "이야기 하나를 들려줘"}]
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.7,
+    "maxOutputTokens": 1024,
+    "topP": 0.9,
+    "topK": 40
+  }
+}
+```
+
+### JSON 모드
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "중국 도시 세 곳과 그 인구를 나열해줘"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "population": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 사고 모드(Thinking)
+
+사고 기능을 지원하는 모델(예: gemini-2.5-flash, gemini-2.5-pro)은 사고 모드를 활성화할 수 있습니다:
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "양자 얽힘을 설명해줘"}]
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": 2048
+    }
+  }
+}
+```
+
+### 함수 호출
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "베이징의 현재 날씨는 어떤가요?"}]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "지정된 도시의 날씨 정보를 가져옵니다",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "도시 이름"
+              }
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 다중 턴 대화
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "안녕하세요, 저는 샤오밍입니다"}]
+    },
+    {
+      "role": "model",
+      "parts": [{"text": "안녕하세요 샤오밍! 만나서 반가워요."}]
+    },
+    {
+      "role": "user",
+      "parts": [{"text": "제 이름이 무엇인가요?"}]
+    }
+  ]
+}
+```
+
+### 이미지 이해
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {"text": "이 이미지를 설명해줘"},
+        {
+          "inlineData": {
+            "mimeType": "image/jpeg",
+            "data": "base64_encoded_image_data..."
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+## 안전 설정
+
+`safetySettings`를 통해 콘텐츠 필터링을 제어할 수 있습니다:
+
+```json
+{
+  "contents": [...],
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    }
+  ]
+}
+```
+
+## 오류 처리
+
+| HTTP 상태 코드 | 의미             |
+| -------- | -------------- |
+| 400      | 요청 매개변수가 유효하지 않음         |
+| 401      | 인증 실패, Token을 확인하세요 |
+| 403      | 콘텐츠가 안전 필터에 의해 차단됨     |
+| 429      | 요청이 너무 빈번함         |
+| 500      | 서버 내부 오류        |

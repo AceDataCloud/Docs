@@ -1,0 +1,340 @@
+---
+title: "Anvisningar för Gemini Generate Content API"
+description: "Gemini AI API guide - Ace Data Cloud"
+---
+
+Google Gemini är ett mycket kraftfullt AI-konversationssystem som kan generera flytande och naturliga svar på några sekunder genom att mata in en prompt. Detta dokument beskriver främst hur Gemini Generate Content API används. Detta är Googles officiella inbyggda API-format och stöder de två ändpunkterna `generateContent` och `streamGenerateContent`.
+
+## Skillnader jämfört med Chat Completions API
+
+Gemini Generate Content API använder Googles officiella inbyggda begärandeformat (fältet `contents`), i stället för det OpenAI-kompatibla formatet (fältet `messages`). Om du redan använder Google Gemini SDK eller är bekant med det officiella API-formatet kan du använda detta API direkt utan att ändra begärandeformatet.
+
+## Aktuellt stödomfång
+
+Gränssnittet accepterar text-, bild-, video- och ljudindata (`inlineData` eller `fileData`), tankekonfiguration och deklarationer av anpassade funktioner. Det finns ännu ingen garanti för enhetlig tillgänglighet för inbyggda fält såsom ljudutdata, inbyggda verktyg och explicit kontextcache; utgå från den faktiska responsen för den specifika modellen.
+
+När du använder `fileData.fileUri` för att skicka filer som ljud, säkerställ att filen kan nås direkt via HTTPS, inte är beroende av inloggningsstatus och att den signerade länkens giltighetstid täcker hela tiden för begärandebearbetningen. Icke-strömmande ljudanalys returnerar resultat först efter att modellen har slutfört bearbetningen, vilket kan ta över 90 sekunder; klienten bör ställa in en tillräckligt lång total timeout utifrån filstorlek och verksamhetsscenario för att undvika att anslutningen bryts medan servern fortfarande bearbetar.
+
+## Ansökningsprocess
+
+Innan du använder Gemini Generate Content API, besök först sidan [Gemini Generate Content API](https://platform.acedata.cloud/documents/gemini-generate-content-api) och klicka på knappen "Hämta" för att få de autentiseringsuppgifter som krävs för begäran.
+
+Om du ännu inte har loggat in eller registrerat dig omdirigeras du automatiskt till inloggningssidan. Den första ansökan har en kostnadsfri kvot.
+
+## Grundläggande användning
+
+### Non-Streaming (icke-strömmande)
+
+Skicka en POST-begäran till `/v1beta/models/{model}:generateContent`:
+
+> **Tips**: flash i serien `gemini-3.x` är en tänkande modell och förbrukar först reasoning tokens; ange `generationConfig.maxOutputTokens` till över 512, annars kan endast tomt innehåll returneras.
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-3.5-flash:generateContent" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "你好，请介绍一下你自己"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Exempel på returresultat:
+
+```json
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "你好！很高兴与你交流。"
+          }
+        ]
+      },
+      "finishReason": "MAX_TOKENS"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 6,
+    "candidatesTokenCount": 19,
+    "thoughtsTokenCount": 489,
+    "totalTokenCount": 514
+  },
+  "usage": {
+    "prompt_tokens": 6,
+    "completion_tokens": 19,
+    "total_tokens": 514,
+    "thoughts_tokens": 489,
+    "cost": {
+      "amount": 0.008860916380159999,
+      "currency": "credit",
+      "list_amount": 0.009631430847999998
+    }
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "model": "gemini-3.5-flash"
+}
+```
+
+Token-fälten i `usageMetadata` debiteras enligt den inbyggda Gemini-semantiken:
+
+- `promptTokenCount` innehåller `cachedContentTokenCount`; delar som träffar cachen beräknas enligt priset för cacheläsning och räknas inte igen som vanlig indata.
+- `promptTokensDetails` och `cacheTokensDetails` normaliseras till `text_tokens`, `image_tokens`, `video_tokens`, `audio_tokens` och motsvarande `cached_*`-detaljer under `usage.prompt_tokens_details`. Dessa värden ingår respektive i `prompt_tokens` och `cached_tokens`; olika modaliteter beräknas endast om enligt sina egna priser och debiteras inte dubbelt.
+- Både `candidatesTokenCount` och `thoughtsTokenCount` beräknas enligt priset för utdata-token.
+- `toolUsePromptTokenCount` är en separat token för verktygsindata och beräknas enligt priset för indata-token.
+
+Ace Data Cloud returnerar dessutom ett normaliserat `usage`-objekt; läs kostnaden för detta anrop från `usage.cost` enhetligt mellan modellprotokoll. `cost` är en valfri kostnadsförhandsvisning; när prisförhandsvisningen tillfälligt inte är tillgänglig returneras modellsvaret fortfarande normalt, men fältet kan saknas. Den slutliga fakturan baseras på användningsregistreringen.
+
+### Streaming (strömmande)
+
+Skicka en POST-begäran till `/v1beta/models/{model}:streamGenerateContent?alt=sse`:
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "写一首关于春天的诗"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Det strömmande svaret returnerar stegvis innehåll i SSE-format (Server-Sent Events). Mellanhändelser innehåller vanligtvis endast inkrementellt innehåll; den slutliga händelsen med auktoritativ användning innehåller `usageMetadata` och normaliserad `usage`, och kostnaden finns fortfarande i `usage.cost`:
+
+```text
+data: {"candidates":[{"content":{"parts":[{"text":"Hello!"}],"role":"model"},"index":0}],"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":89,"totalTokenCount":96},"usage":{"prompt_tokens":7,"completion_tokens":89,"total_tokens":96,"cost":{"amount":0.00026161075472,"currency":"credit","list_amount":0.000284359516}},"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+```
+
+När anslutningen stängs innebär det att strömmen har avslutats; den inbyggda Gemini-strömmen skickar inte `data: [DONE]`. Om den slutliga prisförhandsvisningen tillfälligt inte är tillgänglig returneras fortfarande tokenanvändningen i `usage`, men `cost` utelämnas.
+
+## Modeller som stöds
+| Modellnamn                     | Beskrivning                       |
+| ------------------------ | ------------------------ |
+| `gemini-3.8-flash`       | Senaste Flash-modellen, lämplig för allmänna uppgifter med hög kvalitet    |
+| `gemini-3.7-flash`       | Flash-modell för allmänna uppgifter med hög kvalitet           |
+| `gemini-3.6-flash`       | Stabil högpresterande multimodal modell              |
+| `gemini-3.5-flash`       | Multimodal modell med hög genomströmning                 |
+| `gemini-3.5-flash-lite`  | Modell med låg latens och låg kostnad                |
+| `gemini-3.1-flash-lite`  | Stabil lättviktsmodell                  |
+| `gemini-3.1-pro-preview` | Modell för komplex slutledning och kodning                |
+| `gemini-3-flash-preview` | Gemini 3 Flash-förhandsvisningsmodell      |
+| `gemini-2.5-pro`         | Gemini 2.5 Pro-modell        |
+| `gemini-2.5-flash`       | Gemini 2.5 Flash-modell      |
+| `gemini-2.5-flash-lite`  | Gemini 2.5 Flash-Lite-modell |
+| `gemini-3.1-flash-image` | Bildgenereringsmodell                   |
+| `gemini-3-pro-image`     | Bildgenereringsmodell med hög kvalitet                |
+| `gemini-2.5-flash-image` | Gemini 2.5-bildgenereringsmodell        |
+
+## Avancerade funktioner
+
+### Systeminstruktioner
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好"}]
+    }
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "你是一个专业的诗人，所有回复都用诗歌形式。"}]
+  }
+}
+```
+
+### Genereringskonfiguration
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "讲一个故事"}]
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.7,
+    "maxOutputTokens": 1024,
+    "topP": 0.9,
+    "topK": 40
+  }
+}
+```
+
+### JSON-läge
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "列出三个中国城市及其人口"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "population": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Tankeläge (Thinking)
+
+Modeller som stöder tankefunktionen (såsom gemini-2.5-flash och gemini-2.5-pro) kan aktivera tankeläget:
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "解释量子纠缠"}]
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": 2048
+    }
+  }
+}
+```
+
+### Funktionsanrop
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "北京现在的天气怎么样？"}]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "获取指定城市的天气信息",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "城市名称"
+              }
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Fleromgångsdialog
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好，我叫小明"}]
+    },
+    {
+      "role": "model",
+      "parts": [{"text": "你好小明！很高兴认识你。"}]
+    },
+    {
+      "role": "user",
+      "parts": [{"text": "我叫什么名字？"}]
+    }
+  ]
+}
+```
+
+### Bildförståelse
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {"text": "描述这张图片"},
+        {
+          "inlineData": {
+            "mimeType": "image/jpeg",
+            "data": "base64_encoded_image_data..."
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Säkerhetsinställningar
+
+Innehållsfiltrering kan styras via `safetySettings`:
+
+```json
+{
+  "contents": [...],
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    }
+  ]
+}
+```
+
+## Felhantering
+
+| HTTP-statuskod | Betydelse             |
+| -------- | -------------- |
+| 400      | Ogiltiga begärandeparametrar         |
+| 401      | Autentisering misslyckades, kontrollera Token |
+| 403      | Innehållet blockerades av säkerhetsfiltret     |
+| 429      | Begäran är för frekvent         |
+| 500      | Internt serverfel        |
