@@ -3,7 +3,7 @@ set -euo pipefail
 : "${SERVICE:?set SERVICE to one of the five guide services}"
 : "${PACKAGE_VERSION:?set the exact published package version}"
 case "$SERVICE:$PACKAGE_VERSION" in
-  suno:0.1.2|seedance:0.1.2|happyhorse:0.1.1|gpt-image:0.1.1|nano-banana:0.1.1) ;;
+  suno:0.1.3|seedance:0.1.3|happyhorse:0.1.2|gpt-image:0.1.2|nano-banana:0.1.2) ;;
   *) echo 'Unsupported guide service/version pair' >&2; exit 2 ;;
 esac
 mkdir -p artifacts
