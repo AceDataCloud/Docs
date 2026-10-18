@@ -1,0 +1,336 @@
+---
+title: "Руководство по использованию Gemini Generate Content API"
+description: "Gemini AI API guide - Ace Data Cloud"
+---
+
+Google Gemini — это очень мощная система диалогового ИИ, которая может генерировать плавные и естественные ответы за несколько секунд посредством ввода подсказки. В этом документе в основном описывается способ использования Gemini Generate Content API — это официальный нативный формат API Google, поддерживающий два эндпоинта: `generateContent` и `streamGenerateContent`.
+
+## Отличия от Chat Completions API
+
+Gemini Generate Content API использует официальный нативный формат запросов Google (поле `contents`), а не формат, совместимый с OpenAI (поле `messages`). Если вы уже используете Google Gemini SDK или знакомы с официальным форматом API, вы можете напрямую использовать этот API без изменения формата запросов.
+
+## Текущий поддерживаемый охват
+
+Интерфейс принимает текстовый, графический, видео- и аудиоввод (через `inlineData` или `fileData`), конфигурацию рассуждений и объявления пользовательских функций. Для нативных полей, таких как аудиовывод, встроенные инструменты и явное кэширование контекста, пока нет гарантии единой доступности; ориентируйтесь на фактический ответ конкретной модели.
+
+При отправке аудио и других файлов с использованием `fileData.fileUri` убедитесь, что файл доступен напрямую по HTTPS, не зависит от состояния входа в систему, а срок действия подписанной ссылки покрывает всё время обработки запроса. Непотоковый аудиоанализ возвращает результат только после завершения обработки моделью и может занять более 90 секунд; клиенту следует устанавливать достаточно длительный общий тайм-аут в зависимости от размера файла и бизнес-сценария, чтобы избежать разрыва соединения, пока сервер всё ещё выполняет обработку.
+
+## Процесс подачи заявки
+
+Перед использованием Gemini Generate Content API сначала перейдите на страницу [Gemini Generate Content API](https://platform.acedata.cloud/documents/gemini-generate-content-api) и нажмите кнопку «Получить», чтобы получить учётные данные, необходимые для запроса.
+
+Если вы ещё не вошли в систему или не зарегистрировались, вы будете автоматически перенаправлены на страницу входа. При первой заявке предоставляется бесплатная квота.
+
+## Базовое использование
+
+### Non-Streaming（без потоковой передачи）
+
+Отправьте POST-запрос на `/v1beta/models/{model}:generateContent`:
+
+> **Подсказка**: flash серии `gemini-3.x` является моделью рассуждений и сначала расходует reasoning tokens; установите `generationConfig.maxOutputTokens` выше 512, иначе может быть возвращено только пустое содержимое.
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-3.5-flash:generateContent" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "你好，请介绍一下你自己"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Пример возвращаемого результата:
+
+```json
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [{"text": "你好！很高兴与你交流。"}]
+      },
+      "finishReason": "MAX_TOKENS"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 6,
+    "candidatesTokenCount": 19,
+    "thoughtsTokenCount": 489,
+    "totalTokenCount": 514
+  },
+  "usage": {
+    "prompt_tokens": 6,
+    "completion_tokens": 19,
+    "total_tokens": 514,
+    "thoughts_tokens": 489,
+    "cost": {
+      "amount": 0.008860916380159999,
+      "currency": "credit",
+      "list_amount": 0.009631430847999998
+    }
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "model": "gemini-3.5-flash"
+}
+```
+
+Поля token в `usageMetadata` тарифицируются в соответствии с нативной семантикой Gemini:
+
+- `promptTokenCount` включает `cachedContentTokenCount`; часть, попавшая в кэш, рассчитывается по цене чтения из кэша и не учитывается повторно как обычный ввод.
+- `promptTokensDetails` и `cacheTokensDetails` нормализуются как `text_tokens`, `image_tokens`, `video_tokens`, `audio_tokens` и соответствующие детали `cached_*` в `usage.prompt_tokens_details`. Эти значения соответственно включены в `prompt_tokens` и `cached_tokens`; разные модальности пересчитываются только по своим ценам и не тарифицируются повторно.
+- `candidatesTokenCount` и `thoughtsTokenCount` оба рассчитываются по цене выходных token.
+- `toolUsePromptTokenCount` является независимым token ввода инструмента и рассчитывается по цене входных token.
+
+Ace Data Cloud дополнительно возвращает нормализованный объект `usage`; для разных протоколов моделей стоимость этого вызова единообразно считывается из `usage.cost`. `cost` — это необязательный предварительный расчёт стоимости; когда предварительный расчёт цены временно недоступен, ответ модели всё равно будет возвращён нормально, но может не содержать это поле. Окончательный счёт определяется записями об использовании.
+
+### Streaming（потоковая передача）
+
+Отправьте POST-запрос на `/v1beta/models/{model}:streamGenerateContent?alt=sse`:
+
+```bash
+curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse" \
+  -H "Authorization: Bearer your_token_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "写一首关于春天的诗"
+          }
+        ]
+      }
+    ]
+  }'
+```
+
+Потоковый ответ будет постепенно возвращать содержимое в формате SSE (Server-Sent Events). Промежуточные события обычно содержат только инкрементальное содержимое; финальное событие с авторитетными данными об использовании будет содержать `usageMetadata` и нормализованный `usage`, при этом стоимость по-прежнему находится в `usage.cost`:
+
+```text
+data: {"candidates":[{"content":{"parts":[{"text":"Hello!"}],"role":"model"},"index":0}],"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":89,"totalTokenCount":96},"usage":{"prompt_tokens":7,"completion_tokens":89,"total_tokens":96,"cost":{"amount":0.00026161075472,"currency":"credit","list_amount":0.000284359516}},"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
+
+```
+
+Закрытие соединения означает завершение потока; нативный поток Gemini не отправляет `data: [DONE]`. Если предварительный расчёт цены для финального состояния временно недоступен, `usage` всё равно вернёт использование token, но опустит `cost`.
+
+## Поддерживаемые модели
+| Название модели             | Описание                                      |
+| ------------------------ | --------------------------------------------- |
+| `gemini-3.8-flash`       | Новейшая Flash-модель, подходит для высококачественных универсальных задач |
+| `gemini-3.7-flash`       | Высококачественная универсальная Flash-модель |
+| `gemini-3.6-flash`       | Стабильная высокопроизводительная мультимодальная модель |
+| `gemini-3.5-flash`       | Высокопропускная мультимодальная модель       |
+| `gemini-3.5-flash-lite`  | Модель с низкой задержкой и низкой стоимостью |
+| `gemini-3.1-flash-lite`  | Стабильная облегчённая модель                  |
+| `gemini-3.1-pro-preview` | Модель для сложных рассуждений и программирования |
+| `gemini-3-flash-preview` | Предварительная версия модели Gemini 3 Flash   |
+| `gemini-2.5-pro`         | Модель Gemini 2.5 Pro                         |
+| `gemini-2.5-flash`       | Модель Gemini 2.5 Flash                       |
+| `gemini-2.5-flash-lite`  | Модель Gemini 2.5 Flash-Lite                  |
+| `gemini-3.1-flash-image` | Модель генерации изображений                   |
+| `gemini-3-pro-image`     | Высококачественная модель генерации изображений |
+| `gemini-2.5-flash-image` | Модель генерации изображений Gemini 2.5       |
+
+## Расширенные функции
+
+### Системные инструкции
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好"}]
+    }
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "你是一个专业的诗人，所有回复都用诗歌形式。"}]
+  }
+}
+```
+
+### Конфигурация генерации
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "讲一个故事"}]
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.7,
+    "maxOutputTokens": 1024,
+    "topP": 0.9,
+    "topK": 40
+  }
+}
+```
+
+### Режим JSON
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "列出三个中国城市及其人口"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "responseMimeType": "application/json",
+    "responseSchema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "population": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Режим размышлений (Thinking)
+
+Модели, поддерживающие функцию размышлений (например, gemini-2.5-flash, gemini-2.5-pro), могут включать режим размышлений:
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "解释量子纠缠"}]
+    }
+  ],
+  "generationConfig": {
+    "thinkingConfig": {
+      "includeThoughts": true,
+      "thinkingBudget": 2048
+    }
+  }
+}
+```
+
+### Вызов функций
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "北京现在的天气怎么样？"}]
+    }
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "获取指定城市的天气信息",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string",
+                "description": "城市名称"
+              }
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Многораундовый диалог
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "你好，我叫小明"}]
+    },
+    {
+      "role": "model",
+      "parts": [{"text": "你好小明！很高兴认识你。"}]
+    },
+    {
+      "role": "user",
+      "parts": [{"text": "我叫什么名字？"}]
+    }
+  ]
+}
+```
+
+### Понимание изображений
+
+```json
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {"text": "描述这张图片"},
+        {
+          "inlineData": {
+            "mimeType": "image/jpeg",
+            "data": "base64_encoded_image_data..."
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Настройки безопасности
+
+Контентную фильтрацию можно контролировать через `safetySettings`:
+
+```json
+{
+  "contents": [...],
+  "safetySettings": [
+    {
+      "category": "HARM_CATEGORY_HARASSMENT",
+      "threshold": "BLOCK_ONLY_HIGH"
+    }
+  ]
+}
+```
+
+## Обработка ошибок
+
+| Код состояния HTTP | Значение                         |
+| -------- | -------------------------------- |
+| 400      | Недопустимые параметры запроса    |
+| 401      | Ошибка аутентификации, проверьте Token |
+| 403      | Контент заблокирован фильтром безопасности |
+| 429      | Слишком частые запросы            |
+| 500      | Внутренняя ошибка сервера         |
