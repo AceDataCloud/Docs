@@ -3,9 +3,13 @@ title: "Claude Messages API 申请及使用"
 description: "Claude AI 集成指南 - Ace Data Cloud"
 ---
 
-Anthropic Claude 是一款非常强大的 AI 对话系统，只要输入提示词，就能在短短几秒内生成流畅自然的回复。Claude Messages API 是 Anthropic 官方原生的 API 格式，与 OpenAI 兼容格式（Chat Completion）不同，它采用 Anthropic 自有的请求和响应结构，能够更好地利用 Claude 的独特能力，如多模态内容输入、工具调用、深度思考（Extended Thinking）等高级特性。
+Messages API 使用 Anthropic Messages 请求和响应格式，提供消息、系统提示词、内容块、工具调用、思考控制和流式事件的统一接口。通过 `model` 选择此入口发布的模型，客户端沿用同一套 Messages 数据结构。
 
-本文档主要介绍 Claude Messages API 操作的使用流程，利用它我们可以使用与 Anthropic 官方一致的原生接口来调用 Claude 的对话功能。
+本文介绍 Messages API 的申请、调用和响应处理方式。
+
+## GPT-6.1 Terra
+
+使用 `model: "gpt-6.1-terra"` 可通过此接口调用该模型。请求仍使用 Messages 格式的 `messages` 和 `max_tokens`，返回的文本与用量也遵循本接口结构。切换型号时请核对当前价格及账号可用性；单独报告的缓存读取和创建 token 分别结算。
 
 ## 申请流程
 
@@ -21,9 +25,11 @@ Anthropic Claude 是一款非常强大的 AI 对话系统，只要输入提示�
 
 ## 基本使用
 
-Claude Messages API 的请求路径为 `/v1/messages`，与 Anthropic 官方 API 保持一致。我们至少需要提供三个必填参数：
+Claude Messages API 的请求路径为 `/v1/messages`，与 Anthropic 官方 API 保持一致。平台接受的兼容模型请求按该模型的输入、输出及缓存用量计费；Messages 的输入 token 不包含单独报告的缓存读取和创建 token，这些维度分别结算。费用以控制台当前模型价格和响应 `usage.cost` 为准。
 
-- `model`：选择使用的 Claude 模型。`claude-opus-5-5` 仅通过 Messages API 提供，支持 100 万 Token 上下文、最大输出 128K Token，并始终启用自适应思考。最新旗舰为 `claude-fable-5-1`（100 万 Token 上下文、最大输出 128K Token）；原 `claude-fable-5` 仍兼容保留。 `claude-sonnet-5-5` 已加入原生 Messages 系列接口，支持图像输入和自适应思考；其输入、输出和缓存读取官方参考价分别为每百万 Token 2、10 和 0.20 美元。
+我们至少需要提供三个必填参数：
+
+- `model`：填写本接口模型清单中的完整模型 ID。切换模型时继续使用 Messages 的请求字段和响应结构；模型清单、上下文上限和价格见对应模型的 API 与定价页面。
 - `messages`：输入的消息数组，每条消息包含 `role`（角色）和 `content`（内容），其中 `role` 支持 `user` 和 `assistant`。
 - `max_tokens`：最大输出 token 数，用于限制单次回复的长度。
 
@@ -38,6 +44,10 @@ Claude Messages API 的请求路径为 `/v1/messages`，与 Anthropic 官方 API
 - `tools`：工具定义，用于让模型调用外部函数。
 - `tool_choice`：控制模型如何使用提供的工具。
 - `cache_control`：在请求的最后一个可缓存内容块处自动创建缓存断点；也可写在具体内容块上。
+
+工具调用统一使用 `tools[].input_schema`、`tool_choice`、`tool_use` 和 `tool_result`；`tool_choice.disable_parallel_tool_use: true` 禁止同轮并行工具调用。思考控制使用 `thinking` 与 `output_config.effort`，结构化输出使用 `output_config.format`。`max_tokens` 是本次输出预算，不会被平台自动提高；思考与正文共同占用该预算。
+
+这些字段按所选协议传递或映射到对应的生成参数。参数取值和功能限制以接口及模型说明为准；处理参数错误时，请读取具体错误字段和原因。
 
 ### cURL 示例
 
@@ -56,6 +66,32 @@ curl -X POST 'https://api.acedata.cloud/v1/messages' \
       }
     ]
   }'
+```
+
+### 结构化输出
+
+使用 `output_config.format` 指定 JSON Schema，响应仍采用 Messages 的 `content` 内容块：
+
+```json
+{
+  "output_config": {
+    "format": {
+      "type": "json_schema",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "answer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}
 ```
 
 ### Python 示例
@@ -355,7 +391,7 @@ print(response.json())
 - `display: "summarized"` 返回可读的思考摘要；它不是原始思维链。
 - `display: "omitted"` 返回 `thinking: ""`，但仍保留 opaque `signature` 以支持后续对话。
 - `display: "updates"` 是 Anthropic 的 beta 模式，需携带 `anthropic-beta: thinking-display-updates-2026-08-18`。官方定义是隐藏推理正文、显示工具调用之间的简短进度更新。平台按原值传递该参数和 beta 请求头，不会强制改写为 `summarized`；实际输出内容取决于所选模型的支持情况。
-- `thinking`、`output_config`、effort、采样参数及新增扩展字段按原值传递。平台不维护按模型硬编码的取值枚举、组合限制，也不自动改写 thinking 模式；是否接受这些参数由所选模型判断，模型返回的参数错误会传回客户端。
+- Messages 请求统一使用 `thinking`、`output_config` 和采样参数；同协议传递原始字段，跨协议按字段语义映射。平台不按型号编写参数例外；所选模型返回的具体参数错误会传回客户端。
 - Fable 5.1、Fable 5、Opus 5、Sonnet 5、Opus 4.8 和 Opus 4.7 的 display 默认值为 `omitted`；Opus 4.6、Sonnet 4.6 及更早支持 thinking 的模型默认使用 `summarized`。
 - Display 只影响返回内容和流式延迟，不关闭推理，也不减少 thinking token 的计费。
 - 是否默认启用 thinking 与 display 默认值是两个独立问题。Opus 5、Sonnet 5 默认启用 adaptive thinking；对 Opus 5，省略 `thinking` 等同于 adaptive，省略 `output_config.effort` 等同于 `high`。Opus 4.8、4.7 和 4.6 需要显式启用。
