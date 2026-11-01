@@ -1068,8 +1068,12 @@ def sanitize_html_for_mdx(content: str) -> str:
             cursor = match.end()
         escaped.append(part[cursor:].replace("{", "&#123;").replace("}", "&#125;"))
         part = "".join(escaped)
+        # Git rejects trailing whitespace in generated pages. Preserve Markdown
+        # hard breaks with a backslash; a lone trailing space has no meaning.
+        part = re.sub(r" {2,}(?=\r?\n)", lambda _: "\\", part)
         parts[index] = part
-    return "".join(parts)
+    # Fenced examples can also contain accidental line-end spaces.
+    return re.sub(r"[ \t]+(?=\r?\n)", "", "".join(parts))
 
 
 def convert_markdown_to_mdx(content: str, fallback_title: str, description: str | None = None) -> str:

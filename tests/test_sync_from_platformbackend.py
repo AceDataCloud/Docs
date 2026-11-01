@@ -175,6 +175,13 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertIn('<p><img src="https://example.com/image.png" className="m-auto" /></p>', result)
         self.assertIn("```python\nprint('ok')\n```", result)
 
+    def test_mdx_sanitizer_preserves_hard_breaks_without_trailing_spaces(self) -> None:
+        content = "First line  \nSecond line \n```text\ncode  \n```\n"
+        result = sync.convert_markdown_to_mdx(content, "Guide")
+        self.assertIn("First line\\\nSecond line\n", result)
+        self.assertIn("```text\ncode\n```", result)
+        self.assertNotIn("Second line \n", result)
+
     def test_response_blocks_include_commonmark_containers(self) -> None:
         content = (
             "Response:\n> ```json\n> {\"error\":\"restricted source\"}\n> ```\n"
