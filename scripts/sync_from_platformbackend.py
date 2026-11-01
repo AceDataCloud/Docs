@@ -1041,7 +1041,14 @@ def guide_description(output_language: str, service_name: str) -> str:
 
 
 def sanitize_html_for_mdx(content: str) -> str:
-    parts = re.split(r"(^```.*?^```|^~~~.*?^~~~|^\$\$.*?^\$\$)", content, flags=re.MULTILINE | re.DOTALL)
+    # A closing fence cannot carry an info string. Translations sometimes have
+    # a language-marked fence inside an unlabelled block; treating it as the
+    # closer leaves later HTML inside a false code block and skips MDX cleanup.
+    parts = re.split(
+        r"(^```[^\n]*\n.*?^```[ \t]*$|^~~~[^\n]*\n.*?^~~~[ \t]*$|^\$\$.*?^\$\$)",
+        content,
+        flags=re.MULTILINE | re.DOTALL,
+    )
     for index, part in enumerate(parts):
         if part.startswith(("```", "~~~", "$$")):
             continue
