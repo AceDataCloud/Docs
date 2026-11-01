@@ -164,6 +164,17 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
         self.assertEqual(sync.guide_description("en", "Gemini"), "Gemini integration guide - Ace Data Cloud")
         self.assertEqual(sync.guide_description("ja", "Gemini"), "Gemini API guide - Ace Data Cloud")
 
+    def test_mdx_sanitizer_does_not_close_fence_on_language_marker(self) -> None:
+        translated = (
+            "```\nexample\n```javascript\n<img class=\"code\">\n```\n\n"
+            "<p><img src=\"https://example.com/image.png\" class=\"m-auto\"></p>\n\n"
+            "```python\nprint('ok')\n```\n"
+        )
+        result = sync.convert_markdown_to_mdx(translated, "Translated guide")
+        self.assertIn('<img class="code">', result)
+        self.assertIn('<p><img src="https://example.com/image.png" className="m-auto" /></p>', result)
+        self.assertIn("```python\nprint('ok')\n```", result)
+
     def test_response_blocks_include_commonmark_containers(self) -> None:
         content = (
             "Response:\n> ```json\n> {\"error\":\"restricted source\"}\n> ```\n"
