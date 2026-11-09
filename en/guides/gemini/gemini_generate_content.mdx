@@ -3,7 +3,7 @@ title: "Gemini Generate Content API Guide"
 description: "Gemini AI integration guide - Ace Data Cloud"
 ---
 
-Google Gemini is a very powerful AI conversational system that can generate fluent and natural responses within seconds by entering prompts. This document mainly describes how to use the Gemini Generate Content API. This is Google's official native API format, supporting the `generateContent` and `streamGenerateContent` endpoints.
+Google Gemini is a very powerful AI conversational system that can generate fluent and natural responses within seconds by entering prompts. This document primarily describes how to use the Gemini Generate Content API, which is Google's official native API format and supports the `generateContent` and `streamGenerateContent` endpoints.
 
 ## Differences from the Chat Completions API
 
@@ -11,9 +11,9 @@ The Gemini Generate Content API uses Google's official native request format (th
 
 ## Current Support Scope
 
-The interface accepts text, image, video, and audio inputs (`inlineData` or `fileData`), thinking configuration, and custom function declarations. Native fields such as audio output, built-in tools, and explicit context caching do not yet have unified availability guarantees; please refer to the actual response of the specific model.
+The interface accepts text, image, video, and audio inputs (`inlineData` or `fileData`), thinking configuration, and custom function declarations. Native fields such as audio output, built-in tools, and explicit context caching do not yet have guaranteed unified availability; please refer to the actual response of the specific model.
 
-When submitting files such as audio using `fileData.fileUri`, please ensure that the files can be accessed directly via HTTPS, do not depend on a login session, and ensure that the validity period of signed links covers the entire request processing time. Non-streaming audio analysis returns results only after the model completes processing and may take more than 90 seconds; clients should set a sufficiently long total timeout based on file size and business scenarios to avoid disconnecting while the server is still processing.
+When submitting audio and other files using `fileData.fileUri`, please ensure that the files can be accessed directly via HTTPS, do not depend on login state, and that the validity period of signed links covers the entire request processing time. Non-streaming audio analysis returns results only after the model completes processing, which may exceed 90 seconds; clients should set a sufficiently long total timeout based on file size and business scenarios to avoid disconnecting while the server is still processing.
 
 ## Application Process
 
@@ -88,12 +88,12 @@ Example response:
 
 The token fields in `usageMetadata` are billed according to native Gemini semantics:
 
-- `promptTokenCount` includes `cachedContentTokenCount`; cache-hit portions are calculated at the cache read price and are not repeatedly counted as regular input.
+- `promptTokenCount` includes `cachedContentTokenCount`; cache-hit portions are calculated at the cached read price and are not counted again as regular input.
 - `promptTokensDetails` and `cacheTokensDetails` are normalized into `text_tokens`, `image_tokens`, `video_tokens`, `audio_tokens`, and the corresponding `cached_*` details under `usage.prompt_tokens_details`. These values are included in `prompt_tokens` and `cached_tokens` respectively; different modalities are recalculated only at their respective prices and are not billed repeatedly.
 - Both `candidatesTokenCount` and `thoughtsTokenCount` are calculated at the output token price.
-- `toolUsePromptTokenCount` is an independent tool input token and is calculated at the input token price.
+- `toolUsePromptTokenCount` is an independent tool input token count, calculated at the input token price.
 
-Ace Data Cloud additionally returns a normalized `usage` object. Across model protocols, the cost of this call is uniformly read from `usage.cost`. `cost` is an optional cost preview; when price previews are temporarily unavailable, the model response will still be returned normally but may not include this field. The final bill is subject to usage records.
+Ace Data Cloud additionally returns a normalized `usage` object. Across model protocols, the cost of the current call is uniformly read from `usage.cost`. `cost` is an optional cost preview; when price previews are temporarily unavailable, the model response will still return normally, but may not include this field. The final bill is subject to usage records.
 
 ### Streaming
 
@@ -117,7 +117,7 @@ curl -X POST "https://api.acedata.cloud/v1beta/models/gemini-2.5-flash:streamGen
   }'
 ```
 
-Streaming responses will gradually return content in SSE (Server-Sent Events) format. Intermediate events usually contain only incremental content; the final event containing authoritative usage will include `usageMetadata` and normalized `usage`, while the cost remains in `usage.cost`:
+Streaming responses gradually return content in SSE (Server-Sent Events) format. Intermediate events usually contain only incremental content; the final event containing authoritative usage includes `usageMetadata` and normalized `usage`, while the cost remains in `usage.cost`:
 
 ```text
 data: {"candidates":[{"content":{"parts":[{"text":"Hello!"}],"role":"model"},"index":0}],"modelVersion":"gemini-3.1-flash-lite","model":"gemini-3.1-flash-lite"}
@@ -126,7 +126,7 @@ data: {"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP
 
 ```
 
-Closing the connection indicates the end of the stream; native Gemini streams do not send `data: [DONE]`. If the final price preview is temporarily unavailable, `usage` will still return token usage but omit `cost`.
+Closing the connection indicates the end of the stream; native Gemini streams do not send `data: [DONE]`. If the final price preview is temporarily unavailable, `usage` will still return token usage, but will omit `cost`.
 
 ## Supported Models
 | Model Name                     | Description                                      |
@@ -218,9 +218,18 @@ Closing the connection indicates the end of the stream; native Gemini streams do
 }
 ```
 
-### Thinking Mode (Thinking)
+### Internal Thinking and Thinking Summaries
 
-Models that support thinking capabilities (such as gemini-2.5-flash and gemini-2.5-pro) can enable thinking mode:
+The model's internal thinking and returning thinking summaries to the caller are two independent settings:
+
+- `thinkingBudget` or `thinkingLevel` controls the model's internal thinking budget or depth. The supported fields and values depend on the model.
+- `includeThoughts` controls whether thinking summaries are returned, and defaults to `false`. When this field is omitted or `false` is passed, neither regular JSON nor SSE streaming responses return text marked as `thought: true`; such text is retained only when the boolean value `true` is explicitly passed.
+
+When `includeThoughts` is not set in the request, the API passes `false` by default to generation models that support thinking configuration, avoiding unnecessary summaries; values explicitly passed by the client, thinking budgets, and levels are retained. The known model `gemini-2.5-flash-image`, which does not support thinking configuration, will not have this field added automatically, and generation configuration will not be added to `countTokens` requests either.
+
+Disabling summaries does not mean disabling internal thinking, nor does it guarantee a reduction in internal thinking tokens. If the response still contains unrequested thinking text, the regular JSON and SSE outputs further filter it, retaining the normal answer, signatures, and actual usage.
+
+When you need to view summaries, explicitly enable them as follows. If the model does not generate an available summary, there may still be no thinking text even when enabled:
 
 ```json
 {
@@ -232,12 +241,17 @@ Models that support thinking capabilities (such as gemini-2.5-flash and gemini-2
   ],
   "generationConfig": {
     "thinkingConfig": {
-      "includeThoughts": true,
-      "thinkingBudget": 2048
+      "includeThoughts": true
     }
   }
 }
 ```
+
+`thoughtSignature` is encrypted state required for subsequent turns, not thinking summary text, and is not controlled by the `includeThoughts` switch. Signatures may be located on normal answers, function calls, or empty text Parts; when filtering thinking text, signatures and other fields in the same Part are retained, so the response may still contain Parts that carry only a signature and have empty text. When manually maintaining multi-turn history, retain the order of these Parts and the signature positions; do not move or merge signatures.
+
+`usageMetadata` and `usage` still record actual usage. Hiding summaries does not reset `thoughtsTokenCount`, and billing is still calculated according to actual usage and current pricing rules.
+
+See Google's official [thinking and thinking summaries documentation](https://firebase.google.com/docs/ai-logic/thinking) and [thinking signature rules](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking/thought-signatures).
 
 ### Function Calling
 
@@ -272,7 +286,7 @@ Models that support thinking capabilities (such as gemini-2.5-flash and gemini-2
 }
 ```
 
-### Multi-turn Conversation
+### Multi-turn Conversations
 
 ```json
 {
