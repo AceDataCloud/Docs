@@ -1,19 +1,13 @@
 ---
-title: "WebExtrator inteligentny interfejs API do ekstrakcji"
+title: "Przewodnik integracji z inteligentnym API ekstrakcji WebExtrator"
 description: "WebExtrator Web Render & Extract API guide - Ace Data Cloud"
 ---
 
 `POST https://api.acedata.cloud/webextrator/extract`
 
-WebExtrator inteligentny interfejs API przekształca URL w **typizowane wyniki strukturalne** — artykuły, produkty, przepisy, filmy, dyskusje, oferty pracy itp., a także dostarcza oczyszczony Markdown i czysty tekst. Gdy chcesz uzyskać "czyste dane strukturalne" zamiast surowego HTML, to jest interfejs, którego należy użyć.
-
-Na dole znajduje się trójwarstwowa linia produkcyjna:
-
-1. **mapper JSON-LD schema.org** — deterministyczny, zerowy koszt LLM. Pokrywa Wikipedia / BestBuy / AllRecipes / YouTube / większość wiadomości / większość stron produktów.
-2. **typizowane LLM ekstrakcje** — uruchamiane tylko wtedy, gdy schema.org nie jest trafione. Wybierz schemat według typu strony, ścisła walidacja Zod.
-3. **Readability + Markdown jako zabezpieczenie** — zawsze działa, uzupełniając górne pola, które nie zostały wypełnione przez dwie pierwsze warstwy.
-
-Powtarzające się żądania URL będą przechwytywane przez pamięć podręczną wyników Redis, &lt;1 ms zwrotu.
+Inteligentne API ekstrakcji WebExtrator przekształca adres URL w **typowany, ustrukturyzowany wynik** — artykuł, produkt,
+przepis, wideo, dyskusję, ofertę pracy itd. — jednocześnie dołączając oczyszczony Markdown i zwykły tekst. Użyj tego interfejsu,
+gdy potrzebujesz „czystych, ustrukturyzowanych danych”, a nie surowego HTML.
 
 ## Proces aplikacji
 
@@ -36,14 +30,15 @@ Content-Type:  application/json
 
 ## Parametry żądania
 
-Extract akceptuje **wszystkie** parametry [Render API](/pl/guides/webextrator/webextrator_render) (`url`, `user_agent`, `timeout`, `wait_until`, `delay`, `wait_for_selector`, `block_resources`, `headers`, `cookies`, `callback_url`, `bypass_cache`, `cache_ttl_seconds`, `async`), plus dwa pola specyficzne dla Extract:
+Extract akceptuje **wszystkie** parametry [Render API](/pl/guides/webextrator/webextrator_render)
+(`url`, `user_agent`, `timeout`, `wait_until`, `delay`, `wait_for_selector`,
+`block_resources`, `headers`, `cookies`, `callback_url`, `bypass_cache`,
+`cache_ttl_seconds`, `async`), a także dwa pola specyficzne dla Extract:
 
-| Pole              | Typ      | Wymagane  | Domyślne      | Opis                                                                                      |
-| --------------- | ------- | :-: | ------- | --------------------------------------------------------------------------------------- |
-| `expected_type` | enum    |  ❌  | automatyczne określenie    | Wskazanie typu strony: `product` / `article` / `general`. Pomija heurystykę URL / tekstu, przechodzi bezpośrednio do odpowiedniej gałęzi.                        |
-| `enable_llm`    | boolean |  ❌  | `false` | Pozwala na wywołanie LLM ekstrakcji, gdy schema.org nie jest trafione. Na stronach bez JSON-LD, takich jak Amazon / HN / Greenhouse, należy to włączyć, aby uzyskać wyniki typizowane. |
-
-> Gdy strona zawiera schema.org JSON-LD, `enable_llm` jest nieaktywne — deterministyczny mapper zwraca wyniki, nigdy nie marnując wywołania LLM. Otrzymujesz **darmowe** wyniki typizowane.
+| Pole | Typ | Wymagane | Domyślna | Opis |
+|------|------|:----:|------|------|
+| `expected_type` | enum | ❌ | Automatyczne wykrywanie | Wskazówka dotycząca typu strony: `product` / `article` / `general`. Określa oczekiwany typ wyniku. |
+| `enable_llm` | boolean | ❌ | `false` | Umożliwia wywołanie ekstrakcji LLM, gdy schema.org nie znajdzie dopasowania. Na stronach bez JSON-LD, takich jak Amazon / HN / Greenhouse, należy ją włączyć, aby uzyskać wyniki z określonym typem. |
 
 ## Odpowiedź synchronizacyjna
 
@@ -87,101 +82,79 @@ Extract akceptuje **wszystkie** parametry [Render API](/pl/guides/webextrator/we
 }
 ```
 
-### Pola górne
+### Pola najwyższego poziomu
 
-| Pole              | Typ       | Opis                                                                                   |
-| --------------- | -------- | ------------------------------------------------------------------------------------ |
-| `kind`          | string   | Stałe `"extract"`.                                                                      |
-| `url`           | string   | URL, który przesłałeś.                                                                    |
-| `finalUrl`      | string   | Ostateczny URL po przekierowaniu.                                                         |
-| `contentType`   | enum     | `product` / `article` / `general`, określane kolejno przez `expected_type` → schema.org primary → heurystyka. |
-| `title`         | string   | `<title>` Readability lub renderowany `document.title`.                                    |
-| `description`   | string?  | Priorytet: `<meta name="description" />` → `og:description` → schema.org / LLM ekstrakcja → skrócenie pierwszego akapitu.   |
-| `byline`        | string?  | Autor / kanał / firma. Źródło `<meta name="author" />` → schema.org / LLM.                           |
-| `language`      | string?  | `<html lang>`.                                                                       |
-| `siteName`      | string?  | `og:site_name`.                                                                      |
-| `publishedAt`   | string?  | ISO 8601. Priorytet: `article:published_time` → `<time datetime>` → schema.org / LLM.        |
-| `images`        | string[] | Maksymalnie 50 `<img src />`, przekształcone na absolutne URL, zduplikowane, usunięte `data:` URI.                                    |
-| `links`         | string[] | Maksymalnie 100 zewnętrznych linków, przefiltrowane fragmenty / `javascript:` / `mailto:` / `tel:`.                               |
-| `markdown`      | string   | Markdown wyjściowy z Turndown.                                                           |
-| `text`          | string   | `textContent` wyodrębnione przez Mozilla Readability.                                   |
-| `structured`    | object   | Pełne wyniki strukturalne, patrz poniżej.                                                  |
-| `rawSignals`    | object   | Informacje diagnostyczne do debugowania.                                                  |
-| `cached`        | boolean? | `true`, gdy trafiono w pamięć podręczną.                                                  |
-| `cacheStoredAt` | number?  | Znacznik czasu Unix w milisekundach, kiedy wpis pamięci podręcznej został po raz pierwszy zapisany.                                                                |
+| Pole | Typ | Opis |
+|------|------|------|
+| `kind` | string | Stała wartość `"extract"`. |
+| `url` | string | Przesłany adres URL. |
+| `finalUrl` | string | Końcowy adres URL po przekierowaniach. |
+| `contentType` | enum | Typ strony: `product` / `article` / `general`. |
+| `title` | string | Tytuł strony. |
+| `description` | string? | Opis lub podsumowanie strony. |
+| `byline` | string? | Autor, kanał lub firma. |
+| `language` | string? | `<html lang>`.  |
+| `siteName` | string? | `og:site_name`.  |
+| `publishedAt` | string? | Czas publikacji w formacie ISO 8601. |
+| `images` | string[] | Maksymalnie 50 `<img src />`, przetworzonych na bezwzględne adresy URL, bez duplikatów, z pominięciem identyfikatorów URI `data:`. |
+| `links` | string[] | Maksymalnie 100 linków zewnętrznych, z odfiltrowanymi fragmentami / `javascript:` / `mailto:` / `tel:`. |
+| `markdown` | string | Treść Markdown strony. |
+| `text` | string | Zwykły tekst strony. |
+| `structured` | object | Pełny ustrukturyzowany wynik, patrz poniżej. |
+| `rawSignals` | object | Informacje diagnostyczne do debugowania. |
+| `cached` | boolean? | `true` w przypadku trafienia w pamięci podręcznej. |
+| `cacheStoredAt` | number? | Znacznik czasu Unix w milisekundach, gdy wpis w pamięci podręcznej został zapisany po raz pierwszy. |
 
-### Podpola `data.structured`
-| Podpole         | Kiedy się pojawia               | Opis                                                                   |
-| ----------- | ------------------ | -------------------------------------------------------------------- |
-| `schemaOrg` | Zawsze                 | `{ primary, breadcrumbs, all }`. `primary` to najwyższy priorytet typizowanego bytu; gdy nie znaleziony, to `null`. |
-| `openGraph` | Zawsze                 | `{ title, description, image, type }`, pochodzi z `<meta property="og:*" />`.   |
-| `jsonLd`    | Zawsze                 | Wszystkie oryginalne tablice JSON z `<script type="application/ld+json">`.               |
-| `llm`       | Gdy LLM działa i zakończył się sukcesem         | `{ kind, data, model, promptCharCount }`, typizowany wynik zweryfikowany przez Zod.              |
-| `llmError`  | Gdy LLM działa, ale zakończył się niepowodzeniem         | `{ kind, error, model }`, żądanie nie spowoduje awarii, heurystyczny wynik nadal zostanie zwrócony.                         |
-| `amazon`    | Gdy URL to `amazon.*` | Wyniki starego dedykowanego narzędzia do pobierania z Amazon (będzie stopniowo wycofywane).                                            |
+### Pola podrzędne `data.structured`
 
-## Zakres mapowania schema.org
+| Pole podrzędne | Kiedy występuje | Opis |
+|--------|---------|------|
+| `schemaOrg` | Zawsze | `{ primary, breadcrumbs, all }`. `primary` to typowana encja o najwyższym priorytecie; jeśli nie zostanie znaleziona, używane jest `null`. |
+| `openGraph` | Zawsze | `{ title, description, image, type }`, pochodzące z `<meta property="og:*" />`. |
+| `jsonLd` | Zawsze | Surowa tablica JSON wszystkich bloków `<script type="application/ld+json">`. |
+| `llm` | Gdy LLM został uruchomiony i zakończył się pomyślnie | `{ kind, data, model, promptCharCount }`, typowany wynik. |
+| `llmError` | Gdy LLM został uruchomiony, ale zakończył się niepowodzeniem | `{ kind, error, model }`, żądanie może nadal zwracać inne wyodrębnione pola. |
+| `amazon` | Gdy URL jest `amazon.*` | Wyniki starszego rozszerzenia Amazon; w przypadku nowych integracji używaj wyników typowanych. |
 
-Posortowane według priorytetu (gdy trafione, traktowane jako `structured.schemaOrg.primary`):
+## Typy wyników schema.org
 
-| Typ schema.org                                                                                              | Rodzaj      | Pola wyjściowe                                                                                                                                                                                     |
-| ---------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Product`                                                                                                  | produkt      | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]`                                 |
-| `Recipe`                                                                                                   | przepis       | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
-| `VideoObject`                                                                                              | wideo        | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount`                                                                                 |
-| `JobPosting`                                                                                               | praca          | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType`                                                                              |
-| `Event` (w tym `*Event`)                                                                                        | wydarzenie        | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}`                                                                                  |
-| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | artykuł      | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]`                                                                                 |
-| `FAQPage`                                                                                                  | faq          | `questions[{question, answer}]`                                                                                                                                                          |
-| `BreadcrumbList`                                                                                           | (przypięte do rodzeństwa) | Zawsze wyjście do `structured.schemaOrg.breadcrumbs[]`, nie będzie traktowane jako primary.                                                                                                                                 |
+`structured.schemaOrg.primary` obsługuje następujące typy wyników:
 
-Przetwarzanie mapera:
+| Typ schema.org | kind | Pola wyjściowe |
+|----------------|----------|----------|
+| `Product` | product | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]` |
+| `Recipe` | recipe | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
+| `VideoObject` | video | `name, description, thumbnailUrl, uploadDate, duration, embedUrl, contentUrl, channel, interactionCount` |
+| `JobPosting` | job | `title, description, datePosted, validThrough, hiringOrganization, jobLocation, baseSalary, employmentType` |
+| `Event` (w tym `*Event`) | event | `name, description, startDate, endDate, location.{name,address}, organizer, offer.{url,price,currency}` |
+| `Article` / `NewsArticle` / `BlogPosting` / `ScholarlyArticle` / `TechArticle` / `Report` / `*NewsArticle` | article | `subtype, headline, description, datePublished, dateModified, author, publisher, image[], url, sameAs[]` |
+| `FAQPage` | faq | `questions[{question, answer}]` |
+| `BreadcrumbList` | (dołączone do sibling) | Zawsze wyprowadzane do `structured.schemaOrg.breadcrumbs[]`, nigdy jako primary. |
 
-- Kontener `@graph` (rekurencyjnie rozwijany);
-- Tablica `@type` (np. `["Recipe", "NewsArticle"]` — oba rozpoznawane, wygrywa ten o wyższym priorytecie);
-- Warianty z prefiksem `http://schema.org/`;
-- Zagnieżdżone `Offer` i `AggregateOffer` (ten drugi odczytuje `lowPrice`);
-- Względne URL-e obrazów (rozwiązywane do absolutnych na podstawie `finalUrl`).
+## Typy wyników LLM
 
-## Typizowany schemat LLM
+Gdy `enable_llm: true`, a strona nie zawiera dostępnych danych strukturalnych schema.org, można zwrócić wyniki ekstrakcji następujących typów:
 
-Gdy `enable_llm: true` **i** schema.org nie ma primary, ekstraktor według URL heurystycznie
-(w lub `expected_type` wskazówka) wybiera jeden z poniższych modeli walidacji Zod Schema:
+| Kind | Pola wymagane | Pola opcjonalne |
+|------|---------|---------|
+| `article` | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]` |
+| `product` | `name` | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]` |
+| `discussion` | `title` | `author, postedAt, points, commentCount, body, url` |
+| `recipe` | `name` | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]` |
+| `video` | `name` | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript` |
+| `job` | `title` | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
 
-| Rodzaj         | URL heurystyczny                                                                            | Wymagane pola       | Opcjonalne pola                                                                                                                                                                         |
-| ------------ | ---------------------------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `article`    | Tekst ≥400 słów i inne nie trafione                                                                    | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]`                                                                                          |
-| `product`    | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*`                | `name`     | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]`                                                      |
-| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs`                                    | `title`    | `author, postedAt, points, commentCount, body, url`                                                                                                                          |
-| `recipe`     | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes` | `name`     | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]`                                              |
-| `video`      | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video`               | `name`     | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript`                                                                                 |
-| `job`        | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr`          | `title`    | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
+## Pamięć podręczna
 
-W przypadku sukcesu LLM również wypełni "last-resort" do pól najwyższego poziomu:
+Te same URL, parametry żądania, `cookies` i `headers` mogą ponownie wykorzystać wyniki z pamięci podręcznej; `async`, `bypass_cache` i `cache_ttl_seconds` służą do kontrolowania sposobu wykonania i zachowania pamięci podręcznej.
 
-- `article` → `description` / `byline` / `publishedAt` / `language`
-- `product` → `description`
-- `discussion` → `description` (= body pierwsze 280 znaków) / `byline` (= author) / `publishedAt` (= postedAt)
-- `recipe` → `description` / `byline` (= author)
-- `video` → `description` / `byline` (= channel) / `publishedAt` (= uploadDate)
-- `job` → `description` / `byline` (= company) / `publishedAt` (= datePosted)
+| Pole | Działanie |
+|------|------|
+| `bypass_cache: true` | Pomiń odczyt; wynik tego żądania nadal zostanie zapisany w pamięci podręcznej, dzięki czemu identyczne żądanie następnym razem może trafić do cache. |
+| `cache_ttl_seconds: 0` | Ta odpowiedź **nie będzie buforowana**. |
+| `cache_ttl_seconds: N` | Ustaw niestandardowy TTL dla tego wpisu (domyślnie 3600 sekund). |
 
-Wypełnienie uruchamia się tylko wtedy, gdy pewne źródło danych **nie wypełni** odpowiadających pól — LLM zawsze jest ostatnią deską ratunku.
-
-## Cache
-
-Te same żądania będą haszowane do tego samego klucza Redis:
-`webextrator:cache:extract:<sha256(canonical-json)>`. Klucz cache **ignoruje** `async`,
-`bypass_cache`, `cache_ttl_seconds` (to jest przełącznik operacyjny, nie wpływa na odpowiedź). `cookies` /
-`headers` **będą** przechowywane w oddzielnych koszach.
-
-| Pole                     | Efekt                         |
-| ---------------------- | -------------------------- |
-| `bypass_cache: true`   | Pomija odczyt; wynik tej sesji nadal zostanie zapisany w cache, aby następne takie samo żądanie mogło trafić. |
-| `cache_ttl_seconds: 0` | Ta odpowiedź **nie będzie cache'owana**.               |
-| `cache_ttl_seconds: N` | Dostosowuje TTL tego wpisu (domyślnie 3600 sekund).    |
-
-Odpowiedzi z trafionym cache będą zawierały `data.cached: true` oraz `data.cacheStoredAt: <unix-ms>`.
+Odpowiedzi trafiające do pamięci podręcznej będą zawierać `data.cached: true` oraz `data.cacheStoredAt: <unix-ms>`.
 
 ## Tryb asynchroniczny i callback
 
@@ -387,9 +360,13 @@ console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, 'rodzaj sk�
 
 ## Wskazówki i pułapki
 
-- **Jeśli można przekazać `expected_type`, to przekazuj.** Darmowa wskazówka, pomija heurystyczne oceny, szczególnie przydatna dla stron, których wzór URL nie znajduje się na wbudowanej liście.
-- **`enable_llm: true` na stronach z trafieniem schema.org jest darmowe.** LLM jest wywoływane tylko wtedy, gdy schema.org nie ma primary, więc domyślnie jest to również bezpieczne.
-- **Podczas debugowania najpierw sprawdź `rawSignals.hasJsonLd`.** Jeśli jest `true`, ale `structured.schemaOrg.primary` jest `null`, oznacza to, że strona używa typu `@type`, którego nasz mapper jeszcze nie pokrył — zgłoś problem, dodamy.
-- **`structured.llmError` jest informacyjne.** Żądanie nadal jest udane, a wyniki heurystyczne nadal są zwracane. Sprawdź `llmError.error`, aby zlokalizować przyczynę (przekroczenie czasu, błąd analizy JSON, błąd walidacji Zod).
-- **Linki `non-artykułowe` nie będą sortowane według powiązań.** Tylko według "maksymalnie 100 pozycji + filtruj nieprawidłowe protokoły", staraj się oczyścić.
-- **Hit cache również jest płatny.** Cache jest przeznaczone na opóźnienia i ochronę puli przeglądarek, a nie na oszczędzanie pieniędzy.
+- **Przekaż `expected_type`, gdy musisz określić typ strony.** Na przykład dla strony artykułu użyj `article`, a dla strony produktu — `product`.
+- **`enable_llm: true` jest bezpłatne na stronach dopasowanych przez schema.org.** LLM jest wywoływany tylko wtedy, gdy w schema.org
+  brakuje primary, więc domyślne włączenie tej opcji jest bezpieczne.
+- **Podczas debugowania najpierw sprawdź `rawSignals.hasJsonLd`.** Jeśli jest to `true`, ale `structured.schemaOrg.primary`
+  ma wartość `null`, oznacza to, że `@type` strony nie jest jeszcze obsługiwane; możesz nam to zgłosić.
+- **`structured.llmError` ma charakter informacyjny.** Żądanie nadal może pomyślnie zwrócić inne wyodrębnione pola. Sprawdź
+  `llmError.error`, aby ustalić przyczynę (przekroczenie limitu czasu, nieudane parsowanie JSON, nieudana walidacja struktury).
+- **`links[]` dla stron innych niż artykuły nie jest sortowane według trafności.** Stosowane jest jedynie czyszczenie według zasady „maksymalnie 100 pozycji + filtrowanie nieprawidłowych protokołów”
+  w miarę możliwości.
+- **Trafienia w pamięci podręcznej również są płatne.**
