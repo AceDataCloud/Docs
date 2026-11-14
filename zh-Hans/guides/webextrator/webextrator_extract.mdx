@@ -9,16 +9,6 @@ WebExtrator 智能抽取 API 把一个 URL 转换成**类型化的结构化结�
 食谱、视频、讨论、招聘等，同时附带清洗后的 Markdown 与纯文本。当你想要"干净的结
 构化数据"而不是原始 HTML 时，这是该用的接口。
 
-底层是一条三层流水线：
-
-1. **schema.org JSON-LD 映射器** —— 确定性、零 LLM 成本。覆盖 Wikipedia /
-   BestBuy / AllRecipes / YouTube / 大部分新闻 / 大部分商品页。
-2. **类型化 LLM 抽取** —— 仅在 schema.org 未命中时触发。按页面类型选 Schema，
-   Zod 严格校验。
-3. **Readability + Markdown 兜底** —— 始终运行，补齐前两层没填的顶层字段。
-
-URL 重复请求会被 Redis 结果缓存接住，&lt;1 ms 返回。
-
 ## 申请流程
 
 要使用 WebExtrator 服务页，首先到 [Ace Data Cloud 控制台](https://platform.acedata.cloud/console/applications) 获取您的 API Token，留作备用。
@@ -47,11 +37,8 @@ Extract 接受**所有**[Render API](/zh-Hans/guides/webextrator/webextrator_ren
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|:----:|------|------|
-| `expected_type` | enum | ❌ | 自动判断 | 页面类型提示：`product` / `article` / `general`。跳过 URL / 文本启发式，直接走对应分支。 |
+| `expected_type` | enum | ❌ | 自动判断 | 页面类型提示：`product` / `article` / `general`。指定期望的结果类型。 |
 | `enable_llm` | boolean | ❌ | `false` | 当 schema.org 未命中时允许调用 LLM 抽取。在 Amazon / HN / Greenhouse 这类无 JSON-LD 的页面上，需要打开才能拿到类型化结果。 |
-
-> 当页面自带 schema.org JSON-LD 时，`enable_llm` 无效 —— 确定性映射器直接出结果，
-> 永远不会浪费 LLM 调用。你**白嫖**到类型化结果。
 
 ## 同步响应
 
@@ -102,17 +89,17 @@ Extract 接受**所有**[Render API](/zh-Hans/guides/webextrator/webextrator_ren
 | `kind` | string | 固定 `"extract"`。 |
 | `url` | string | 你提交的 URL。 |
 | `finalUrl` | string | 重定向后的最终 URL。 |
-| `contentType` | enum | `product` / `article` / `general`，由 `expected_type` → schema.org primary → 启发式 依次确定。 |
-| `title` | string | Readability `<title>` 或渲染后的 `document.title`。 |
-| `description` | string? | 优先级：`<meta name="description" />` → `og:description` → schema.org / LLM 抽取 → 正文首段截断。 |
-| `byline` | string? | 作者 / 频道 / 公司。来源 `<meta name="author" />` → schema.org / LLM。 |
+| `contentType` | enum | 页面类型：`product` / `article` / `general`。 |
+| `title` | string | 页面标题。 |
+| `description` | string? | 页面描述或摘要。 |
+| `byline` | string? | 作者、频道或公司。 |
 | `language` | string? | `<html lang>`。 |
 | `siteName` | string? | `og:site_name`。 |
-| `publishedAt` | string? | ISO 8601。优先级：`article:published_time` → `<time datetime>` → schema.org / LLM。 |
+| `publishedAt` | string? | 发布时间，使用 ISO 8601 格式。 |
 | `images` | string[] | 最多 50 个 `<img src />`，已解析为绝对 URL、去重、丢弃 `data:` URI。 |
 | `links` | string[] | 最多 100 个外链，已过滤片段 / `javascript:` / `mailto:` / `tel:`。 |
-| `markdown` | string | Turndown 转出的 Markdown。 |
-| `text` | string | Mozilla Readability 抽取的 `textContent`。 |
+| `markdown` | string | 页面的 Markdown 内容。 |
+| `text` | string | 页面纯文本。 |
 | `structured` | object | 完整结构化结果，见下。 |
 | `rawSignals` | object | 调试用的诊断信息。 |
 | `cached` | boolean? | 命中缓存时为 `true`。 |
@@ -125,15 +112,15 @@ Extract 接受**所有**[Render API](/zh-Hans/guides/webextrator/webextrator_ren
 | `schemaOrg` | 始终 | `{ primary, breadcrumbs, all }`。`primary` 是最高优先级的类型化实体；找不到时为 `null`。 |
 | `openGraph` | 始终 | `{ title, description, image, type }`，源自 `<meta property="og:*" />`。 |
 | `jsonLd` | 始终 | 所有 `<script type="application/ld+json">` 块的原始 JSON 数组。 |
-| `llm` | LLM 跑了且成功时 | `{ kind, data, model, promptCharCount }`，Zod 校验过的类型化结果。 |
-| `llmError` | LLM 跑了但失败时 | `{ kind, error, model }`，请求不会因此挂掉，启发式结果依然返回。 |
-| `amazon` | URL 是 `amazon.*` 时 | 老的 amazon 专用抓取器结果（将逐步废弃）。 |
+| `llm` | LLM 跑了且成功时 | `{ kind, data, model, promptCharCount }`，类型化结果。 |
+| `llmError` | LLM 跑了但失败时 | `{ kind, error, model }`，请求仍可返回其他已提取字段。 |
+| `amazon` | URL 是 `amazon.*` 时 | 旧版 Amazon 扩展结果；新集成请使用类型化结果。 |
 
-## schema.org 映射器覆盖范围
+## schema.org 结果类型
 
-按优先级排序（命中即作为 `structured.schemaOrg.primary`）：
+`structured.schemaOrg.primary` 支持以下结果类型：
 
-| schema.org 类型 | 映射 kind | 输出字段 |
+| schema.org 类型 | kind | 输出字段 |
 |----------------|----------|----------|
 | `Product` | product | `name, sku, gtin, model, color, brand, url, images, offer.{price,currency,availability,condition,seller}, rating.{value,count}, reviews[], properties[]` |
 | `Recipe` | recipe | `name, description, image, datePublished, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords, recipeCategory, recipeCuisine` |
@@ -144,45 +131,22 @@ Extract 接受**所有**[Render API](/zh-Hans/guides/webextrator/webextrator_ren
 | `FAQPage` | faq | `questions[{question, answer}]` |
 | `BreadcrumbList` | （挂在 sibling） | 始终输出到 `structured.schemaOrg.breadcrumbs[]`，不会作为 primary。 |
 
-映射器处理：
+## LLM 结果类型
 
-- `@graph` 容器（递归展开）；
-- `@type` 数组（如 `["Recipe", "NewsArticle"]` —— 两个都识别，按优先级取胜）；
-- `http://schema.org/` 前缀变体；
-- 嵌套 `Offer` 与 `AggregateOffer`（后者读 `lowPrice`）；
-- 相对图像 URL（按 `finalUrl` 解析为绝对）。
+当 `enable_llm: true` 且页面没有可用的 schema.org 结构化数据时，可返回以下类型的抽取结果：
 
-## LLM 类型化 Schema
-
-当 `enable_llm: true` **且** schema.org 没有 primary 时，抽取器按 URL 启发式
-（或 `expected_type` 提示）选下面之一的 Zod Schema 校验模型输出：
-
-| Kind | URL 启发式 | 必填字段 | 可选字段 |
-|------|-----------|---------|---------|
-| `article` | 文本 ≥400 字且其它未命中 | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]` |
-| `product` | `amazon.* / ebay.* / aliexpress.* / temu.* / walmart.* / bestbuy.*` | `name` | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]` |
-| `discussion` | `news.ycombinator.com / reddit.com / lobste.rs` | `title` | `author, postedAt, points, commentCount, body, url` |
-| `recipe` | `allrecipes / foodnetwork / seriouseats / epicurious / bonappetit / simplyrecipes` | `name` | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]` |
-| `video` | `youtube.com/watch / youtu.be / vimeo.com/<id> / tiktok.com/@/video` | `name` | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript` |
-| `job` | `greenhouse.io / lever.co / jobs.* / careers.* / workable.com / bamboohr` | `title` | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
-
-LLM 成功时还会向顶层字段做"last-resort"回填：
-
-- `article` → `description` / `byline` / `publishedAt` / `language`
-- `product` → `description`
-- `discussion` → `description`（= body 前 280 字）/ `byline`（= author）/ `publishedAt`（= postedAt）
-- `recipe` → `description` / `byline`（= author）
-- `video` → `description` / `byline`（= channel）/ `publishedAt`（= uploadDate）
-- `job` → `description` / `byline`（= company）/ `publishedAt`（= datePosted）
-
-回填只在确定性数据源**没填**对应字段时触发 —— LLM 始终是最后一道兜底。
+| Kind | 必填字段 | 可选字段 |
+|------|---------|---------|
+| `article` | `headline` | `description, byline, publishedAt, language, topics[], sections[{heading,summary}]` |
+| `product` | `name` | `description, brand, sku, price, currency, availability, rating.{value,count}, bullets[], specifications[{name,value}]` |
+| `discussion` | `title` | `author, postedAt, points, commentCount, body, url` |
+| `recipe` | `name` | `description, author, cookTime, prepTime, totalTime, recipeYield, ingredients[], instructions[], nutrition, rating, keywords[]` |
+| `video` | `name` | `description, channel, uploadDate, duration, viewCount, likeCount, thumbnailUrl, transcript` |
+| `job` | `title` | `description, company, location, remote, employmentType, datePosted, validThrough, salaryMin, salaryMax, salaryCurrency, salaryPeriod, responsibilities[], qualifications[]` |
 
 ## 缓存
 
-相同请求会被哈希到同一个 Redis Key：
-`webextrator:cache:extract:<sha256(canonical-json)>`。缓存 Key **忽略** `async`、
-`bypass_cache`、`cache_ttl_seconds`（这是操作开关，不影响响应）。`cookies` /
-`headers` **会**分桶缓存。
+相同 URL、请求参数、`cookies` 和 `headers` 可以复用缓存结果；`async`、`bypass_cache`、`cache_ttl_seconds` 用于控制执行方式和缓存行为。
 
 | 字段 | 效果 |
 |------|------|
@@ -397,14 +361,13 @@ console.log(recipe.name, recipe.cookTime, recipe.ingredients.length, '种配料'
 
 ## 提示与坑
 
-- **能传 `expected_type` 就传。** 免费提示，跳过启发式判断，对 URL 模式不在
-  内置列表里的页面尤其有用。
+- **需要指定页面类型时传入 `expected_type`。** 例如文章页使用 `article`，商品页使用 `product`。
 - **`enable_llm: true` 在 schema.org 命中的页面上是免费的。** LLM 只在 schema.org
   没有 primary 时才被调用，所以默认开着也很安全。
 - **调试时先看 `rawSignals.hasJsonLd`。** 如果是 `true` 但 `structured.schemaOrg.primary`
-  为 `null`，说明页面用了我们映射器还没覆盖的 `@type` —— 提个 issue，我们加。
-- **`structured.llmError` 是信息性的。** 请求依然成功，启发式结果依然返回。看
-  `llmError.error` 来定位原因（超时、JSON 解析失败、Zod 校验失败）。
+  为 `null`，说明页面的 `@type` 暂不受支持，可向我们反馈。
+- **`structured.llmError` 是信息性的。** 请求仍可成功返回其他已提取字段。看
+  `llmError.error` 来定位原因（超时、JSON 解析失败、结构校验失败）。
 - **非文章页的 `links[]` 不会做相关性排序。** 仅按"上限 100 条 + 过滤无效协议"
   尽力清洗。
-- **缓存命中也计费。** 缓存是为延迟和保护浏览器池，不是为省钱。
+- **缓存命中也计费。**
