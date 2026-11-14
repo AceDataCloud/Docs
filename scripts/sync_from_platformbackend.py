@@ -1076,7 +1076,13 @@ def sanitize_html_for_mdx(content: str) -> str:
     return re.sub(r"[ \t]+(?=\r?\n)", "", "".join(parts))
 
 
+def sanitize_example_credentials(content: str) -> str:
+    """Never publish literal platform API credentials copied into examples."""
+    return re.sub(r"(?i)(\bbearer\s+)[a-f0-9]{32}(?![a-f0-9])", r"\1YOUR_API_TOKEN", content)
+
+
 def convert_markdown_to_mdx(content: str, fallback_title: str, description: str | None = None) -> str:
+    content = sanitize_example_credentials(content)
     title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
     title = title_match.group(1).strip() if title_match else fallback_title
     if title_match:
