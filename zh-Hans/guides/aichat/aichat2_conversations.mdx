@@ -137,7 +137,15 @@ curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
 }
 ```
 
-> `stateful` 默认是 `true`，省略和显式传 `true` 等价。如果你不希望服务端保存这一轮对话，可以显式设置 `stateful: false`。
+> `stateful` 默认是 `true`，省略和显式传 `true` 等价。设置 `stateful: false` 会跳过加载之前的会话历史；这不表示本轮结果不会被保存，也不适用于需要暂停后继续的工具流程。
+
+### 长会话与原文保留
+
+上下文压缩只整理本轮发送给模型的内容，不替换已保存的聊天记录。通过 `action: retrieve` 仍可读取完整的已保存消息；显式编辑、删除会话仍按请求生效。
+
+模型可在当前会话内查找并分页读取历史原文。需要继续修改文章、引用数字或准备发布时，应读取对应原文，不能用摘要代替正文。此能力不自动恢复旧版本中已经丢失的消息。
+
+如果上下文整理失败，请保留会话 ID 并检查 `error` 事件；服务不会用空摘要覆盖原文。失败前已经完成的工具操作可能仍有效，请先查询其结果，避免重复生成或重复发布。单条会话达到存储上限时会明确报错，已有保存记录不会通过裁剪腾出空间；可导出所需内容后开启新会话。
 
 ## 流式响应
 
@@ -246,9 +254,9 @@ while (true) {
 | `ask_user_question` | 模型需要用户补充信息时发出，对话进入 `awaiting_user_input` 状态，详见下文 [恢复暂停的对话](#恢复暂停的对话)。 |
 | `artifact` | 模型生成的独立产物（如代码块、文档），可保存或下载。 |
 | `system_message` | 系统提示信息（非用户与助手内容），仅用于 UI 提示。 |
-| `compact` | 内部上下文被压缩的事件，无需特殊处理。 |
+| `compact` | 模型上下文已整理；已保存的原始消息保持不变，客户端无需删除聊天记录。 |
 | `error` | 本轮发生错误，`message` 描述错误内容。 |
-| `done` | 流式响应结束，携带 `usage`（含 `prompt_tokens` / `completion_tokens` / `total_tokens`）和 `terminal_reason`。 |
+| `done` | 本轮最终会话记录保存成功，携带 `usage`（含 `prompt_tokens` / `completion_tokens` / `total_tokens`）和 `terminal_reason`；仍需按终止原因判断是否完成任务。 |
 
 对于只关心最终答案的客户端，把所有 `text_delta` 的 `content` 拼接起来就和 `application/json` 模式下的 `answer` 等价。
 
@@ -487,10 +495,13 @@ curl -X POST 'https://api.acedata.cloud/aichat2/conversations' \
 - `400 bad_request`：缺少必填字段、`tool_use_id` 不匹配、`messages` schema 非法等。
 - `401 invalid_token`：`authorization` 头不正确。
 - `404 not_found`：`action: retrieve / update / delete` 时 `id` 对应的会话不存在。
+- `413 conversation_storage_limit`：会话超过存储限制，未覆盖已有保存记录。
 - `429 too_many_requests`：触发了速率限制。
+- `503 context_compaction_failed`：上下文整理失败，已有记录保留。
+- `500 conversation_persist_failed`：本轮最终保存失败；已收到文本不代表最终记录保存成功，请按会话 ID 查询。
 - `500 chat_error`：服务暂时不可用，或本轮未生成内容（不会扣费）。
 
-在流式响应里，错误以 `{"type":"error","message":"..."}` 事件发出，紧接着流就会结束。
+在流式响应里，错误以 `{"type":"error","message":"..."}` 事件发出，随后流会结束。`[DONE]` 仅表示传输结束；有 `error` 时不能视为成功，也不会发送成功的 `done` 事件。
 
 ## 结论
 
