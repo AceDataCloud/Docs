@@ -1,15 +1,17 @@
 ---
-title: "ACE Music 歌曲生成 API"
+title: "ACE Music 歌曲与参考音频 API"
 description: "ACE Music 集成指南 - Ace Data Cloud"
 ---
 
-ACE Music 支持从一句创作灵感或自定义歌词生成一组歌曲候选。可选模型为 `acemusic-v1.1`（默认）和 `acemusic-v1`。一次完整生成包含两首候选，分别试听并下载 MP3。
+通过 `POST /acemusic/audios` 从灵感或自定义歌词创作歌曲、导入参考音频、翻唱已有作品，或融合两首参考。歌曲创作、翻唱和融合各以两首候选为一组；音频上传导入一首参考。两类操作分别计费。
 
 ## 获取凭据
 
 在 [控制台](https://platform.acedata.cloud/console/applications) 开通 ACE Music，或使用已获该服务权限的通用应用凭据。请求携带 `Authorization: Bearer YOUR_API_KEY`。应用余额、凭据限额和服务权限均会检查。
 
 ## 灵感模式
+
+`action` 默认为 `generate`。可选模型为 `acemusic-v1.1`（默认）和 `acemusic-v1`。
 
 ```bash
 curl --request POST 'https://api.acedata.cloud/acemusic/audios' \
@@ -27,7 +29,7 @@ curl --request POST 'https://api.acedata.cloud/acemusic/audios' \
 
 ## 自定义模式
 
-将 `custom` 设为 `true`，提供 `title`、`lyric` 和 `style`。歌词可包含 `[Verse]`、`[Chorus]` 等段落标签，也可先通过 [歌词生成 API](https://platform.acedata.cloud/documents/acemusic-lyrics-integration) 创作，再编辑后提交。
+在 `generate` 中将 `custom` 设为 `true`，提供 `title`、`lyric` 和 `style`。歌词可包含 `[Verse]`、`[Chorus]` 等段落标签，也可先通过 [歌词生成 API](https://platform.acedata.cloud/documents/acemusic-lyrics-integration) 创作，再编辑后提交。
 
 ```json
 {
@@ -41,34 +43,85 @@ curl --request POST 'https://api.acedata.cloud/acemusic/audios' \
 }
 ```
 
+## 上传参考音频
+
+使用同一个歌曲接口，设置 `action=upload` 与有效的 HTTPS `audio_url`，可选 `name`。当前参考导入仅支持 MP3 文件。此操作不需要 `model`、`custom` 或歌词字段。只上传并准备参考，不会自动再生成歌曲。
+
+以下为请求示例；请替换为自己有权使用的音频地址：
+
+```json
+{
+  "action": "upload",
+  "audio_url": "https://example.com/my-reference.mp3",
+  "name": "我的参考旋律",
+  "async": true
+}
+```
+
+若希望将新参考与某首已有作品组合使用，可在上传时传入该作品的平台 `audio_id`。上传完成后的 `data` 包含一首音轨，其 `id` 可用于翻唱或融合。将本地文件上传到文件服务与本接口的参考导入是不同操作，参考导入成功后按上传价格收费。
+
+## 翻唱与双参考融合
+
+这两种操作使用 `acemusic-v1.1`，默认仍为该模型。填写 `lyric`、`style`，可选 `title`；不要再传 `custom` 或灵感 `prompt`。`audio_influence` 控制音频参考程度，范围为 1–100，默认 60。当前不接受风格强度、纯音乐、续写、分轨或音色参数。
+
+`cover` 使用一个自己可访问的平台音轨 `audio_id`。请从先前成功任务的 `response.data[*].id` 取值；它不是生成任务的 `task_id`。以下 ID 是需要替换的请求占位值，不是示例结果。
+
+```json
+{
+  "action": "cover",
+  "model": "acemusic-v1.1",
+  "audio_id": "YOUR_TRACK_ID",
+  "lyric": "[Verse]\n晚风吹过熟悉的街道",
+  "style": "温暖民谣，木吉他",
+  "audio_influence": 60,
+  "async": true
+}
+```
+
+`mashup` 使用 `mashup_audio_ids`，当前要求恰好两首不同的平台音轨。参考可来自已完成的上传或歌曲任务，必须属于自己可访问且相互兼容的作品；不兼容的组合会被拒绝。
+
+```json
+{
+  "action": "mashup",
+  "model": "acemusic-v1.1",
+  "mashup_audio_ids": ["YOUR_FIRST_TRACK_ID", "YOUR_SECOND_TRACK_ID"],
+  "lyric": "[Verse]\n把两段旅程写成一首歌",
+  "style": "中文流行，融合两首参考的旋律与节奏",
+  "async": true
+}
+```
+
+## 通用字段
+
 | 字段 | 说明 |
 | --- | --- |
-| `action` | 当前仅支持 `generate`，可省略 |
-| `model` | `acemusic-v1.1` 或 `acemusic-v1` |
-| `custom` | `false` 使用灵感模式；`true` 使用自定义歌词 |
-| `prompt` | 灵感模式必填的创作描述 |
-| `lyric` / `style` / `title` | 自定义模式的歌词、音乐风格和标题 |
+| `action` | `generate`（默认）、`upload`、`cover` 或 `mashup` |
+| `model` | `generate` 可用两种模型；`cover` / `mashup` 使用 `acemusic-v1.1`；`upload` 不传 |
+| `custom` / `prompt` | 仅 `generate` 使用：灵感模式填 `prompt`，自定义模式填 `lyric` / `style` / `title` |
+| `lyric` / `style` / `title` | 自定义生成要求全部填写；翻唱与融合要求歌词、风格，标题可选 |
+| `audio_url` / `name` | 待导入 MP3 文件的 HTTPS 地址与可选显示名称 |
+| `audio_id` | 翻唱的参考音轨，或上传时用于关联已有参考的音轨 |
+| `mashup_audio_ids` | 融合的两首不同参考音轨 |
+| `audio_influence` | 翻唱 / 融合的音频参考程度，1–100，默认 60 |
 | `async` | 默认 `true`；返回任务 ID 后查询结果 |
 | `callback_url` | 可选的 HTTPS 完成回调地址；传入后采用异步执行 |
 
-当前生成接口不接受音频上传、翻唱、续写、分轨或音色参数。风格描述会影响创作方向，成品的演绎和实际时长以结果为准。
-
 ## 任务与交付
 
-保存提交返回的 `task_id`，通过 [任务 API](https://platform.acedata.cloud/documents/acemusic-tasks-integration) 查询。提交受理仅表示任务已建立。完整结果的 `data` 是音轨列表，每首包含平台音轨 `id`、`model`、`state`、`title`、`lyric`、`style`、实际 `duration`（秒）、`audio_url` 和可选 `image_url`。
+保存提交返回的 `task_id`，通过 [任务 API](https://platform.acedata.cloud/documents/acemusic-tasks-integration) 查询。提交受理仅表示任务已建立。`type=audios` 的历史同时包含四种操作。完整结果的 `data` 是音轨列表，每首包含平台音轨 `id`、`model`、`state`、`title`、`lyric`、`style`、实际 `duration`（秒）、`audio_url` 和可选 `image_url`。
 
-两首音频均可交付后，整个组才标记为成功。部分失败保留已完成的音轨，任务标记为 `partial_failed`；封面缺失不影响已有音频播放。浏览器刷新、网络中断后应查询原任务，不要再次提交生成。
+上传成功时交付一首参考；生成、翻唱或融合须在两首音频均可交付后才将整个组标记为成功。部分失败保留已完成的音轨，任务标记为 `partial_failed`；封面缺失不影响已有音频播放。浏览器刷新、网络中断后应查询原任务，不要再次提交生成或上传。
 
 同一 `Idempotency-Key` 与同一请求内容返回原任务；使用同键发送不同内容会冲突。超时且受理状态不明确时保留该键和原任务身份，等待查询或联系支持，不要换键自动补发。
 
 ## 费用
 
-按生成任务收费，完整两首只收一次。最终失败或部分失败的任务不收生成费；任务查询免费。歌词助手是独立的付费 API，歌曲生成不会自动另收歌词助手费用。
+生成、翻唱与融合按完整双曲组收费，每组只收一次，最终失败或部分失败的任务不收生成费。上传参考是独立的收费操作，成功导入一首参考收一次上传费，最终失败不收费。查询免费；歌词助手也独立收费，歌曲操作不会隐式另收歌词助手费用。
 
-价格以控制台对应套餐为准。2026-11-17 的最大套餐与汇率基准下，一次完整生成折合人民币 ¥0.20，约 US$0.02995；不同套餐、优惠、站点加价和后续汇率变化会影响折算金额。
+完整双曲组为 0.314816994048 Credits，成功上传参考为 0.0157408497024 Credits。按 2026-11-17 的最大套餐与汇率基准，分别折合人民币 ¥0.20 和 ¥0.01。实际价格与折算以控制台对应套餐、优惠、站点定价和汇率为准。
 
 ## 回调与错误
 
-完成后向 `callback_url` 推送最终任务结果。接收方应按 `task_id` 去重并返回成功状态；回调可能重投。回调接收失败不会重新生成歌曲或额外扣费，仍可使用任务 API 获取结果。
+完成后向 `callback_url` 推送最终任务结果。接收方应按 `task_id` 去重并返回成功状态；回调可能重投。回调接收失败不会重新生成、重新导入或额外扣费，仍可使用任务 API 获取结果。
 
-参数无效返回 400；认证或权限问题返回 401/403；余额不足返回 402；限流返回 429；服务失败返回 500。异步执行错误通过任务终态和 `error` 表达。排查时提供 `task_id` 与 `trace_id`。
+参数无效或参考不兼容返回 400；认证或权限问题返回 401/403；余额不足返回 402；限流返回 429；服务失败返回 500。异步执行错误通过任务终态和 `error` 表达。排查时提供 `task_id` 与 `trace_id`。
