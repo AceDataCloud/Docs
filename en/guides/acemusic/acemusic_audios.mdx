@@ -1,53 +1,190 @@
 ---
-title: "ACE Music Song and Reference Audio API"
+title: "ACE Music Song Generation API Integration Guide"
 description: "ACE Music integration guide - Ace Data Cloud"
 ---
 
-Use `POST /acemusic/audios` to create songs from inspiration or custom lyrics, import reference audio, cover existing works, or mash up two references. Song creation, covers, and mashups are each provided as a set of two candidates; audio upload imports one reference. The two types of operations are billed separately.
+ACE Music can generate songs based on a creative inspiration sentence or custom lyrics, and also supports importing reference audio, covering existing works, and blending two references. This article introduces the complete process from obtaining an API Token to submitting requests, querying tasks, previewing, and downloading.
 
-## Obtain Credentials
+Generation, covers, and blending each deliver a set of two candidate songs at a time, while reference uploads import one audio track at a time. You can first use inspiration mode to complete the first call, then choose other creation methods as needed.
 
-Enable ACE Music in the [Console](https://platform.acedata.cloud/console/applications), or use general application credentials that have permission for this service. Include `Authorization: Bearer YOUR_API_KEY` in requests. Application balance, credential quotas, and service permissions are all checked.
+## Application Process
 
-## Inspiration Mode
+1. Open the [Ace Data Cloud Console](https://platform.acedata.cloud/console/applications). If you are not logged in yet, please register or log in first.
+2. Find **API Key** in the **General Applications** section. If you do not have a key yet, click **Create API Key**; if you already have a key, you can directly use the copy button to obtain the API Token.
+3. To create, view, or adjust keys, go to the [Manage Keys](https://platform.acedata.cloud/console/credentials) page. When using a restricted key, please confirm that it allows access to ACE Music and the required song, lyric, and task APIs.
+4. Fill in `Authorization: Bearer YOUR_API_TOKEN` in the request header, replacing `YOUR_API_TOKEN` with the complete copied Token. Song generation, reference uploads, and lyric generation consume credits. When the balance is insufficient, you can top up at [General Balance](https://platform.acedata.cloud/console/coin).
 
-`action` defaults to `generate`. Available models are `acemusic-v1.1` (default) and `acemusic-v1`.
+API Key and API Token refer to the same credential used to call the API in this article. General application credentials can be reused within the permission scope, and there is no need to create a new key for each request in this guide. Please store the Token on the server side, and do not place it in the web frontend or public repositories.
+
+> Complete API parameters and online debugging: [ACE Music Song Generation API](https://platform.acedata.cloud/documents/acemusic-audios).
+
+## Basic Usage
+
+The first call only needs to provide a song description `prompt`. The following uses “a warm folk song about taking the last bus home” as an example, using the default model `acemusic-v1.1` to generate two candidates.
+
+### Set Request Headers and Request Body
+
+The request URL is `POST https://api.acedata.cloud/acemusic/audios`. Set the request headers as follows:
+
+| Request Header             | Value                       | Description                              |
+| --------------- | ----------------------- | ------------------------------- |
+| `Authorization` | `Bearer YOUR_API_TOKEN` | Use the Token obtained in the previous step, retaining the space after `Bearer` |
+| `Content-Type`  | `application/json`      | The request body uses JSON                      |
+| `Accept`        | `application/json`      | Receive JSON results                      |
+
+This request uses the following parameters:
+
+| Parameter       | Value for This Request            | Description                      |
+| -------- | --------------- | ----------------------- |
+| `action` | `generate`      | Generate a new song; this operation is also used when omitted         |
+| `model`  | `acemusic-v1.1` | Default model; `acemusic-v1` can also be selected |
+| `custom` | `false`         | Inspiration mode; the model creates based on the description          |
+| `prompt` | Song description            | Can describe language, theme, style, instruments, and mood       |
+| `async`  | `true`          | Obtain the task ID after submission, then query the result        |
+
+### cURL Example
 
 ```bash
 curl --request POST 'https://api.acedata.cloud/acemusic/audios' \
-  --header 'Authorization: Bearer YOUR_API_KEY' \
+  --header 'Authorization: Bearer YOUR_API_TOKEN' \
   --header 'Content-Type: application/json' \
-  --header 'Idempotency-Key: music-draft-001' \
+  --header 'Accept: application/json' \
   --data '{
     "action": "generate",
     "model": "acemusic-v1.1",
     "custom": false,
-    "prompt": "A Chinese song about hometown, in a warm folk style",
+    "prompt": "一首关于坐末班车回家的中文民谣，木吉他伴奏，温暖而充满希望",
     "async": true
   }'
 ```
 
-## Custom Mode
+### Python Example
 
-Set `custom` to `true` in `generate`, and provide `title`, `lyric`, and `style`. Lyrics may include section labels such as `[Verse]` and `[Chorus]`, or can be created first through the [Lyrics Generation API](https://platform.acedata.cloud/documents/acemusic-lyrics-integration), then edited and submitted.
+First install `requests` (`pip install requests`), save the Token as the environment variable `ACEDATACLOUD_API_TOKEN`, and then run the following code:
+
+```python
+import os
+import requests
+
+response = requests.post(
+    "https://api.acedata.cloud/acemusic/audios",
+    headers={"Authorization": f"Bearer {os.environ['ACEDATACLOUD_API_TOKEN']}"},
+    json={
+        "action": "generate",
+        "model": "acemusic-v1.1",
+        "custom": False,
+        "prompt": "一首关于坐末班车回家的中文民谣，木吉他伴奏，温暖而充满希望",
+        "async": True,
+    },
+    timeout=30,
+)
+response.raise_for_status()
+submitted = response.json()
+print("请保存任务 ID：", submitted["task_id"])
+```
+
+cURL and Python demonstrate two ways of writing the same operation; choose either one. Each new submission creates a song task. Do not repeatedly run the submission code while waiting for results.
+
+### Submission Response
+
+After an asynchronous request is accepted, it returns HTTP `202`. The following is the response from an actual request:
+
+```json
+{
+  "task_id": "ae17781e-b4cd-4ad9-869a-34b8cf96b057",
+  "trace_id": "3102971e-7f6a-473c-8255-ba1e8eace89e",
+  "status": "created"
+}
+```
+
+- `task_id`: The unique ID of this task, which is required for subsequent queries.
+- `trace_id`: The tracking ID provided to support personnel when troubleshooting issues.
+- `status`: The current task status; it is usually `created` when accepted.
+
+At this point, the song is still being processed, and the response does not contain playable audio. Please save the `task_id` returned by your own request and proceed to the next step.
+
+## Query Results and Download Songs
+
+Use the same Token to call `POST /acemusic/tasks`, replacing `id` with the `task_id` you just saved:
+
+```bash
+curl --request POST 'https://api.acedata.cloud/acemusic/tasks' \
+  --header 'Authorization: Bearer YOUR_API_TOKEN' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "action": "retrieve",
+    "id": "YOUR_TASK_ID"
+  }'
+```
+
+The query API directly returns the task record. Song results are in `response.data`, and each element represents one audio track. Below is an excerpt from the actual response of a completed task, retaining only the task status and audio delivery fields:
+```json
+{
+  "id": "ae17781e-b4cd-4ad9-869a-34b8cf96b057",
+  "type": "audios",
+  "state": "succeeded",
+  "response": {
+    "success": true,
+    "status": "succeeded",
+    "data": [
+      {
+        "id": "3966103b-b0e3-4799-aa6d-b90dfc3e30ee",
+        "model": "acemusic-v1.1",
+        "title": "The Warmth of the Last Bus",
+        "state": "succeeded",
+        "duration": 182,
+        "audio_url": "https://cdn.acedata.cloud/assets/examples/fish/5ade0339-5f11-487e-aacc-06a908271706-8e3fcb0e5547.mp3?example=audio-001"
+      },
+      {
+        "id": "51b08e57-a990-4aaf-9418-fe3750a833f1",
+        "model": "acemusic-v1.1",
+        "title": "The Warmth of the Last Bus",
+        "state": "succeeded",
+        "duration": 174,
+        "audio_url": "https://cdn.acedata.cloud/assets/examples/fish/5ade0339-5f11-487e-aacc-06a908271706-8e3fcb0e5547.mp3?example=audio-002"
+      }
+    ]
+  }
+}
+```
+
+| Field                                       | Description |
+| ------------------------------------------- | ----------- |
+| `id` / `state`                              | The task ID and task status of the query record |
+| `response.success` / `response.status`      | Whether the creation result was fully successful, and the final status |
+| `response.data`                             | Track list; there are two tracks when generation, cover, or mashup is fully successful, and one track when upload is successful |
+| `response.data[].id`                        | Platform track ID, which can be used for subsequent covers or mashups |
+| `response.data[].audio_url`                 | Playback and download URL of the delivered audio |
+| `response.data[].image_url`                 | Optional cover URL; its absence does not affect audio playback |
+| `response.data[].title` / `lyric` / `style` | Title, lyrics, and music style |
+| `response.data[].model` / `state`           | The model used for this track and its delivery status; uploaded references may not include `model` |
+| `response.data[].duration`                  | Actual audio duration, in seconds |
+
+When the task is `succeeded`, you can use `audio_url` to preview or download it. When the task is `partial_failed`, completed tracks can still be retained and played, and no generation fee is charged for that group. When the task is `failed`, read `response.error` to investigate the cause. Continue querying for other statuses; an interval of several seconds with gradual backoff is recommended.
+
+After a browser refresh or network interruption, continue querying the original task. A cover not yet returned does not mean the audio is unavailable; if a track does not yet have `audio_url`, delivery is still incomplete. For batch queries, history records, and polling code, see the [Task Query Guide](https://platform.acedata.cloud/documents/acemusic-tasks-integration).
+
+## Generate Songs with Custom Lyrics
+
+If you already have lyrics, change `custom` to `true` and provide `title`, `lyric`, and `style`. The request URL and Token are the same as in the basic example; simply replace the request body with the following content:
 
 ```json
 {
   "action": "generate",
   "model": "acemusic-v1.1",
   "custom": true,
-  "title": "The Way Home",
-  "lyric": "[Verse]\nThe evening breeze blows through familiar streets\n[Chorus]\nThe lights wait for me to come home",
+  "title": "The Road Home",
+  "lyric": "[Verse]\nThe evening breeze blows through familiar streets\n[Chorus]\nThe lights wait for me to return home",
   "style": "Chinese folk, acoustic guitar, warm vocals",
   "async": true
 }
 ```
 
+Lyrics can include section labels such as `[Verse]` and `[Chorus]`. In custom mode, do not pass the inspiration mode `prompt` again. If you do not yet have lyrics, you can first generate a draft through the [Lyrics Generation Guide](https://platform.acedata.cloud/documents/acemusic-lyrics-integration), then edit it and fill the lyrics result's `text` into the song request's `lyric`.
+
 ## Upload Reference Audio
 
-Use the same song endpoint, set `action=upload` and provide a valid HTTPS `audio_url`, with an optional `name`. Reference import currently supports MP3 files only. This operation does not require `model`, `custom`, or lyric fields. It only uploads and prepares the reference, and does not automatically generate another song.
-
-The following is a request example; please replace it with an audio URL that you have the right to use:
+Use the same song interface, set `action` to `upload`, and provide an accessible HTTPS `audio_url`. Currently, only MP3 files are supported, and `name` is an optional display name. In the request body below, the audio URL needs to be replaced with a file you are authorized to use:
 
 ```json
 {
@@ -58,19 +195,20 @@ The following is a request example; please replace it with an audio URL that you
 }
 ```
 
-If you want to use the new reference together with an existing work, you can provide that work's platform `audio_id` when uploading. The `data` after upload completion contains one audio track, whose `id` can be used for covers or mashups. Uploading local files to a file service and importing references through this endpoint are different operations; after a reference is successfully imported, it is charged at the upload price.
+This operation does not require `model`, `custom`, or lyric fields, and it will not automatically generate a new song. After submission, also save the `task_id` and query the task. The successful result's `response.data` contains one track; save its `id` as the reference track ID for subsequent operations.
 
-## Covers and Two-Reference Mashups
+If you want to use a new reference together with an existing work, you can pass that work's platform `audio_id` when uploading. Local files first need to obtain an accessible HTTPS URL; storing the file in a file service and calling this interface to import the reference are two separate steps. After the reference import succeeds, an independent upload fee will be charged.
 
-Both operations use `acemusic-v1.1`, which remains the default model. Provide `lyric` and `style`, with optional `title`; do not provide `custom` or the inspiration `prompt` again. `audio_influence` controls the degree of audio reference, ranging from 1–100, with a default of 60. Style strength, instrumental-only, continuation, track separation, or timbre parameters are currently not accepted.
+## Cover an Existing Song
 
-`cover` uses one platform track `audio_id` that you can access. Obtain the value from `response.data[*].id` of a previously successful task; it is not the generation task's `task_id`. The following ID is a request placeholder to be replaced, not an example result.
+Set `action` to `cover`, use a platform track `audio_id` that you can access, and fill in the new lyrics and music style:
 
 ```json
 {
   "action": "cover",
   "model": "acemusic-v1.1",
   "audio_id": "YOUR_TRACK_ID",
+  "title": "The Road Home · Folk Version",
   "lyric": "[Verse]\nThe evening breeze blows through familiar streets",
   "style": "Warm folk, acoustic guitar",
   "audio_influence": 60,
@@ -78,49 +216,94 @@ Both operations use `acemusic-v1.1`, which remains the default model. Provide `l
 }
 ```
 
-`mashup` uses `mashup_audio_ids`, which currently requires exactly two different platform tracks. References may come from completed upload or song tasks, and must belong to works that you can access and that are compatible with each other; incompatible combinations will be rejected.
+`audio_id` comes from `response.data[].id` of a previously successful task, and is different from the `task_id` of a generation task. Covers use `acemusic-v1.1`; the title is optional, while lyrics and style are required. `audio_influence` controls the degree of audio reference, ranging from 1–100, with a default of 60. Existing platform tracks can be reused directly without paying for upload again.
+
+## Mash Up Two Reference Songs
+
+Set `action` to `mashup`, and fill in exactly two different platform track IDs in `mashup_audio_ids`:
 
 ```json
 {
   "action": "mashup",
   "model": "acemusic-v1.1",
   "mashup_audio_ids": ["YOUR_FIRST_TRACK_ID", "YOUR_SECOND_TRACK_ID"],
-  "lyric": "[Verse]\nTurn two journeys into one song",
-  "style": "Chinese pop, blending the melodies and rhythms of the two references",
+  "lyric": "[Verse]\nWrite two journeys into one song",
+  "style": "Chinese pop, blending the melodies and rhythms of two references",
+  "audio_influence": 60,
   "async": true
 }
 ```
 
-## Common Fields
+The two references can come from completed upload or song tasks, and must be works you can access and that are compatible with each other; incompatible combinations will be rejected. Mashups also use `acemusic-v1.1`, lyrics and style are required, and the title is optional.
+Cover and mashup do not use `custom` or inspiration `prompt`. The current song API does not provide style strength, instrumental, continuation, stem separation, or timbre parameters; do not directly apply fields from other music services.
 
-| Field                          | Description                                                                  |
-| --------------------------- | ------------------------------------------------------------------- |
-| `action`                    | `generate` (default), `upload`, `cover`, or `mashup`                          |
-| `model`                     | Two models are available for `generate`; `cover` / `mashup` use `acemusic-v1.1`; do not provide it for `upload` |
-| `custom` / `prompt`         | Used only by `generate`: provide `prompt` in inspiration mode, and `lyric` / `style` / `title` in custom mode   |
-| `lyric` / `style` / `title` | All are required for custom generation; lyrics and style are required for covers and mashups, while title is optional                                       |
-| `audio_url` / `name`        | HTTPS URL of the MP3 file to import and an optional display name                                         |
-| `audio_id`                  | The reference track for a cover, or the track used to associate an existing reference during upload                                             |
-| `mashup_audio_ids`          | The two different reference tracks for a mashup                                                         |
-| `audio_influence`           | Degree of audio reference for covers / mashups, 1–100, default 60                                          |
-| `async`                     | Defaults to `true`; query the result after receiving the task ID                                             |
-| `callback_url`              | Optional HTTPS completion callback URL; uses asynchronous execution when provided                                          |
+## Parameter Quick Reference
 
-## Tasks and Delivery
+| Parameter                   | Type       | When to Include       | Description                                                |
+| --------------------------- | -------- | --------------------- | ---------------------------------------------------------- |
+| `action`                    | string   | Optional              | `generate` (default), `upload`, `cover`, or `mashup`       |
+| `model`                     | string   | Generate, cover, mashup | Default `acemusic-v1.1`; generation also supports `acemusic-v1`; not included for upload |
+| `custom`                    | boolean  | Generate only         | Default `false` for inspiration mode, `true` for custom lyrics mode |
+| `prompt`                    | string   | Required for inspiration generation | Creative description of the song                           |
+| `title` / `lyric` / `style` | string   | Required for custom generation | Title, lyrics, and style; cover and mashup only require lyrics and style, title is optional |
+| `audio_url` / `name`        | string   | Upload                | HTTPS MP3 URL is required, display name is optional        |
+| `audio_id`                  | string   | Required for cover; optional for upload | Platform audio track ID, which can be used during upload to associate an existing reference |
+| `mashup_audio_ids`          | string[] | Required for mashup   | Exactly two different and compatible platform audio track IDs |
+| `audio_influence`           | number   | Optional for cover, mashup | Reference degree 1–100, default 60                         |
+| `async`                     | boolean  | Optional              | Default `true`; setting it to `false` waits for the result, and still returns `202` with the original task ID if the wait time is exceeded |
+| `callback_url`              | string   | Optional              | HTTPS completion callback URL; execution is asynchronous after it is provided |
 
-Save the returned `task_id` after submission, and query it through the [Tasks API](https://platform.acedata.cloud/documents/acemusic-tasks-integration). Submission acceptance only means that the task has been created. History with `type=audios` includes all four operations. The `data` in the complete result is an audio track list, and each track includes the platform track `id`, `model`, `state`, `title`, `lyric`, `style`, actual `duration` (seconds), `audio_url`, and optional `image_url`.
+Each operation only accepts its corresponding fields; please construct requests according to the separate examples above.
 
-When an upload succeeds, one reference is delivered; generation, covers, or mashups are marked as successful for the entire group only after both audio tracks can be delivered. Partially failed tasks retain completed audio tracks and are marked as `partial_failed`; a missing cover image does not affect playback of existing audio. After browser refreshes or network interruptions, query the original task instead of resubmitting generation or upload.
-The same `Idempotency-Key` with the same request content returns the original task; sending different content with the same key will cause a conflict. If a timeout occurs and the acceptance status is unclear, retain that key and the original task identity, wait for a query or contact support, and do not automatically resend with a new key.
+## Completion Callbacks and Duplicate Requests
 
-## Fees
+### Using Completion Callbacks
 
-Generation, cover, and fusion are charged per complete two-track set, with only one charge per set; tasks that ultimately fail or partially fail are not charged a generation fee. Uploading a reference is an independent billable operation; a successful import of one reference incurs one upload fee, while ultimate failures are not charged. Queries are free; the lyrics assistant is also charged independently, and song operations do not implicitly incur additional lyrics assistant fees.
+If you do not want to continuously poll, you can add your own HTTPS `callback_url` to a song request. After completion, the platform will push the final result to that address. The receiver should deduplicate by `task_id` and return a success status; callbacks may be redelivered.
 
-A complete two-track set costs 0.314816994048 Credits, and a successful reference upload costs 0.0157408497024 Credits. Based on the maximum plan and exchange rate benchmark as of 2026-11-17, these are equivalent to ¥0.20 and ¥0.01 respectively. Actual prices and conversions are subject to the applicable plan, discounts, site pricing, and exchange rates in the console.
+Callback delivery failures will not regenerate, re-import, or incur additional charges. You can still use the task API to retrieve the original task result.
 
-## Callbacks and Errors
+### Using Idempotency Keys
 
-After completion, the final task result is pushed to `callback_url`. The recipient should deduplicate by `task_id` and return a success status; callbacks may be retried. Callback delivery failures will not trigger regeneration, re-importing, or additional charges, and results can still be retrieved using the task API.
+When submitting a request, you can add the `Idempotency-Key` request header to specify a unique key for the same creation. The same key and the same content return the original task, while the same key with different content causes a conflict. Use a new key for each intentionally initiated new creation, and retain the original key and original content for retries of the same submission.
 
-Invalid parameters or incompatible references return 400; authentication or permission issues return 401/403; insufficient balance returns 402; rate limiting returns 429; service failures return 500. Asynchronous execution errors are expressed through the task terminal status and `error`. When troubleshooting, provide `task_id` and `trace_id`.
+Please save the key before sending, and save the `task_id` after acceptance. When a network timeout occurs and the acceptance status is unclear, do not automatically resend with a new key; prioritize querying the original task, and retain the idempotency key to contact support if necessary.
+
+## Pricing Information
+
+| Operation            | Billing Unit                      | When Charged                                                |
+| -------------------- | --------------------------------- | ----------------------------------------------------------- |
+| Generate, cover, mashup | One complete set of two candidates | Charged once upon complete success; no generation fee for final failure or partial failure |
+| Reference upload     | One successfully imported reference | Charged once upon successful import; no charge for failure  |
+| Lyrics generation    | One successful lyrics task        | Charged separately; song operations do not implicitly charge additional lyrics assistant fees |
+| Task query           | Free                              | Requires a valid Token and corresponding API permissions    |
+
+For specific unit prices and balances, please see the [ACE Music Service](https://platform.acedata.cloud/services/acemusic) and the [Console](https://platform.acedata.cloud/console/applications). The console is measured in Credits, and actual amounts are converted based on the plan used, discounts, site pricing, and exchange rates.
+
+## Frequently Asked Questions
+
+### What should I do if authentication or permission errors still appear after obtaining a Token?
+
+Check whether the Token was copied completely, whether there is a space after `Bearer`, and whether the key has been disabled or restricted from accessing the ACE Music API. Do not use an application ID or task ID as a Token.
+
+### The request returns 202; why is there no audio URL?
+
+`202` indicates that the task has been accepted. Use the returned `task_id` to query it, and obtain the audio after completion from `response.data[].audio_url`. Do not repeatedly submit generation requests to wait for the song.
+
+### Does a successful query mean that both songs are complete?
+
+A successful query HTTP response indicates that the task was read successfully; you still need to check the task `state` and the `state` of each audio track. The task is `succeeded` when two candidate tracks are fully delivered; it is `partial_failed` when only part of the final delivery is completed.
+
+### How should I troubleshoot when a call fails?
+
+| HTTP Status Code | Recommended Action                                                   |
+| ---------------- | -------------------------------------------------------------------- |
+| `400`           | Check required fields, parameters corresponding to the operation, reference audio tracks, and compatibility |
+| `401` / `403`   | Check the Token, credential status, and API access permissions      |
+| `402`           | Check the balance and credential quota limits                       |
+| `404`           | Check whether the reference audio track exists and whether the current account can access it |
+| `409`           | The request content corresponding to the same idempotency key is different; verify the original request |
+| `429`           | Reduce the call frequency and retry according to the backoff strategy |
+| `500` / `503`   | Retain the existing task ID, query the task first, then determine the next step |
+
+Asynchronous execution failures will be recorded in the task terminal state and `response.error`. When contacting support, please provide the `task_id` and `trace_id`, and do not provide the full API Token.
