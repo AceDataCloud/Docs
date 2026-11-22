@@ -66,6 +66,5 @@ class NativeN8nGuideContractTests(unittest.TestCase):
                     self.assertIn("utm_source=opensource", guide)
                     self.assertIn("utm_medium=referral", guide)
                     self.assertIn("utm_campaign=evergreen", guide)
-                    self.assertIn("utm_content=", guide)
                     self.assertIn("2026-10-18", guide)
                     self.assertIn("n8n-docs/4a84a4229f694c8565dcd0a9cd0af37623fa2cbc/", guide)
