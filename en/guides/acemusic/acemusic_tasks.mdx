@@ -1,31 +1,219 @@
 ---
-title: "ACE Music Tasks and History API"
+title: "ACE Music Task Query API Integration Guide"
 description: "ACE Music integration guide - Ace Data Cloud"
 ---
 
-Query song, reference upload, and lyrics tasks via `POST /acemusic/tasks`. Queries are free, require valid credentials and this API permission; results can still be read when the balance is zero. Clients cannot access other users' works by passing another user ID.
+The ACE Music Task API is used to query song, reference audio upload, cover, remix, and lyrics generation tasks, and can also paginate through your own creation history. This document explains how to obtain an API Token, query tasks, determine completion status, and read audio and lyrics results.
 
-## Single Task
+Task queries are free, and you can query your own results even with a zero balance; a valid Token and Task API permission are still required.
+
+## Application Process
+
+1. Open the [Ace Data Cloud Console](https://platform.acedata.cloud/console/applications). If you are not logged in yet, please register or log in first.
+2. In the **API Key** section of **General Applications**, select and copy the key; if you do not have a key yet, click **Create API Key**. The API Token and API Key mentioned in this document refer to the same type of calling credential.
+3. You can also manage keys in [Credential Management](https://platform.acedata.cloud/console/credentials). When using an ACE Music dedicated application or a key with API restrictions, please confirm that access to the Task API is allowed; creating songs or lyrics also requires the corresponding creation API permissions.
+4. Replace `YOUR_API_TOKEN` in the examples with the copied Token, and send it through the `Authorization: Bearer YOUR_API_TOKEN` request header.
+
+If you also need to create paid tasks, first confirm the application balance and key usage limit; if the balance is insufficient, you can go to the [Top-up Page](https://platform.acedata.cloud/console/coin). No top-up is required to query existing tasks. Please store the Token on the server side, and do not put it in public webpages or code repositories.
+
+> Complete API parameters and online debugging: [ACE Music Tasks API](https://platform.acedata.cloud/documents/acemusic-tasks).
+
+## Query a Single Task
+
+First submit a creation through the [Song API](https://platform.acedata.cloud/documents/acemusic-audios-integration) or [Lyrics API](https://platform.acedata.cloud/documents/acemusic-lyrics-integration), and save the returned `task_id`. Then send a query to `POST https://api.acedata.cloud/acemusic/tasks`:
 
 ```bash
 curl --request POST 'https://api.acedata.cloud/acemusic/tasks' \
-  --header 'Authorization: Bearer YOUR_API_KEY' \
+  --header 'Accept: application/json' \
+  --header 'Authorization: Bearer YOUR_API_TOKEN' \
   --header 'Content-Type: application/json' \
-  --data '{"action":"retrieve","id":"YOUR_TASK_ID"}'
+  --data '{
+    "action": "retrieve",
+    "id": "YOUR_TASK_ID"
+  }'
 ```
 
-`id` uses the platform `task_id` returned by generation, reference upload, cover, mashup, or lyrics generation. The query returns a task record, including status, public creation parameters, time information, and `response`; the final song results are located in `response.data`. HTTP success only indicates that the query succeeded; the task and status of each song must be checked.
+The `id` here is the **task ID `task_id`** returned by the creation request. The **track ID `response.data[*].id`** used for covers or remixes cannot replace the task ID.
 
-## Batch and History
+### Response Example
 
-- Batch query: `{"action":"retrieve_batch","ids":["TASK_ID_1","TASK_ID_2"]}`. Up to 100 IDs at a time.
-- Paginated history: `{"action":"list","page":1,"page_size":20}`. Page numbers start from 1, with up to 100 entries per page.
-- Batch and history results contain an `items` list and a `count` quantity; each record follows the single-task format.
+The following is an excerpt from a real song task response, with fields such as lyrics, style, cover art, and time omitted.
 
-## Status and Recovery
+```json
+{
+  "id": "ae17781e-b4cd-4ad9-869a-34b8cf96b057",
+  "type": "audios",
+  "state": "succeeded",
+  "status": "succeeded",
+  "trace_id": "3102971e-7f6a-473c-8255-ba1e8eace89e",
+  "response": {
+    "success": true,
+    "task_id": "ae17781e-b4cd-4ad9-869a-34b8cf96b057",
+    "trace_id": "3102971e-7f6a-473c-8255-ba1e8eace89e",
+    "status": "succeeded",
+    "data": [
+      {
+        "id": "3966103b-b0e3-4799-aa6d-b90dfc3e30ee",
+        "model": "acemusic-v1.1",
+        "title": "末班车的温热",
+        "state": "succeeded",
+        "duration": 182,
+        "audio_url": "https://cdn.acedata.cloud/assets/examples/fish/5ade0339-5f11-487e-aacc-06a908271706-8e3fcb0e5547.mp3?example=audio-001"
+      },
+      {
+        "id": "51b08e57-a990-4aaf-9418-fe3750a833f1",
+        "model": "acemusic-v1.1",
+        "title": "末班车的温热",
+        "state": "succeeded",
+        "duration": 174,
+        "audio_url": "https://cdn.acedata.cloud/assets/examples/fish/5ade0339-5f11-487e-aacc-06a908271706-8e3fcb0e5547.mp3?example=audio-002"
+      }
+    ]
+  }
+}
+```
 
-Tasks continue processing through queuing, generation, and delivery stages. `type=audios` includes `generate`, `upload`, `cover`, and `mashup`, with no need to add new task types. There is one reference upon successful upload; when generation, cover, and mashup are fully successful, both candidate songs can be downloaded; final partial failure is `partial_failed`, and completed candidates are still retained. Failure details provide public `error`; retain the platform task ID and Trace ID during troubleshooting.
+### Returned Fields
 
-It is recommended to poll at intervals of several seconds and gradually back off, stopping after reaching a terminal state. Continue querying the original task after an interface refresh or connection interruption. Platform recovery processing will not proactively create a new charged generation; if the acceptance status is unclear, further verification may be needed, and it cannot be determined that resubmission is allowed based on waiting time alone.
+| Field                                       | Description |
+| ------------------------------------------- | ---------------------------------------- |
+| `id`                                        | Platform task ID, corresponding to the `task_id` returned upon submission. |
+| `type`                                      | `audios` is for song or reference audio tasks; `lyrics` is for lyrics tasks. |
+| `state` / `status`                          | The current task status; see the status table below for specific meanings. |
+| `request`                                   | The public creation parameters of the task, such as `action`, `model`, and `prompt`. |
+| `response`                                  | Creation result; final results may not be available before the task is complete. |
+| `response.success`                          | Whether the creation succeeded. It may be `false` during processing, so it should be evaluated together with the task status. |
+| `response.data`                             | The track list for song tasks, or the title and body list for lyrics tasks. |
+| `response.error`                            | Error information when creation fails, including publicly available `code` and `message`. |
+| `trace_id`                                  | Request trace ID; provide it together with the task ID when troubleshooting. |
+| `created_at` / `started_at` / `finished_at` | Creation, start, and completion times, as Unix timestamps in seconds; there is no completion time before completion. |
+| `elapsed`                                   | Time taken after task completion, in seconds. |
 
-Use the `audio_url` of completed tracks in `response.data` for playback, and the download format is subject to the actual returned file. Playback can continue without cover art; tracks without an audio address have not yet been delivered.
+HTTP 200 indicates that the query request was successful. To determine whether a song has already been delivered, you need to continue checking the task status and the track's `state` and `audio_url`.
+
+## Batch Query
+
+Set `action` to `retrieve_batch`, and use `ids` to query 1–100 tasks at once:
+
+```bash
+curl --request POST 'https://api.acedata.cloud/acemusic/tasks' \
+  --header 'Accept: application/json' \
+  --header 'Authorization: Bearer YOUR_API_TOKEN' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "action": "retrieve_batch",
+    "ids": ["YOUR_FIRST_TASK_ID", "YOUR_SECOND_TASK_ID"]
+  }'
+```
+
+The `items` in the result is a list of task records, and `count` is the number of matches. Each record uses the same format as a single task query. Tasks that do not exist or that the current account has no permission to access will not appear in the list; please compare the returned record `id` values with the original request.
+
+## View Creation History
+
+Set `action` to `list` to paginate through tasks under the current account. The following example queries the first page of 20 song or reference audio tasks:
+
+```bash
+curl --request POST 'https://api.acedata.cloud/acemusic/tasks' \
+  --header 'Accept: application/json' \
+  --header 'Authorization: Bearer YOUR_API_TOKEN' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "action": "list",
+    "type": "audios",
+    "page": 1,
+    "page_size": 20
+  }'
+```
+
+Historical results also use `items` and `count`. Change `type` to `lyrics` to query lyrics history; omit `type` to avoid filtering by task type.
+### Request Parameters
+
+| Parameter                           | Type    | Usage Scenario           | Description                                        |
+| ----------------------------------- | ------- | ------------------------ | -------------------------------------------------- |
+| `action`                            | string  | All queries, required    | `retrieve`, `retrieve_batch`, or `list`.           |
+| `id`                                | string  | `retrieve`, required     | A single platform task ID.                         |
+| `ids`                               | array   | `retrieve_batch`, required | 1–100 platform task IDs.                         |
+| `type`                              | string  | `list`, optional         | `audios` or `lyrics`. Song generation, upload, cover, and remix all belong to `audios`. |
+| `page`                              | integer | `list`, optional         | Page number, starting from 1, default is 1.        |
+| `page_size`                         | integer | `list`, optional         | 1–100 items per page, default is 20.               |
+| `limit` / `offset`                  | integer | `list`, optional         | Another pagination method; `limit` is 1–100, `offset` starts from 0, with a maximum of 10,000. |
+| `created_at_min` / `created_at_max` | number  | `list`, optional         | Inclusive lower and upper bounds of creation time, using non-negative Unix timestamps in seconds. |
+
+When paginating, please select one set between `page` / `page_size` or `limit` / `offset`; do not mix them. The offset calculated from the page number also cannot exceed 10,000.
+
+## Task Status and Result Handling
+
+| Status               | Meaning                                      | Recommended Handling                                      |
+| -------------------- | -------------------------------------------- | --------------------------------------------------------- |
+| `created`            | The task has been created.                   | Save the original task ID and continue querying.          |
+| `submitting`         | Creation is being submitted.                 | Continue querying.                                        |
+| `processing`         | Processing is in progress.                   | Continue querying; existing partial results do not mean the entire group is complete. |
+| `storing`            | Audio delivery is being prepared.            | Wait for an available audio URL.                          |
+| `submission_unknown` | The creation acceptance status is pending confirmation. | Keep the original task ID, continue querying or contact support, and do not submit the same creation again. |
+| `succeeded`          | The task has completed successfully.         | Read the results and stop polling.                        |
+| `partial_failed`     | Some audio tracks have finally failed.       | Keep the completed tracks, stop polling, and check the errors. |
+| `failed`             | The task has finally failed.                 | Stop polling and read the error information.              |
+
+For `type=audios`:
+
+- When generation, cover, or remix completes successfully, `response.data` contains two candidates; when reference audio is uploaded successfully, it contains one.
+- The `id` of each audio track can be used for subsequent cover or remix operations; use `audio_url` for playback and download, and see `duration` for the actual duration (in seconds).
+- Partially failed tasks still retain completed audio tracks; the absence of a cover does not affect playback of existing audio, and tracks without an audio URL have not yet been delivered.
+
+For `type=lyrics`, after success, `response.data[*].title` is the title, and `response.data[*].text` is editable lyrics. When integrating with song custom mode, copy `text` to the `lyric` field of the song request. See the [Lyrics Guide](https://platform.acedata.cloud/documents/acemusic-lyrics-integration) for details.
+
+### Python Polling Example
+
+The example below only queries existing tasks and will not create new billable tasks. First install `requests`, configure the Token in the server environment variable `ACEDATACLOUD_API_TOKEN`, and then replace the task ID.
+
+```python
+import os
+import time
+
+import requests
+
+url = "https://api.acedata.cloud/acemusic/tasks"
+headers = {
+    "Authorization": f"Bearer {os.environ['ACEDATACLOUD_API_TOKEN']}",
+    "Accept": "application/json",
+}
+task_id = "YOUR_TASK_ID"
+terminal_states = {"succeeded", "partial_failed", "failed"}
+
+for attempt in range(30):
+    response = requests.post(
+        url,
+        headers=headers,
+        json={"action": "retrieve", "id": task_id},
+        timeout=30,
+    )
+    response.raise_for_status()
+    task = response.json()
+    state = task.get("state") or task.get("status")
+    print("任务状态：", state)
+
+    if state in terminal_states:
+        result = task.get("response") or {}
+        print("创作结果：", result.get("data", []))
+        if state != "succeeded":
+            print("错误信息：", result.get("error"))
+        break
+
+    time.sleep(min(5 + attempt, 15))
+else:
+    print("暂未完成，请保存此任务 ID，稍后继续查询：", task_id)
+```
+
+It is recommended to start polling at intervals of several seconds and gradually back off. After reaching the local waiting limit, keep the original task ID and continue querying later. Interface refreshes, network interruptions, or query failures should not trigger automatic regeneration or re-uploading.
+
+## Common Errors and Fees
+
+| HTTP Status Code | Recommended Handling                                                |
+| ---------------- | ------------------------------------------------------------------- |
+| `400`            | Check the task ID, `action`, pagination parameters, and whether the two pagination methods are mixed. |
+| `401` / `403`    | Check whether the Token is valid, and whether the application and key have task API permissions. |
+| `404`            | The single-task query did not find a record accessible by the current account; check whether an audio track ID was used by mistake, or whether the account was switched. |
+| `429`            | Reduce the query frequency and retry with backoff.                  |
+| `500` / `503`    | Keep the task ID and Trace ID, retry the query later, or contact support. |
+
+The query interface does not accept accessing other users' works through other user IDs. Songs, uploads, and lyric creation are billed separately, while querying existing tasks is free. No generation fee is charged when generation, cover, or remix tasks finally fail or partially fail; no corresponding creation fee is charged when upload and lyric tasks finally fail. For specific pricing, see the [Song Guide](https://platform.acedata.cloud/documents/acemusic-audios-integration) and [Lyrics Guide](https://platform.acedata.cloud/documents/acemusic-lyrics-integration).
