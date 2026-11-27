@@ -1,175 +1,90 @@
 ---
-title: "异步任务模型"
-description: "Ace Data Cloud 长耗时任务（图像/视频/音乐）的轮询与 Webhook 回调机制。"
+title: "异步任务"
+description: "提交一次生成，查询原任务 ID 并取得最终结果。"
 ---
 
-聊天类 API（LLM）是**同步**的——一次请求返回完整结果。但**图像 / 视频 / 音乐**生成都需要数秒到数分钟，走**异步任务**模式。
+支持 `async: true` 的端点可以先返回任务 ID，生成会继续执行。立即保存该 ID，按对应端点的终态规则持续查询，再读取结果或错误。
 
-## 选哪种结果获取方式？
+## 提交一次并查询结果
 
-<CardGroup cols={2}>
-  <Card title="客户端轮询" icon="arrows-rotate">
-    创建任务后，定期 GET 任务状态直到完成。**简单**，适合脚本、CLI、Notebook、测试。
-  </Card>
-  <Card title="Webhook 回调" icon="webhook">
-    提交时传 `callback_url`，完成后我们 POST 结果给你。**节省请求次数**，适合生产服务。
-  </Card>
-</CardGroup>
-
-两种可以**同时用**——传了 `callback_url` 也仍可主动查询任务结果。
-
-## 创建任务
-
-POST 提交后**同步返回** `200`，主体里含 `task_id`：
-
-```json
-{
-  "success": true,
-  "task_id": "27a1128f-14b5-440e-a82d-510c81e6fcd4"
-}
-```
-
-不同接口同步返回的字段不一样：
-
-- **Midjourney / Suno** 等支持「等到出结果再返回」的接口：直接给完整结果（图片 URL 等）
-- **Veo / Sora 等**重型视频接口：只回一个 `task_id`，结果稍后通过轮询或 Webhook 拿
-
-具体看每个 API 的 [API 参考](/zh-Hans/api-reference)。
-
-## 客户端轮询
-
-通用模式（以 Midjourney `/midjourney/tasks` 为例）：
+下面的示例创建一组 ACE Music 歌曲，并查询原任务。先运行 `pip install requests`，再按[快速开始](/zh-Hans/quickstart)设置 `ACEDATACLOUD_API_KEY`。
 
 ```python
-import time, requests
+import os
+import time
+import requests
 
-API = "https://api.acedata.cloud"
-headers = {"Authorization": "Bearer YOUR_API_TOKEN"}
-
-# 1. 创建任务
-r = requests.post(
-    f"{API}/midjourney/imagine",
+headers = {"Authorization": f"Bearer {os.environ['ACEDATACLOUD_API_KEY']}"}
+submitted = requests.post(
+    "https://api.acedata.cloud/acemusic/audios",
     headers=headers,
-    json={"prompt": "A cat sitting on a table"},
-).json()
-task_id = r["task_id"]
+    json={
+        "action": "generate",
+        "model": "acemusic-v1.1",
+        "custom": False,
+        "prompt": "An uplifting acoustic folk song about coming home",
+        "async": True,
+    },
+    timeout=30,
+)
+submitted.raise_for_status()
+task_id = submitted.json()["task_id"]
+print("Save this task ID to resume later:", task_id, flush=True)
 
-# 2. 轮询
-while True:
-    info = requests.post(
-        f"{API}/midjourney/tasks",
+# Keep this ID when resuming. Submit the generation only once.
+for attempt in range(180):
+    response = requests.post(
+        "https://api.acedata.cloud/acemusic/tasks",
         headers=headers,
-        json={"action": "retrieve", "task_id": task_id},
-    ).json()
-
-    # finished_at 字段一旦出现，任务即完成
-    if info.get("finished_at"):
-        print(info["response"])
+        json={"action": "retrieve", "id": task_id},
+        timeout=30,
+    )
+    response.raise_for_status()
+    task = response.json()
+    state = task.get("state") or task.get("status")
+    if state in {"succeeded", "failed", "partial_failed"}:
+        result = task.get("response") or {}
+        if state != "succeeded":
+            raise RuntimeError({"task_id": task_id, "state": state, "error": result.get("error")})
+        for track in result.get("data", []):
+            print(track["audio_url"])
         break
-
     time.sleep(5)
+else:
+    print("Still pending. Resume querying this task ID:", task_id)
+
 ```
 
-**注意**：`/midjourney/tasks` retrieve 返回的是 `{id, request, response, created_at, started_at, finished_at, ...}` 结构——**没有** `status` 字段。判断「是否完成」请看 `finished_at` 是否存在，或 `response` 是否非空。其他服务的任务查询接口字段不完全相同，请参考各自 API 文档。
+`created`、`submitting`、`processing` 和 `submission_unknown` 状态需要继续查询。`partial_failed` 是终态。歌曲生成成功后，`response.data` 包含音轨及其 `audio_url`。列表里的音轨 ID 用于后续翻唱或融合操作。完整字段见 [ACE Music 任务指南](/zh-Hans/guides/acemusic/acemusic_tasks)。
 
-请合理控制轮询频率，避免触发 `too_many_requests`（429）。建议带退避，并优先依据具体接口的「典型耗时」估算等待。
+离开脚本后，可以用已保存的 ID 继续查询。将下面的 `YOUR_TASK_ID` 替换为上方打印的 ID。
+
+```bash
+curl --fail-with-body https://api.acedata.cloud/acemusic/tasks \
+  --header "Authorization: Bearer $ACEDATACLOUD_API_KEY" \
+  --header "Content-Type: application/json" \
+  --data '{"action":"retrieve","id":"YOUR_TASK_ID"}'
+```
+
+## 按端点的任务规则处理
+
+各服务分别定义查询路径、请求字段与终态。调用 Suno、Veo、Seedance 等 API 时，按对应[服务指南](/zh-Hans/services)编写查询。任务查询返回成功 HTTP 状态时，生成仍可能处于处理中。部分操作会直接返回完整结果或流式输出。
+
+查询失败或达到轮询次数后，保留原任务 ID，稍后继续查询。提交时的连接超时可能导致受理结果待确认，重新提交相同生成前，先检查任务历史，或带 `trace_id` 联系支持。
 
 ## Webhook 回调
 
-把 `callback_url` 加到请求 body：
+端点支持时，在原生成请求中传入 `callback_url` 接收最终结果。ACE Music 接受 HTTPS 回调地址，并以异步方式执行该请求。
 
 ```json
 {
-  "prompt": "A cat sitting on a table",
-  "callback_url": "https://your-server.com/midjourney/callback"
+  "action": "generate",
+  "model": "acemusic-v1.1",
+  "custom": false,
+  "prompt": "An uplifting acoustic folk song about coming home",
+  "async": true,
+  "callback_url": "https://your-app.example/callbacks/acemusic"
 }
 ```
 
-任务完成后，我们把结果 POST 到这个地址。回调主体形如：
-
-**成功：**
-
-```json
-{
-  "success": true,
-  "task_id": "...",
-  "trace_id": "...",
-  "image_url": "https://cdn.acedata.cloud/e724d7f13d.png?example=image-001",
-  "...": "...（其余业务字段，与同步成功响应一致）"
-}
-```
-
-**失败：**
-
-```json
-{
-  "success": false,
-  "task_id": "...",
-  "trace_id": "...",
-  "error": {
-    "code": "...",
-    "message": "..."
-  }
-}
-```
-
-### Webhook 服务端要求
-
-- 必须是**公网可达**的 HTTPS（建议）URL
-- 收到回调请**尽快返回 2xx**，业务处理放后台
-- **回调当前不带签名头**。请：
-  - 让 `callback_url` 包含一段不易猜的 token 路径段
-  - 或在服务端用 `task_id` 比对自己之前创建任务时记下的 ID
-
-### 最小示例（Flask）
-
-```python
-from flask import Flask, request
-
-app = Flask(__name__)
-
-# 自己维护的「我提交过的 task_id」集合
-my_tasks = set()
-
-@app.post("/midjourney/callback")
-def callback():
-    payload = request.json
-    task_id = payload.get("task_id")
-
-    if task_id not in my_tasks:
-        return "", 204  # 不是我的任务，忽略
-
-    if payload.get("success"):
-        # 处理成功
-        save_image(payload["image_url"])
-    else:
-        # 处理失败
-        log_error(payload.get("error"))
-
-    return "", 200
-```
-
-## 选型对比
-
-| 维度 | 轮询 | Webhook |
-|---|---|---|
-| 上手 | 简单 | 需要公网 HTTPS endpoint |
-| 实时性 | 取决于轮询间隔 | 最快（任务结束即推送） |
-| 请求消耗 | 每次轮询都是请求 | 0（只接收回调） |
-| 失败恢复 | 客户端崩了重启可继续 | 必须自己处理「错过了回调」 |
-| 适用场景 | 脚本、本地工具、调试 | 生产服务、批量任务 |
-
-## 失败处理
-
-不论用哪种方式，都可能拿到失败结果。失败响应的 `error.code` 与同步错误码一致——见 [响应格式](/zh-Hans/concepts/responses)。**任务失败一般不扣费**；具体策略以服务详情页为准。
-
-## 下一步
-
-<CardGroup cols={2}>
-  <Card title="响应格式" icon="brackets-curly" href="/zh-Hans/concepts/responses">
-    所有错误码与状态码
-  </Card>
-  <Card title="网关与认证" icon="key" href="/zh-Hans/authentication">
-    Token、域名、安全
-  </Card>
-</CardGroup>
+在应用中保存提交返回的任务 ID，按该 ID 幂等处理回调，并及时返回 `2xx`。将回调作为通知，更新应用状态前查询已记录的原任务确认结果。轮询也可以恢复缺失的回调。具体回调内容以所选端点指南为准。
