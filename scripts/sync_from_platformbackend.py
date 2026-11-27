@@ -1197,6 +1197,103 @@ def sync_document_pages(backend_dir: Path, output_dir: Path, previous: Path,
     return results
 
 
+
+# Group public API guides by the operation a developer wants to perform.
+# Paths remain owned by the Backend publication mapping.
+API_GUIDE_GROUPS = {
+    "openai": ("comments", "OpenAI"),
+    "claude": ("comments", "Claude"),
+    "gemini": ("comments", "Gemini"),
+    "deepseek": ("comments", "DeepSeek"),
+    "grok": ("comments", "Grok"),
+    "glm": ("comments", "GLM"),
+    "kimi": ("comments", "Kimi"),
+    "mimo": ("comments", "MiMo"),
+    "aichat": ("comments", "AI Chat"),
+    "nano-banana": ("image", "Nano Banana"),
+    "seedream": ("image", "Seedream"),
+    "flux": ("image", "FLUX"),
+    "qwen-image": ("image", "Qwen Image"),
+    "veo": ("video", "Veo"),
+    "seedance": ("video", "Seedance"),
+    "kling": ("video", "Kling"),
+    "hailuo": ("video", "Hailuo"),
+    "luma": ("video", "Luma"),
+    "wan": ("video", "Wan"),
+    "happyhorse": ("video", "HappyHorse"),
+    "minimax": ("video", "MiniMax"),
+    "maestro": ("video", "Maestro"),
+    "dreamina": ("video", "Dreamina"),
+    "digitalhuman": ("video", "Digital Human"),
+    "suno": ("music", "Suno"),
+    "acemusic": ("music", "ACE Music"),
+    "producer": ("music", "Producer"),
+    "fish": ("music", "Fish Audio"),
+    "serp": ("globe", "Google Search"),
+    "webextrator": ("globe", "WebExtrator"),
+    "shorturl": ("globe", "Short URL"),
+    "localization": ("globe", "Localization"),
+    "turnstile": ("shield-halved", "Turnstile"),
+    "recaptcha": ("shield-halved", "reCAPTCHA"),
+    "hcaptcha": ("shield-halved", "hCaptcha"),
+    "image2text": ("shield-halved", "Image2Text"),
+    "identity": ("id-card", "Identity"),
+}
+
+
+def api_guide_group(page: str) -> tuple[str, str] | None:
+    parts = page.split("/")
+    if len(parts) != 4 or parts[1] != "guides":
+        return None
+    service, operation = parts[2:]
+    group = API_GUIDE_GROUPS.get(service)
+    if service == "openai":
+        if operation.startswith("openai_images") or operation == "openai_tasks":
+            return "image", "GPT Image"
+        if operation.startswith("openai_audio") or operation == "openai_live":
+            return "music", "OpenAI Audio"
+        if operation == "openai_embeddings":
+            return "globe", "Embeddings"
+    if service in {"gemini", "grok"} and operation.endswith(("_videos", "_tasks")):
+        return "video", service.title() + " Video"
+    if service == "flux" and operation == "flux_generate_video":
+        return "video", "FLUX Video"
+    return group
+
+
+def organize_api_guides(root: Path, locale: str, groups: list[dict[str, Any]]) -> None:
+    categorized: dict[tuple[str, str], list[str]] = {}
+    for path in sorted((root / locale / "guides").rglob("*.mdx")):
+        page = str(path.relative_to(root).with_suffix(""))
+        category = api_guide_group(page)
+        if category:
+            categorized.setdefault(category, []).append(page)
+    classified = {page for pages in categorized.values() for page in pages}
+
+    def retain_other_pages(pages: list[Any]) -> list[Any]:
+        result = []
+        for page in pages:
+            if isinstance(page, str):
+                if page not in classified:
+                    result.append(page)
+            elif isinstance(page, dict):
+                page["pages"] = retain_other_pages(page.get("pages", []))
+                if page["pages"] or page.get("openapi"):
+                    result.append(page)
+        return result
+
+    for group in groups:
+        group["pages"] = retain_other_pages(group.get("pages", []))
+    for (icon, name), pages in categorized.items():
+        category = next((group for group in groups if group.get("icon") == icon), None)
+        if category is None:
+            # An unconfigured category stays in More guides until it has a localized label.
+            continue
+        pages.sort(key=lambda page: (page.endswith("_tasks"),
+                                     name == "Fish Audio" and not page.endswith("/fish_tts"), page))
+        category.setdefault("pages", []).append({"group": name, "pages": pages})
+
+
 def refresh_generated_navigation(root: Path, languages: list[str], exact_records: dict[str, Any]) -> None:
     config = load_json(root / "docs.json")
     for language in config["navigation"]["languages"]:
@@ -1244,6 +1341,7 @@ def refresh_generated_navigation(root: Path, languages: list[str], exact_records
             if group.get("group") == "Coding":
                 group["pages"] = [f"{locale}/{r['output_path'].removesuffix('.mdx')}" for r in exact_records.values()
                                   if (root / locale / r["output_path"]).is_file()]
+        organize_api_guides(root, locale, groups)
         known: list[str] = []
         collect_page_paths(tabs, known)
         additional = sorted(str(p.relative_to(root).with_suffix("")) for p in (root / locale / "guides").rglob("*.mdx")

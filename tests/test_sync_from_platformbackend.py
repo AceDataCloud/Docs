@@ -159,6 +159,62 @@ class SyncFromPlatformBackendTests(unittest.TestCase):
 
 
 
+    def test_api_guides_move_to_task_categories_and_new_guides_follow_on_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            pages = [
+                "en/guides/acemusic/acemusic_tasks",
+                "en/guides/acemusic/acemusic_audios",
+                "en/guides/openai/openai_images_generations",
+                "en/guides/openai/openai_embeddings",
+                "en/guides/digitalhuman/digitalhuman_videos",
+            ]
+            for page in pages:
+                path = root / f"{page}.mdx"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Guide", encoding="utf-8")
+            config = {"navigation": {"languages": [{"language": "en", "tabs": [{
+                "tab": "Guides", "groups": [
+                    {"group": "Images", "icon": "image", "pages": []},
+                    {"group": "Video", "icon": "video", "pages": []},
+                    {"group": "Audio", "icon": "music", "pages": []},
+                    {"group": "Data", "icon": "globe", "pages": []},
+                    {"group": "More guides", "pages": pages},
+                ],
+            }]}]}}
+            sync.write_json(root / "docs.json", config)
+            sync.refresh_generated_navigation(root, ["en"], {})
+            first = sync.load_json(root / "docs.json")
+            groups = first["navigation"]["languages"][0]["tabs"][0]["groups"]
+            by_icon = {group.get("icon"): group for group in groups}
+            self.assertEqual(by_icon["music"]["pages"], [{
+                "group": "ACE Music",
+                "pages": [pages[1], pages[0]],
+            }])
+            self.assertEqual(by_icon["image"]["pages"][0]["group"], "GPT Image")
+            self.assertEqual(by_icon["globe"]["pages"][0]["group"], "Embeddings")
+            self.assertEqual(by_icon["video"]["pages"][0]["pages"], [pages[4]])
+            self.assertFalse(any(group["group"] == "More guides" for group in groups))
+            sync.refresh_generated_navigation(root, ["en"], {})
+            self.assertEqual(first, sync.load_json(root / "docs.json"))
+
+    def test_unconfigured_or_unknown_guide_categories_remain_discoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            pages = ["ja/guides/acemusic/acemusic_audios", "ja/guides/new-service/example"]
+            for page in pages:
+                path = root / f"{page}.mdx"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Guide", encoding="utf-8")
+            config = {"navigation": {"languages": [{"language": "ja", "tabs": [{
+                "tab": "Guides", "groups": [{"group": "はじめに", "pages": []}],
+            }]}]}}
+            sync.write_json(root / "docs.json", config)
+            sync.refresh_generated_navigation(root, ["ja"], {})
+            groups = sync.load_json(root / "docs.json")["navigation"]["languages"][0]["tabs"][0]["groups"]
+            self.assertEqual(groups[-1]["group"], sync.MORE_GUIDES["ja"])
+            self.assertEqual(groups[-1]["pages"], pages)
+
     def test_guide_description_uses_output_language(self) -> None:
         self.assertEqual(sync.guide_description("zh-Hans", "Gemini"), "Gemini 集成指南 - Ace Data Cloud")
         self.assertEqual(sync.guide_description("en", "Gemini"), "Gemini integration guide - Ace Data Cloud")
