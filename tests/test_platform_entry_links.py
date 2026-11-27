@@ -25,6 +25,7 @@ class PlatformEntryLinksTests(unittest.TestCase):
                             continue
                         self.assertEqual(parsed.netloc, "platform.acedata.cloud", link)
                         self.assertEqual(parse_qs(parsed.query).get("lang"), [locale], link)
+                        self.assertNotIn(parsed.path, {"/documents/api-key-guide", "/documents/api-quickstart"}, link)
 
     def test_key_instructions_keep_only_the_copy_screen_before_the_request(self):
         for language in ("en", "zh-Hans"):
@@ -34,8 +35,6 @@ class PlatformEntryLinksTests(unittest.TestCase):
             quickstart = (ROOT / language / "quickstart.mdx").read_text()
             self.assertIn(IMAGE_ROOT + "get-api-key-en.png", quickstart)
             self.assertLess(quickstart.index("get-api-key-en.png"), quickstart.index("export ACEDATACLOUD_API_KEY"))
-            self.assertIn("platform.acedata.cloud/documents/api-key-guide?lang=", quickstart)
-
 
     def test_each_chat_first_request_has_a_response_json(self):
         for language in ("en", "zh-Hans"):
