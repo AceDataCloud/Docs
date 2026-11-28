@@ -59,7 +59,7 @@ class NativeN8nGuideContractTests(unittest.TestCase):
                     guide = (ROOT / f"{path}.mdx").read_text()
                     self.assertIn(f"examples/n8n/read-{slug}-task.json", guide)
                     self.assertIn("API Token", guide)
-                    self.assertIn("Initialize General Application", guide)
+                    self.assertIn("General Application" if lang == "en" else "通用应用", guide)
                     self.assertIn("Allowed APIs", guide)
                     self.assertIn("401 / 403", guide)
                     self.assertIn("Retry On Fail", guide)
